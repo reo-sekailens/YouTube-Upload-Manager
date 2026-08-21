@@ -4,6 +4,7 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=111827)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Rust](https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![License: AGPL v3+](https://img.shields.io/badge/License-AGPL%20v3%2B-2f7d32.svg)](LICENSE)
 
 A cross-platform, local-first application for preparing, reviewing, and
 running controlled YouTube upload batches from your own device.
@@ -76,3 +77,7 @@ bypass account restrictions, quotas, copyright rules, or YouTube policies.
 
 Repository-specific contributor guidance is in [AGENTS.md](AGENTS.md). Internal
 project context is maintained in [memory-bank/](memory-bank/README.md).
+
+## License
+
+Licensed under the [GNU Affero General Public License v3.0 or later](LICENSE).

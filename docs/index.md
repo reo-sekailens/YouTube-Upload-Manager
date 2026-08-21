@@ -40,3 +40,8 @@ non-production test channel before relying on uploads or deletion workflows.
 - [Project source and setup](../README.md)
 - [Google OAuth for installed apps](https://developers.google.com/identity/protocols/oauth2/native-app)
 - [YouTube Data API](https://developers.google.com/youtube/v3)
+
+## Open source license
+
+The source code is licensed under the GNU Affero General Public License v3.0
+or later. See the [license](../LICENSE).
