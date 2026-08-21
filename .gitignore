@@ -1,0 +1,43 @@
+# Dependencies and builds
+node_modules/
+dist/
+build/
+coverage/
+src-tauri/target/
+
+# Local inspection, test, and debug artifacts
+.playwright-cli/
+output/
+logs/
+*.log
+test-results/
+playwright-report/
+blob-report/
+allure-results/
+.nyc_output/
+src-tauri/gen/android/
+src-tauri/gen/apple/
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+service-account*.json
+
+# Runtime and upload data
+.tmp/
+tmp/
+uploads/
+media/
+*.mp4
+*.mov
+*.mkv
+*.webm
+
+# Editor and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

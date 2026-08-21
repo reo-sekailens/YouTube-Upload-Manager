@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "YouTube Mass Uploader",
+  "version": "0.1.0",
+  "identifier": "ph.furries.youtube-mass-uploader",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "title": "YouTube Mass Uploader", "width": 1280, "height": 800, "minWidth": 390, "minHeight": 640 }],
+    "security": { "csp": "default-src 'self'; connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com; img-src 'self' asset: https: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" }
+  },
+  "bundle": { "active": true, "targets": "all" }
+}
