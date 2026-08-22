@@ -117,9 +117,6 @@ export function QueueTable({
             <th scope="col">Local identity</th>
             <th scope="col">Transfer</th>
             <th scope="col">Status</th>
-            <th scope="col">
-              <span className="sr-only">Action</span>
-            </th>
           </tr>
         </thead>
         <tbody className="queue-table__body">
@@ -143,17 +140,6 @@ export function QueueTable({
                       {item.fileName} · {formatSize(item.sizeBytes)}
                     </span>
                   </div>
-                </td>
-                <td
-                  className="queue-table__identity"
-                  data-label="Local identity"
-                >
-                  <span className="queue-table__digest-label">BLAKE3</span>
-                  <code className="queue-table__digest">
-                    {item.digest
-                      ? `${item.digest.slice(0, 12)}…`
-                      : "Calculating…"}
-                  </code>
                 </td>
                 <td className="queue-table__visibility" data-label="Visibility">
                   <label className="visibility-select">
@@ -205,6 +191,17 @@ export function QueueTable({
                     </span>
                   ) : null}
                 </td>
+                <td
+                  className="queue-table__identity"
+                  data-label="Local identity"
+                >
+                  <span className="queue-table__digest-label">BLAKE3 identity</span>
+                  <code className="queue-table__digest">
+                    {item.digest
+                      ? `${item.digest.slice(0, 12)}…`
+                      : "Verifying in background"}
+                  </code>
+                </td>
                 <td className="queue-table__transfer" data-label="Transfer">
                   <div className="queue-progress">
                     <div
@@ -230,50 +227,50 @@ export function QueueTable({
                   ) : null}
                 </td>
                 <td className="queue-table__status" data-label="Status">
-                  <StatusPill status={item.status} />
-                </td>
-                <td className="queue-table__action" data-label="Action">
-                  <div className="queue-table__actions">
-                    {item.status === "draft" ? (
-                      <>
-                        <button
-                          className="queue-button"
-                          disabled={busy}
-                          onClick={() => onQueue(item)}
-                          type="button"
-                        >
-                          Add to queue
-                        </button>
-                        <button
-                          className="danger-button queue-button"
-                          disabled={busy}
-                          onClick={() => onCancel(item)}
-                          type="button"
-                        >
-                          Remove
-                        </button>
-                      </>
-                    ) : (
-                      item.status === "uploaded" && !item.deleteSourceAfterUpload && !item.sourceDeleteStatus ? (
-                        <button
-                          className="danger-button queue-button"
-                          disabled={busy}
-                          onClick={() => setPendingSourceDelete(item)}
-                          type="button"
-                        >
-                          Delete original…
-                        </button>
-                      ) : ["queued", "dispatching", "uploading", "needs_reconciliation", "failed", "importing"].includes(item.status) ? (
-                        <button
-                          className="danger-button queue-button"
-                          disabled={busy}
-                          onClick={() => onCancel(item)}
-                          type="button"
-                        >
-                          {item.status === "uploading" ? "Cancel upload" : "Remove"}
-                        </button>
-                      ) : <span className="queue-table__saved">Saved locally</span>
-                    )}
+                  <div className="queue-table__status-stack">
+                    <StatusPill status={item.status} />
+                    <div className="queue-table__actions">
+                      {item.status === "draft" ? (
+                        <>
+                          <button
+                            className="queue-button"
+                            disabled={busy}
+                            onClick={() => onQueue(item)}
+                            type="button"
+                          >
+                            Add to queue
+                          </button>
+                          <button
+                            className="danger-button queue-button"
+                            disabled={busy}
+                            onClick={() => onCancel(item)}
+                            type="button"
+                          >
+                            Remove
+                          </button>
+                        </>
+                      ) : (
+                        item.status === "uploaded" && !item.deleteSourceAfterUpload && !item.sourceDeleteStatus ? (
+                          <button
+                            className="danger-button queue-button"
+                            disabled={busy}
+                            onClick={() => setPendingSourceDelete(item)}
+                            type="button"
+                          >
+                            Delete original…
+                          </button>
+                        ) : ["queued", "dispatching", "uploading", "needs_reconciliation", "failed", "importing"].includes(item.status) ? (
+                          <button
+                            className="danger-button queue-button"
+                            disabled={busy}
+                            onClick={() => onCancel(item)}
+                            type="button"
+                          >
+                            {item.status === "uploading" ? "Cancel upload" : "Remove"}
+                          </button>
+                        ) : <span className="queue-table__saved">Receipt saved on this device</span>
+                      )}
+                    </div>
                   </div>
                 </td>
               </tr>
@@ -281,7 +278,7 @@ export function QueueTable({
           })}
           {matchingItems.length === 0 ? (
             <tr>
-              <td className="queue-table__empty" colSpan={6}>
+              <td className="queue-table__empty" colSpan={5}>
                 No video titles match “{titleQuery.trim()}”.
               </td>
             </tr>

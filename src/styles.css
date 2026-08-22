@@ -631,10 +631,16 @@ input:focus-visible {
   overflow-x: auto;
 }
 .queue-table {
-  border-collapse: collapse;
-  min-width: 780px;
+  border-collapse: separate;
+  border-spacing: 0 0.55rem;
+  min-width: 860px;
   width: 100%;
 }
+.queue-table th:nth-child(1) { width: 25%; }
+.queue-table th:nth-child(2) { width: 22%; }
+.queue-table th:nth-child(3) { width: 15%; }
+.queue-table th:nth-child(4) { width: 24%; }
+.queue-table th:nth-child(5) { width: 14%; }
 .queue-table th {
   border-bottom: 1px solid #dfe4eb;
   color: #7a8799;
@@ -646,14 +652,23 @@ input:focus-visible {
   text-transform: uppercase;
 }
 .queue-table td {
-  border-bottom: 1px solid #e7eaf0;
+  background: #fbfcff;
+  border-bottom: 1px solid #dfe6f2;
+  border-top: 1px solid #dfe6f2;
   color: #4d5a70;
   font-size: 0.81rem;
-  padding: 0.9rem 0.6rem;
+  padding: 0.82rem 0.7rem;
   vertical-align: middle;
 }
-.queue-table tbody tr:last-child td {
-  border-bottom: 0;
+.queue-table td:first-child {
+  border-bottom-left-radius: 0.65rem;
+  border-left: 1px solid #dfe6f2;
+  border-top-left-radius: 0.65rem;
+}
+.queue-table td:last-child {
+  border-bottom-right-radius: 0.65rem;
+  border-right: 1px solid #dfe6f2;
+  border-top-right-radius: 0.65rem;
 }
 .queue-table td strong,
 .queue-table td span {
@@ -671,6 +686,7 @@ input:focus-visible {
 }
 .queue-table__detail {
   margin-top: 0.3rem;
+  max-width: 19rem;
 }
 .queue-progress {
   align-items: center;
@@ -716,8 +732,36 @@ input:focus-visible {
   font-size: 0.67rem;
   margin-top: 0.3rem;
 }
+.queue-table__identity {
+  min-width: 8.7rem;
+}
+.queue-table__digest-label {
+  color: #637796;
+  font-size: 0.64rem;
+  font-weight: 760;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+.queue-table__digest {
+  color: #344f7a;
+  display: inline-block;
+  font-size: 0.72rem;
+  margin-top: 0.25rem;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queue-table__status-stack {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 0.48rem;
+}
 .queue-table__actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 0.42rem;
   justify-content: flex-end;
 }
 .queue-table__cleanup-confirmation {
@@ -766,6 +810,7 @@ input:focus-visible {
 .queue-table__saved {
   color: #7b8799;
   font-size: 0.72rem;
+  line-height: 1.35;
 }
 .status-pill {
   align-items: center;

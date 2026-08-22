@@ -1,5 +1,9 @@
 # Progress
 
+## 2026-08-23 — Folder-monitor metadata handoff
+
+- Bounded desktop FFprobe fallback to 15 seconds and prefer fast container duration metadata before it. This removes an unbounded pre-queue operation that could leave a watched file in `processing`.
+
 ## 2026-08-23 — Fast-start watched uploads with background verification
 
 - Watched-folder uploads now dispatch as soon as their persisted light duplicate gate clears; BLAKE3 verification continues on a separate native worker.

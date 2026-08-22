@@ -28,6 +28,7 @@ Start an eligible watched-folder upload as soon as the persisted light title-ded
 - `npm test` — 35 passed.
 - `npm run build` — passed; Vite retained its pre-existing mixed static/dynamic `@tauri-apps/plugin-opener` chunk warning.
 - `git diff --check` — passed.
+- Unsigned x64 NSIS installer rebuilt: `YouTube Upload Manager_0.1.9_x64-setup.exe` (26,439,491 bytes; SHA-256 `AAEC28A7C03649CEA751AAC9BE8603EC7D5DAB4FDABA94D391C3296CE8D34A25`).
 
 ## Follow-up
 

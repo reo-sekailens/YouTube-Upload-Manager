@@ -12,7 +12,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant, UNIX_EPOCH},
@@ -34,6 +34,7 @@ const DELETION_SUDO_MODE_MINUTES: i64 = 15;
 const DIAGNOSTIC_REPORT_EVENT_LIMIT: i64 = 30;
 const PANIC_MARKER_FILE: &str = "last-panic-marker";
 const HASH_READ_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+const FFPROBE_METADATA_TIMEOUT: Duration = Duration::from_secs(15);
 const WEBVIEW_ERROR_MARKER_FILE: &str = "last-webview-error-marker";
 const APP_RELEASE_CHANNEL: &str = env!("APP_RELEASE_CHANNEL");
 /// YouTube publishes this 256 GB maximum in decimal units.
@@ -3755,7 +3756,7 @@ fn ffprobe_metadata(
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let output = ffprobe_command()
+        let mut child = ffprobe_command()
             .args([
                 "-v",
                 "error",
@@ -3765,8 +3766,23 @@ fn ffprobe_metadata(
                 "json",
             ])
             .arg(path)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
             .ok()?;
+        let deadline = Instant::now() + FFPROBE_METADATA_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+                Ok(None) | Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
+        }
+        let output = child.wait_with_output().ok()?;
         if !output.status.success() || output.stdout.len() > 2 * 1024 * 1024 {
             return None;
         }
@@ -3935,10 +3951,11 @@ fn upload_duration_seconds(path: &Path) -> Option<f64> {
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        ffprobe_metadata(path)
-            .and_then(|(duration, _, _, _, _)| duration)
-            .filter(|duration| duration.is_finite() && *duration >= 0.0)
-            .or(container_duration)
+        container_duration.or_else(|| {
+            ffprobe_metadata(path)
+                .and_then(|(duration, _, _, _, _)| duration)
+                .filter(|duration| duration.is_finite() && *duration >= 0.0)
+        })
     }
 }
 
