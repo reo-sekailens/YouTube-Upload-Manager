@@ -37,6 +37,13 @@ struct AppState {
     database_path: PathBuf,
     media_directory: PathBuf,
     folder_monitor_lock: Arc<Mutex<()>>,
+    oauth_attempts: Arc<Mutex<HashMap<String, OAuthAttemptKind>>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OAuthAttemptKind {
+    Connection,
+    Deletion,
 }
 
 #[derive(Clone)]
@@ -138,7 +145,7 @@ struct PreIngestDuplicateFile {
     size_bytes: u64,
     local_matches: Vec<PreIngestLocalMatch>,
     dropped_duplicate_file_names: Vec<String>,
-    uploaded_title_matches: Vec<String>,
+    uploaded_title_matches: Vec<PreIngestUploadedTitleMatch>,
     error: Option<String>,
 }
 
@@ -148,6 +155,15 @@ struct PreIngestLocalMatch {
     title: String,
     file_name: String,
     status: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreIngestUploadedTitleMatch {
+    title: String,
+    duration: Option<String>,
+    privacy_status: Option<String>,
+    updated_at: String,
 }
 
 #[derive(Serialize)]
@@ -183,6 +199,7 @@ struct ManualUploadDefaults {
 #[serde(rename_all = "camelCase")]
 struct OAuthStart {
     authorization_url: String,
+    attempt_id: String,
 }
 
 #[derive(Deserialize)]
@@ -1773,8 +1790,27 @@ fn await_oauth_callback(
     let deadline = Instant::now() + Duration::from_secs(600);
     let _ = listener.set_nonblocking(true);
     while Instant::now() < deadline {
+        let attempt_active = state
+            .oauth_attempts
+            .lock()
+            .map(|attempts| attempts.contains_key(&expected_state))
+            .unwrap_or(false);
+        if !attempt_active {
+            let _ = oauth_verifier_entry(&expected_state)
+                .and_then(|entry| entry.delete_credential().map_err(user_error));
+            return;
+        }
         match listener.accept() {
             Ok((mut stream, _)) => {
+                let attempt_active = state
+                    .oauth_attempts
+                    .lock()
+                    .map(|attempts| attempts.contains_key(&expected_state))
+                    .unwrap_or(false);
+                if !attempt_active {
+                    respond_to_callback(&mut stream, "Connection was cancelled.");
+                    return;
+                }
                 let mut request = [0_u8; 8192];
                 let bytes = match stream.read(&mut request) {
                     Ok(bytes) => bytes,
@@ -1813,6 +1849,10 @@ fn await_oauth_callback(
                 };
                 let _ = oauth_verifier_entry(&expected_state)
                     .and_then(|entry| entry.delete_credential().map_err(user_error));
+                let _ = state
+                    .oauth_attempts
+                    .lock()
+                    .map(|mut attempts| attempts.remove(&expected_state));
                 match result {
                     Ok(_) => respond_to_callback(&mut stream, "YouTube is connected."),
                     Err(error) => {
@@ -1828,11 +1868,18 @@ fn await_oauth_callback(
             Err(_) => break,
         }
     }
-    let _ = set_connection_detail(
-        &state,
-        "Google authorization timed out. Connect again when ready.",
-        None,
-    );
+    let attempt_active = state
+        .oauth_attempts
+        .lock()
+        .map(|mut attempts| attempts.remove(&expected_state).is_some())
+        .unwrap_or(false);
+    if attempt_active {
+        let _ = set_connection_detail(
+            &state,
+            "Google authorization timed out. Connect again when ready.",
+            None,
+        );
+    }
 }
 
 fn valid_google_client_id(client_id: &str) -> bool {
@@ -2121,6 +2168,32 @@ fn matching_uploaded_titles(
         .collect())
 }
 
+fn matching_uploaded_title_details(
+    connection: &Connection,
+    channel_name: &str,
+    title: &str,
+) -> Result<Vec<PreIngestUploadedTitleMatch>, String> {
+    let mut statement = connection
+        .prepare("SELECT title, duration, privacy_status, updated_at FROM remote_videos WHERE channel_name = ?1 ORDER BY video_id ASC")
+        .map_err(user_error)?;
+    let matches = statement
+        .query_map([channel_name], |row| {
+            Ok(PreIngestUploadedTitleMatch {
+                title: row.get(0)?,
+                duration: row.get(1)?,
+                privacy_status: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?;
+    Ok(matches
+        .into_iter()
+        .filter(|candidate| uploaded_titles_match(title, &candidate.title))
+        .collect())
+}
+
 fn pending_upload_title_duplicates(
     connection: &Connection,
     channel_name: &str,
@@ -2380,7 +2453,7 @@ fn load_preflight_scan(state: &AppState, job_id: &str) -> Result<PreIngestDuplic
             .collect();
         let uploaded_title_matches = channel
             .as_deref()
-            .map(|channel| matching_uploaded_titles(&connection, channel, title))
+            .map(|channel| matching_uploaded_title_details(&connection, channel, title))
             .transpose()?
             .unwrap_or_default();
         let source_is_desktop_path = serde_json::from_str::<FilePath>(locator)
@@ -3852,6 +3925,7 @@ fn initialize_state(app: &AppHandle) -> Result<AppState, String> {
         database_path: root.join("queue.sqlite3"),
         media_directory,
         folder_monitor_lock: Arc::new(Mutex::new(())),
+        oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
     };
     database(&state)?;
     reconcile_queue_impl(&state)?;
@@ -4046,6 +4120,7 @@ fn begin_oauth_connection(
     state: State<'_, AppState>,
     scope: &str,
     deletion_authorized: bool,
+    attempt_kind: OAuthAttemptKind,
 ) -> Result<OAuthStart, String> {
     if !secure_store_available() {
         return Err("This device's secure credential store is unavailable; YouTube tokens cannot be stored safely.".into());
@@ -4062,6 +4137,11 @@ fn begin_oauth_connection(
     oauth_verifier_entry(&state_token)?
         .set_password(&verifier)
         .map_err(user_error)?;
+    state
+        .oauth_attempts
+        .lock()
+        .map_err(user_error)?
+        .insert(state_token.clone(), attempt_kind);
     let authorization_url = url::Url::parse_with_params(
         "https://accounts.google.com/o/oauth2/v2/auth",
         &[
@@ -4084,17 +4164,21 @@ fn begin_oauth_connection(
         None,
     )?;
     let callback_state = state.inner().clone();
+    let callback_state_token = state_token.clone();
     thread::spawn(move || {
         await_oauth_callback(
             callback_state,
             listener,
-            state_token,
+            callback_state_token,
             client_id,
             redirect_uri,
             deletion_authorized,
         )
     });
-    Ok(OAuthStart { authorization_url })
+    Ok(OAuthStart {
+        authorization_url,
+        attempt_id: state_token,
+    })
 }
 
 #[tauri::command]
@@ -4103,6 +4187,7 @@ fn begin_youtube_connection(state: State<'_, AppState>) -> Result<OAuthStart, St
         state,
         "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly",
         false,
+        OAuthAttemptKind::Connection,
     )
 }
 
@@ -4112,7 +4197,41 @@ fn begin_deletion_authorization(state: State<'_, AppState>) -> Result<OAuthStart
         state,
         "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl",
         true,
+        OAuthAttemptKind::Deletion,
     )
+}
+
+#[tauri::command]
+fn cancel_youtube_connection(
+    attempt_id: String,
+    state: State<'_, AppState>,
+) -> Result<ConnectionSettings, String> {
+    let cancelled = {
+        let mut attempts = state.oauth_attempts.lock().map_err(user_error)?;
+        if attempts.get(&attempt_id) == Some(&OAuthAttemptKind::Connection) {
+            attempts.remove(&attempt_id);
+            true
+        } else {
+            false
+        }
+    };
+    if !cancelled {
+        return Err("This Google connection attempt is no longer active.".into());
+    }
+    let _ = oauth_verifier_entry(&attempt_id)
+        .and_then(|entry| entry.delete_credential().map_err(user_error));
+    set_connection_detail(
+        &state,
+        "Google connection cancelled. You can continue using the app without a connected channel.",
+        None,
+    )?;
+    let connection = database(&state)?;
+    audit_global(
+        &connection,
+        "youtube_connection_cancelled",
+        "Operator cancelled the pending Google connection",
+    )?;
+    connection_settings(&connection)
 }
 
 #[tauri::command]
@@ -5067,6 +5186,7 @@ pub fn run() {
             export_portable_archive,
             import_portable_archive,
             begin_youtube_connection,
+            cancel_youtube_connection,
             disconnect_youtube,
             start_queued_uploads,
             sync_channel_inventory,
@@ -5126,6 +5246,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let source = root.join("camera-original.insv");
@@ -5168,6 +5289,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let source = root.join("changed-source.mp4");
@@ -5208,6 +5330,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let connection = database(&state).unwrap();
@@ -5271,6 +5394,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let connection = database(&state).unwrap();
@@ -5330,6 +5454,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let connection = database(&state).unwrap();
@@ -5397,6 +5522,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let connection = database(&state).unwrap();
@@ -5427,6 +5553,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let connection = database(&state).unwrap();
@@ -5464,6 +5591,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: media,
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         let first = root.join("camera-original.insv");
         fs::write(&first, b"proprietary-camera-payload").unwrap();
@@ -5492,6 +5620,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let source = root.join("camera-original.insv");
@@ -5527,6 +5656,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let source = root.join("VID_20251218_195343_00_005.mp4");
@@ -5535,7 +5665,7 @@ mod tests {
         let locator = serde_json::to_string(&FilePath::Path(source.clone())).unwrap();
         let connection = database(&state).unwrap();
         connection.execute(
-            "UPDATE connection_settings SET active_channel = 'Channel A', updated_at = ?1 WHERE singleton = 1",
+            "INSERT INTO connection_settings (singleton, active_channel, updated_at) VALUES (1, 'Channel A', ?1)",
             [timestamp.clone()],
         ).unwrap();
         connection.execute(
@@ -5590,6 +5720,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: media.clone(),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         database(&state).unwrap();
         let source = root.join("duplicate.insv");
@@ -5625,6 +5756,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let connection = database(&state).unwrap();
@@ -5654,6 +5786,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         database(&state).unwrap();
@@ -5676,11 +5809,13 @@ mod tests {
             database_path: root.join("source.sqlite3"),
             media_directory: source_media,
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         let target_state = AppState {
             database_path: root.join("target.sqlite3"),
             media_directory: target_media,
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         let connection = database(&source_state).unwrap();
         connection.execute("INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES ('asset-1', 'Camera clip', 'camera.insv', 'secret-local-path.media', 12, 'digest-1', 'draft', 12, ?1, ?1)", [now()]).unwrap();
@@ -5783,6 +5918,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let connection = database(&state).unwrap();
@@ -5835,6 +5971,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let connection = database(&state).unwrap();
@@ -5867,6 +6004,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: media,
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         let connection = database(&state).unwrap();
         connection
@@ -6087,6 +6225,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
 
@@ -6122,6 +6261,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: media.clone(),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         let connection = database(&state).unwrap();
         let timestamp = now();
@@ -6209,6 +6349,7 @@ mod tests {
             database_path: root.join("queue.sqlite3"),
             media_directory: media.clone(),
             folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         let source = root.join("source.mp4");
         let partial = media.join("resumable.partial");

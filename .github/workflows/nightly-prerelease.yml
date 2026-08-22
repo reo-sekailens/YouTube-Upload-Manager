@@ -1,0 +1,120 @@
+name: Nightly pre-release builds
+
+# Every published artifact is intentionally unsigned and unnotarized.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-prerelease-main
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-latest
+            args: --bundles nsis
+          - name: Linux x64
+            runner: ubuntu-22.04
+            args: --bundles deb,appimage
+          - name: macOS Apple Silicon
+            runner: macos-latest
+            args: --target aarch64-apple-darwin --bundles app,dmg
+          - name: macOS Intel
+            runner: macos-latest
+            args: --target x86_64-apple-darwin --bundles app,dmg
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ startsWith(matrix.runner, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+      - run: npm ci
+      - run: npm run tauri -- build ${{ matrix.args }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ matrix.name }}
+          path: src-tauri/target/**/release/bundle/**
+          if-no-files-found: error
+
+  android:
+    name: Android universal debug APK
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        run: sdkmanager "ndk;27.0.12077973"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+      - run: npm ci
+      - name: Initialize generated Android project
+        run: |
+          export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+          npm run tauri -- android init --ci
+      - name: Build universal installable debug APK
+        run: |
+          export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+          npm run tauri -- android build --debug --apk --ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-Android universal debug APK
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+
+  publish:
+    name: Publish nightly pre-release
+    needs: [build, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Replace nightly release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          gh release delete nightly --yes --cleanup-tag || true
+          gh release create nightly release-assets/** \
+            --target "$SHA" \
+            --title "Nightly build" \
+            --notes "Automated pre-release from commit $SHA." \
+            --prerelease
+
+# The Android test APK is debug-signed by the Android build tooling so devices
+# can install it. It uses no project keystore, certificate, or signing secret.
+# iOS packaging still needs a macOS mobile project and Apple provisioning.

@@ -52,6 +52,11 @@
   deletion Rust requires the exact filename, rejects app-managed media paths,
   re-hashes the source to prevent time-of-check/time-of-use replacement, then
   records a local audit event without the source path.
+- A desktop pre-ingest source can also enter that same guarded local-deletion
+  flow when its normalized filename matches the active channel's persisted
+  YouTube title inventory. Native preparation rechecks the current active
+  channel's match before issuing a token; title evidence never deletes a file
+  automatically.
 - Cross-device transfer uses a versioned gzip JSON archive with only upload
   title/file-name/size/SHA-256 metadata and remote YouTube inventory. Imported
   uploads are explicitly `metadata_only`; they contain no media path and cannot

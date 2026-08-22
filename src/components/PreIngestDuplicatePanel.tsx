@@ -36,6 +36,21 @@ function isLocalDeleteEligible(file: PreIngestDuplicateScan["files"][number]) {
   return Boolean(file.localDeleteToken || file.canDeleteLocalDuplicate);
 }
 
+function formatYoutubeDuration(value?: string) {
+  if (!value) return "Unavailable";
+  const match = value.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
+  if (!match) return value;
+  const [, hours = "0", minutes = "0", seconds = "0"] = match;
+  return (
+    [hours, minutes, seconds]
+      .map((part, index) =>
+        index === 0 ? String(Number(part)) : part.padStart(2, "0"),
+      )
+      .filter((part, index) => index > 0 || part !== "0")
+      .join(":") || "0:00"
+  );
+}
+
 export function PreIngestDuplicatePanel({
   busy,
   fileCount,
@@ -377,14 +392,31 @@ export function PreIngestDuplicatePanel({
                   <section>
                     <span>Desktop source</span>
                     <strong>{file.fileName}</strong>
-                    <p>Local file awaiting ingest</p>
+                    <p>Title: {file.fileName}</p>
+                    <p>Length: unavailable before ingest</p>
                   </section>
                   <section>
                     <span>YouTube library title</span>
-                    {file.uploadedTitleMatches.map((title) => (
-                      <div key={title}>
-                        <strong>{title}</strong>
+                    {file.uploadedTitleMatches.map((match) => (
+                      <div key={`${match.title}-${match.updatedAt}`}>
+                        <strong>{match.title}</strong>
+                        <p>Length: {formatYoutubeDuration(match.duration)}</p>
                         <p>Title evidence only — not an exact file hash</p>
+                        <details>
+                          <summary>Metadata</summary>
+                          <dl>
+                            <div>
+                              <dt>Privacy</dt>
+                              <dd>{match.privacyStatus ?? "Unavailable"}</dd>
+                            </div>
+                            <div>
+                              <dt>Inventory synced</dt>
+                              <dd>
+                                {new Date(match.updatedAt).toLocaleString()}
+                              </dd>
+                            </div>
+                          </dl>
+                        </details>
                       </div>
                     ))}
                   </section>

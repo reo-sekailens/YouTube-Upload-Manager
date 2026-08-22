@@ -313,6 +313,11 @@ export async function beginYoutubeConnection(): Promise<YouTubeConnectionStart> 
   return invoke<YouTubeConnectionStart>("begin_youtube_connection");
 }
 
+/** Cancels a pending ordinary Google connection without removing a saved connection. */
+export async function cancelYoutubeConnection(attemptId: string): Promise<ConnectionSettings> {
+  return invoke<ConnectionSettings>("cancel_youtube_connection", { attemptId });
+}
+
 export async function disconnectYoutube(): Promise<ConnectionSettings> {
   return invoke<ConnectionSettings>("disconnect_youtube");
 }

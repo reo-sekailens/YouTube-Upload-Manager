@@ -12,3 +12,6 @@
 - [ ] Account/channel scope and authorization boundaries were preserved.
 - [ ] YouTube/Google API behavior is documented or covered by tests as appropriate.
 - [ ] The applicable memory-bank task and durable context were updated.
+## Contributor agreement
+
+- [ ] Every commit is signed off (`git commit -s`) under the repository's [Contributor Agreement](../CONTRIBUTOR_AGREEMENT.md).

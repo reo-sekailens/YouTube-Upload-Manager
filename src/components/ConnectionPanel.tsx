@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { beginYoutubeConnection, disconnectYoutube, importDesktopOAuthClient, isTauri, loadConnectionSettings } from "../lib/local";
+import { beginYoutubeConnection, cancelYoutubeConnection, disconnectYoutube, importDesktopOAuthClient, isTauri, loadConnectionSettings } from "../lib/local";
 import type { ConnectionSettings } from "../lib/types";
 
 const disconnected: ConnectionSettings = { connected: false };
@@ -14,6 +14,7 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
   const [settings, setSettings] = useState<ConnectionSettings>(disconnected);
   const [notice, setNotice] = useState("");
   const [connecting, setConnecting] = useState(false);
+  const [connectionAttemptId, setConnectionAttemptId] = useState<string>();
   const [disconnecting, setDisconnecting] = useState(false);
 
   useEffect(() => {
@@ -41,6 +42,7 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
         onConnectionChange?.(loaded);
         setNotice(loaded.detail ?? "Google authorization finished.");
         setConnecting(false);
+        setConnectionAttemptId(undefined);
       } catch {
         // The initial connection action remains the operator-visible status if a poll fails.
       }
@@ -57,7 +59,8 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
     if (!isTauri || !settings.oauthConfigured) return;
     setConnecting(true);
     try {
-      const { authorizationUrl } = await beginYoutubeConnection();
+      const { authorizationUrl, attemptId } = await beginYoutubeConnection();
+      setConnectionAttemptId(attemptId);
       const url = new URL(authorizationUrl);
       if (url.protocol !== "https:") throw new Error("The authorization request must use HTTPS.");
       void openUrl(url.toString()).catch((error: unknown) => {
@@ -67,7 +70,23 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
       setNotice("Google authorization was opened in your browser. Return to this app when consent is complete.");
     } catch (error) {
       setConnecting(false);
+      setConnectionAttemptId(undefined);
       setNotice(error instanceof Error ? error.message : "YouTube authorization could not be started.");
+    }
+  };
+
+  const cancelConnection = async () => {
+    if (!isTauri || !connectionAttemptId) return;
+    try {
+      const saved = await cancelYoutubeConnection(connectionAttemptId);
+      setSettings(saved);
+      onConnectionChange?.(saved);
+      setNotice("Google connection cancelled. You can continue using the app without a connected channel.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The pending Google connection could not be cancelled.");
+    } finally {
+      setConnecting(false);
+      setConnectionAttemptId(undefined);
     }
   };
 
@@ -155,11 +174,13 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
         </p>
       )}
       {notice && <p className="connection-form__notice" role="status">{notice}</p>}
+      {connecting && <p className="connection-form__help">Google is waiting in your browser. You can keep using other parts of the app, or cancel this connection attempt.</p>}
       <footer className="connection-panel__actions">
         {!settings.connected && <button disabled={!isTauri || connecting} onClick={() => void connect()} type="button">
           {connecting ? "Opening Google…" : "Connect YouTube"}
         </button>}
         {!settings.connected && <button className="secondary-button" disabled={!isTauri || connecting} onClick={() => void importDesktopClient()} type="button">Import Desktop OAuth JSON</button>}
+        {!settings.connected && connecting && <button className="secondary-button" onClick={() => void cancelConnection()} type="button">Cancel connection</button>}
         {settings.connected && (
           <button className="danger-button" disabled={!isTauri || disconnecting || connecting} onClick={() => void disconnect()} type="button">
             {disconnecting ? "Disconnecting…" : "Disconnect YouTube"}

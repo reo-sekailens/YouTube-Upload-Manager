@@ -91,7 +91,13 @@ export type PreIngestDuplicateFile = {
   sizeBytes: number;
   localMatches: Array<{ title: string; fileName: string; status: string }>;
   droppedDuplicateFileNames: string[];
-  uploadedTitleMatches: string[];
+  uploadedTitleMatches: Array<{
+    title: string;
+    duration?: string;
+    privacyStatus?: string;
+    /** Timestamp when this inventory record was last synchronized locally. */
+    updatedAt: string;
+  }>;
   error?: string;
 };
 
@@ -148,6 +154,7 @@ export type ConnectionSettings = {
 
 export type YouTubeConnectionStart = {
   authorizationUrl: string;
+  attemptId: string;
 };
 
 /** Safe receipt for a compact cross-device metadata archive. */

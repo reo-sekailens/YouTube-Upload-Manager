@@ -2,7 +2,7 @@
 
 ## Status
 
-blocked
+completed
 
 ## Completed locally
 
@@ -13,9 +13,9 @@ blocked
 - Added a GitHub Wiki link and a concise boundary between local verification and
   live YouTube testing.
 
-## Blocker
+## Resolution
 
-- GitHub CLI authentication for `sekailens` is invalid (`HTTP 401: Bad
-  credentials`) and the Wiki Git endpoint cannot be accessed. Reauthenticate
-  with `gh auth refresh -h github.com`, then create/enable the repository Wiki
-  and publish the prepared operational pages.
+- GitHub CLI access was repaired for `reo-sekailens` and the enabled Wiki was
+  initialized with its Home page.
+- TASK051 published the detailed operator and developer pages directly to the
+  live Wiki. The Wiki Git remote accepted commit `249a780`.
