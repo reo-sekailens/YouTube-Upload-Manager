@@ -22,7 +22,7 @@ use tauri_plugin_fs::{FilePath, FsExt, OpenOptions as FsOpenOptions};
 use uuid::Uuid;
 
 #[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -33,6 +33,7 @@ const UPLOAD_CANCELLED_MARKER: &str = "upload_cancelled_locally";
 const DELETION_SUDO_MODE_MINUTES: i64 = 15;
 const DIAGNOSTIC_REPORT_EVENT_LIMIT: i64 = 30;
 const PANIC_MARKER_FILE: &str = "last-panic-marker";
+const HASH_READ_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const WEBVIEW_ERROR_MARKER_FILE: &str = "last-webview-error-marker";
 const APP_RELEASE_CHANNEL: &str = env!("APP_RELEASE_CHANNEL");
 /// YouTube publishes this 256 GB maximum in decimal units.
@@ -428,6 +429,8 @@ fn database(state: &AppState) -> Result<Connection, String> {
               partial_path TEXT,
               size_bytes INTEGER NOT NULL,
               digest TEXT,
+              background_hash_status TEXT NOT NULL DEFAULT 'not_required',
+              source_modified_key TEXT,
               status TEXT NOT NULL,
               confirmed_bytes INTEGER NOT NULL DEFAULT 0,
               imported_bytes INTEGER NOT NULL DEFAULT 0,
@@ -598,6 +601,8 @@ fn database(state: &AppState) -> Result<Connection, String> {
         "ALTER TABLE upload_items ADD COLUMN duplicate_decision TEXT",
         "ALTER TABLE upload_items ADD COLUMN delete_source_after_upload INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE upload_items ADD COLUMN source_delete_status TEXT",
+        "ALTER TABLE upload_items ADD COLUMN background_hash_status TEXT NOT NULL DEFAULT 'not_required'",
+        "ALTER TABLE upload_items ADD COLUMN source_modified_key TEXT",
         "ALTER TABLE folder_monitor_settings ADD COLUMN delete_source_after_upload INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE preflight_scan_files ADD COLUMN metadata_json TEXT",
         "ALTER TABLE preflight_scan_files ADD COLUMN metadata_status TEXT NOT NULL DEFAULT 'pending'",
@@ -3249,6 +3254,12 @@ fn resume_preflight_scan_jobs(state: AppState, app: AppHandle) {
 /// filesystem layer. On iOS, release the temporary security-scoped picker handle
 /// as soon as this non-ingesting comparison finishes.
 fn digest_preflight_file(app: &AppHandle, path: &FilePath) -> Result<(u64, String), String> {
+    if let Some(source) = path.as_path() {
+        let mut file = open_local_file_for_hash(source)
+            .map_err(|_| "This file could not be opened for local comparison.".to_string())?;
+        return digest_reader(&mut file)
+            .map_err(|_| "This file could not be read completely.".to_string());
+    }
     let mut options = FsOpenOptions::new();
     options.read(true);
     let mut file = app
@@ -3585,13 +3596,24 @@ fn copy_and_digest(source: &Path, destination_partial: &Path) -> Result<(u64, St
 }
 
 fn digest_file(path: &Path) -> Result<(u64, String), String> {
-    let mut input = File::open(path).map_err(user_error)?;
+    let mut input = open_local_file_for_hash(path)?;
     digest_reader(&mut input)
+}
+
+/// Opens a native local source for a one-pass sequential hash. Windows uses the
+/// OS sequential-scan hint so removable media and HDD cache policy favor a
+/// sustained forward read instead of random-access caching.
+fn open_local_file_for_hash(path: &Path) -> Result<File, String> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    options.custom_flags(0x0800_0000); // FILE_FLAG_SEQUENTIAL_SCAN
+    options.open(path).map_err(user_error)
 }
 
 fn digest_reader(reader: &mut impl Read) -> Result<(u64, String), String> {
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; HASH_READ_BUFFER_BYTES];
     let mut bytes_read = 0_u64;
     loop {
         let bytes = reader.read(&mut buffer).map_err(user_error)?;
@@ -4289,7 +4311,7 @@ fn queue_monitored_item(
 }
 
 fn ingest_stable_monitored_file(
-    _state: &AppState,
+    state: &AppState,
     connection: &Connection,
     folder_path: &str,
     channel_name: &str,
@@ -4299,6 +4321,7 @@ fn ingest_stable_monitored_file(
     playlist_id: Option<&str>,
     playlist_title: Option<&str>,
     file: &MonitoredFile,
+    start_deep_verification: bool,
 ) -> Result<MonitorFileOutcome, String> {
     validate_youtube_upload_limits(&file.path, file.size_bytes)?;
     let title = file
@@ -4336,87 +4359,10 @@ fn ingest_stable_monitored_file(
         None,
         Some(&item_id),
     )?;
-    // Watched-folder uploads intentionally retain a reference to the operator's
-    // source file instead of creating a second full-sized managed-media copy.
-    // Hashing is still streamed locally so the persisted duplicate evidence is
-    // identical to an imported asset, and the signature is checked again below
-    // before a queue record is ever created.
-    let (hashed_bytes, digest) = digest_file(&file.path)?;
-    let current_metadata = fs::metadata(&file.path).map_err(user_error)?;
-    let (current_size, current_modified) = monitored_file_signature(&current_metadata)?;
-    if hashed_bytes != file.size_bytes
-        || current_size != file.size_bytes
-        || current_modified != file.modified_key
-    {
-        let changed_file = MonitoredFile {
-            path: file.path.clone(),
-            file_name: file.file_name.clone(),
-            size_bytes: current_size,
-            modified_key: current_modified,
-        };
-        set_observation_state(
-            connection,
-            &changed_file,
-            channel_name,
-            "observed",
-            None,
-            None,
-        )?;
-        return Ok(MonitorFileOutcome {
-            disposition: MonitorDisposition::Waiting,
-            dispatch_item_id: None,
-        });
-    }
-
-    let existing = connection
-        .query_row(
-            "SELECT id, status FROM upload_items WHERE digest = ?1 AND (channel_id = ?2 OR channel_id IS NULL) ORDER BY created_at ASC LIMIT 1",
-            params![digest, channel_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()
-        .map_err(user_error)?;
-    if let Some((existing_id, existing_status)) = existing {
-        let outcome = if matches!(existing_status.as_str(), "draft" | "queued") {
-            queue_monitored_item(
-                connection,
-                &existing_id,
-                folder_path,
-                channel_name,
-                visibility,
-            )?
-        } else {
-            MonitorFileOutcome {
-                disposition: MonitorDisposition::Skipped,
-                dispatch_item_id: None,
-            }
-        };
-        let state_name = if outcome.dispatch_item_id.is_some() {
-            "queued"
-        } else {
-            "duplicate"
-        };
-        set_observation_state(
-            connection,
-            file,
-            channel_name,
-            state_name,
-            Some(&digest),
-            Some(&existing_id),
-        )?;
-        audit(
-            connection,
-            &existing_id,
-            "folder_monitor_digest_reused",
-            "Watched file matched an existing channel-scoped SHA-256 ledger record",
-        )?;
-        return Ok(outcome);
-    }
-
     let timestamp = now();
     connection
         .execute(
-            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, source_path, workspace_path, size_bytes, digest, imported_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?7, 'draft', ?7, ?9, ?10, ?11, ?12, ?13, ?14, ?14, 'Watched source verified in place; keep it unchanged and available until YouTube confirms the upload')",
+            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, source_path, workspace_path, size_bytes, background_hash_status, source_modified_key, imported_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, 'pending', ?8, ?7, 'draft', ?7, ?9, ?10, ?11, ?12, ?13, ?14, ?14, 'Watched source passed light duplicate checks and is ready for upload; deep BLAKE3 verification continues in the background')",
             params![
                 item_id,
                 title,
@@ -4425,7 +4371,7 @@ fn ingest_stable_monitored_file(
                 channel_id,
                 file.path.to_string_lossy(),
                 file.size_bytes as i64,
-                digest,
+                file.modified_key,
                 visibility,
                 made_for_kids as i64,
                 delete_source_after_upload as i64,
@@ -4453,10 +4399,205 @@ fn ingest_stable_monitored_file(
         file,
         channel_name,
         state_name,
-        Some(&digest),
+        None,
         Some(&item_id),
     )?;
+    if start_deep_verification {
+        schedule_watched_hash_verification(state.clone(), item_id.clone());
+    }
     Ok(outcome)
+}
+
+/// A watched-folder file can begin its resumable upload after the inexpensive
+/// title check. This worker independently records the eventual BLAKE3 result
+/// and can stop an unfinished upload if it finds a confirmed local duplicate.
+/// Its durable `pending` / `running` state is recovered on the next launch.
+fn schedule_watched_hash_verification(state: AppState, item_id: String) {
+    thread::spawn(move || {
+        let _ = verify_watched_hash_in_background(&state, &item_id);
+    });
+}
+
+fn fail_watched_hash_verification(
+    state: &AppState,
+    item_id: &str,
+    message: &str,
+) -> Result<(), String> {
+    let connection = database(state)?;
+    connection
+        .execute(
+            "UPDATE upload_items SET background_hash_status = 'failed', status = CASE WHEN status IN ('draft', 'queued', 'dispatching', 'uploading', 'needs_reconciliation') THEN 'cancelled' ELSE status END, detail = ?1, updated_at = ?2 WHERE id = ?3",
+            params![message, now(), item_id],
+        )
+        .map_err(user_error)?;
+    connection
+        .execute(
+            "UPDATE folder_monitor_observations SET state = 'hash_failed', updated_at = ?1 WHERE upload_item_id = ?2 AND state NOT IN ('complete', 'duplicate')",
+            params![now(), item_id],
+        )
+        .map_err(user_error)?;
+    audit(
+        &connection,
+        item_id,
+        "folder_monitor_background_hash_failed",
+        "Deep watched-source verification could not safely complete; any unfinished upload was cancelled",
+    )
+}
+
+fn verify_watched_hash_in_background(state: &AppState, item_id: &str) -> Result<(), String> {
+    let connection = database(state)?;
+    let job = connection
+        .query_row(
+            "SELECT source_path, channel_id, size_bytes, source_modified_key FROM upload_items WHERE id = ?1 AND digest IS NULL AND background_hash_status IN ('pending', 'running')",
+            [item_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(user_error)?;
+    let Some((source_path, channel_id, expected_size, expected_modified_key)) = job else {
+        return Ok(());
+    };
+    let Some(source_path) = source_path else {
+        return fail_watched_hash_verification(
+            state,
+            item_id,
+            "Deep watched-source verification could not find its original source. The unfinished upload was cancelled.",
+        );
+    };
+    if connection
+        .execute(
+            "UPDATE upload_items SET background_hash_status = 'running', updated_at = ?1 WHERE id = ?2 AND background_hash_status IN ('pending', 'running')",
+            params![now(), item_id],
+        )
+        .map_err(user_error)?
+        == 0
+    {
+        return Ok(());
+    }
+    drop(connection);
+
+    let source = Path::new(&source_path);
+    let result = (|| {
+        let (hashed_bytes, digest) = digest_file(source)?;
+        let metadata = fs::metadata(source).map_err(user_error)?;
+        let (current_size, current_modified_key) = monitored_file_signature(&metadata)?;
+        if hashed_bytes != expected_size
+            || current_size != expected_size
+            || expected_modified_key.as_deref() != Some(current_modified_key.as_str())
+        {
+            return Err(
+                "The watched source changed while its deep verification was running.".to_string(),
+            );
+        }
+        Ok(digest)
+    })();
+    let digest = match result {
+        Ok(digest) => digest,
+        Err(error) => {
+            return fail_watched_hash_verification(
+                state,
+                item_id,
+                &format!("Deep watched-source verification stopped safely: {error} The unfinished upload was cancelled."),
+            )
+        }
+    };
+
+    let connection = database(state)?;
+    let duplicate = connection
+        .query_row(
+            "SELECT id FROM upload_items WHERE id != ?1 AND digest = ?2 AND status = 'uploaded' AND (channel_id = ?3 OR channel_id IS NULL) ORDER BY created_at ASC LIMIT 1",
+            params![item_id, digest, channel_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(user_error)?;
+    if let Some(existing_id) = duplicate {
+        let status: String = connection
+            .query_row(
+                "SELECT status FROM upload_items WHERE id = ?1",
+                [item_id],
+                |row| row.get(0),
+            )
+            .map_err(user_error)?;
+        if status == "uploaded" {
+            connection
+                .execute(
+                    "UPDATE upload_items SET digest = ?1, background_hash_status = 'duplicate_after_upload', detail = 'Deep BLAKE3 verification found an exact duplicate after YouTube completed this upload. The remote video was retained for explicit deletion review.', updated_at = ?2 WHERE id = ?3",
+                    params![digest, now(), item_id],
+                )
+                .map_err(user_error)?;
+            audit(
+                &connection,
+                item_id,
+                "folder_monitor_hash_duplicate_after_upload",
+                "An exact local duplicate was found after provider completion; remote deletion remains explicitly reviewed",
+            )?;
+        } else {
+            connection
+                .execute(
+                    "UPDATE upload_items SET digest = ?1, background_hash_status = 'duplicate', status = 'cancelled', detail = 'Deep BLAKE3 verification found an exact already-uploaded duplicate. The unfinished upload was stopped.', updated_at = ?2 WHERE id = ?3 AND status IN ('draft', 'queued', 'dispatching', 'uploading', 'needs_reconciliation')",
+                    params![digest, now(), item_id],
+                )
+                .map_err(user_error)?;
+            connection
+                .execute(
+                    "UPDATE folder_monitor_observations SET state = 'duplicate', digest = ?1, updated_at = ?2 WHERE upload_item_id = ?3",
+                    params![digest, now(), item_id],
+                )
+                .map_err(user_error)?;
+            audit(
+                &connection,
+                item_id,
+                "folder_monitor_hash_duplicate_stopped",
+                &format!("Exact BLAKE3 match against completed local upload {existing_id}; unfinished provider upload cancelled"),
+            )?;
+        }
+        return Ok(());
+    }
+    connection
+        .execute(
+            "UPDATE upload_items SET digest = ?1, background_hash_status = 'complete', detail = CASE WHEN status IN ('draft', 'queued', 'dispatching') THEN 'Deep BLAKE3 verification completed; upload remains ready.' ELSE detail END, updated_at = ?2 WHERE id = ?3",
+            params![digest, now(), item_id],
+        )
+        .map_err(user_error)?;
+    audit(
+        &connection,
+        item_id,
+        "folder_monitor_background_hash_completed",
+        "Deep BLAKE3 verification completed after the light duplicate gate",
+    )
+}
+
+fn resume_watched_hash_verifications(state: AppState) {
+    let item_ids: Result<Vec<String>, String> = (|| {
+        let connection = database(&state)?;
+        connection
+            .execute(
+                "UPDATE upload_items SET background_hash_status = 'pending', updated_at = ?1 WHERE background_hash_status = 'running' AND digest IS NULL",
+                [now()],
+            )
+            .map_err(user_error)?;
+        let item_ids = connection
+            .prepare("SELECT id FROM upload_items WHERE source_path IS NOT NULL AND digest IS NULL AND background_hash_status = 'pending' AND status IN ('draft', 'queued', 'dispatching', 'uploading', 'needs_reconciliation') ORDER BY created_at ASC")
+            .map_err(user_error)?
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(user_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(user_error)?;
+        Ok(item_ids)
+    })();
+    if let Ok(item_ids) = item_ids {
+        for item_id in item_ids {
+            schedule_watched_hash_verification(state.clone(), item_id);
+        }
+    }
 }
 
 fn recover_monitored_file(
@@ -4689,6 +4830,7 @@ fn scan_folder_monitor_locked(
                     settings.playlist_id.as_deref(),
                     settings.playlist_title.as_deref(),
                     &file,
+                    dispatch_uploads,
                 )
             }
             Some((_, _, state_name, item_id))
@@ -5127,6 +5269,7 @@ fn initialize_state(app: &AppHandle) -> Result<AppState, String> {
     database(&state)?;
     reconcile_queue_impl(&state)?;
     reconcile_interrupted_deletions(&state)?;
+    resume_watched_hash_verifications(state.clone());
     resume_preflight_scan_jobs(state.clone(), app.clone());
     Ok(state)
 }
@@ -7990,7 +8133,7 @@ mod tests {
             String,
             String,
             String,
-            String,
+            Option<String>,
         ) = connection
             .query_row(
                 "SELECT id, status, channel_name, channel_id, digest FROM upload_items WHERE file_name = 'first.mp4'",
@@ -8009,7 +8152,22 @@ mod tests {
         assert_eq!(status, "queued");
         assert_eq!(channel_name, "Channel A");
         assert_eq!(channel_id, "channel-a-id");
+        assert!(digest.is_none());
+        verify_watched_hash_in_background(&state, &item_id).unwrap();
+        let digest: String = connection
+            .query_row(
+                "SELECT digest FROM upload_items WHERE id = ?1",
+                [&item_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(!digest.is_empty());
+        connection
+            .execute(
+                "UPDATE upload_items SET status = 'uploaded' WHERE id = ?1",
+                [&item_id],
+            )
+            .unwrap();
 
         let duplicate = watched.join("second.mp4");
         fs::write(&duplicate, b"stable-video-payload").unwrap();
@@ -8021,17 +8179,26 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap(),
-            2
+            3
         );
+        let duplicate_item_id: String = connection
+            .query_row(
+                "SELECT upload_item_id FROM folder_monitor_observations WHERE file_path = ?1",
+                [duplicate.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(duplicate_item_id, item_id);
+        verify_watched_hash_in_background(&state, &duplicate_item_id).unwrap();
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT upload_item_id FROM folder_monitor_observations WHERE file_path = ?1",
-                    [duplicate.to_string_lossy().as_ref()],
+                    "SELECT status FROM upload_items WHERE id = ?1",
+                    [&duplicate_item_id],
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            item_id
+            "cancelled"
         );
 
         connection
@@ -8050,7 +8217,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap(),
-            2
+            3
         );
         assert_eq!(
             connection
@@ -8088,7 +8255,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap(),
-            2
+            3
         );
         connection
             .execute(

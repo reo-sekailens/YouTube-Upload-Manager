@@ -1,5 +1,18 @@
 # Progress
 
+## 2026-08-23 — Fast-start watched uploads with background verification
+
+- Watched-folder uploads now dispatch as soon as their persisted light duplicate gate clears; BLAKE3 verification continues on a separate native worker.
+- Verification state and source signature are persisted. Relaunch restarts pending work; an exact local completed-upload match cancels an unfinished provider transfer, while a post-completion match remains an explicit remote-deletion review.
+
+## 2026-08-23 — Sequential large-file hash I/O
+
+- Desktop deep hashes now open direct native file handles. Windows requests its
+  sequential-scan cache policy and reads 8 MiB blocks, reducing read-call and
+  cache overhead for HDD, USB, and removable-media sources.
+- Mobile URI sources keep the platform-aware document-picker path. Exact BLAKE3
+  evidence and worker isolation remain unchanged.
+
 ## 2026-08-23 — Upload queue clearing
 
 - **Clear upload queue** now cancels every unfinished saved upload and removes
