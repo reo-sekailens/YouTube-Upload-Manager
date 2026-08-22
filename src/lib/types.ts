@@ -69,12 +69,13 @@ export type DuplicateCandidate = {
   decision?: "keep" | "dismiss" | "delete_requested";
 };
 
-/** A newly imported local video whose title matches an uploaded channel video. */
+/** A local upload held for review after native filename-light-dedupe finds a match. */
 export type UploadTitleDuplicate = {
   itemId: string;
   title: string;
-  /** Matching titles from the owner-authorized, freshly synchronized YouTube inventory. */
+  /** Matching titles from the synchronized YouTube library and/or local queue. */
   matchedTitles: string[];
+  matchScope: "youtube" | "local_queue" | "youtube_and_local";
 };
 
 export type UploadTitleDuplicateDecision = "ignore" | "skip";

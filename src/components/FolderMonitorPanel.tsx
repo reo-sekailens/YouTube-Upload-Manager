@@ -7,7 +7,6 @@ import {
   isTauri,
   listYouTubePlaylists,
   loadFolderMonitorOverview,
-  processExistingFolderFiles,
   scanFolderMonitorNow,
 } from "../lib/local";
 import type {
@@ -214,28 +213,6 @@ export function FolderMonitorPanel({
     }
   };
 
-  const processExisting = async () => {
-    if (!isTauri || !settings.enabled) return;
-    setBusy(true);
-    try {
-      const updated = await processExistingFolderFiles();
-      setSettings(updated);
-      lastQueueRefreshAt.current = updated.lastScanAt;
-      void onQueueRefresh().catch(() =>
-        setLoadError("The upload queue could not be refreshed after processing existing files."),
-      );
-      onNotice(updated.detail);
-    } catch (error) {
-      onNotice(
-        error instanceof Error
-          ? error.message
-          : "Existing watched-folder files could not be processed.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const disable = async () => {
     if (!isTauri || !settings.enabled) return;
     setBusy(true);
@@ -297,9 +274,9 @@ export function FolderMonitorPanel({
         <span>
           Enabling this is recurring approval to copy supported files added
           after enabling into the app’s managed workspace and upload them to the
-          bound YouTube channel. Existing files stay in the starting baseline
-          until you explicitly choose to process them. Original files remain
-          unless source cleanup is explicitly enabled below.
+          bound YouTube channel. Every supported direct-child file is accepted
+          automatically once it remains unchanged across two scans. Originals
+          remain unless automatic source cleanup is explicitly enabled below.
         </span>
       </div>
 
@@ -330,7 +307,7 @@ export function FolderMonitorPanel({
               <dt>Original source cleanup</dt>
               <dd>
                 {settings.deleteSourceAfterUpload
-                  ? "Delete after confirmed upload"
+                  ? "Automatic after confirmed upload"
                   : "Keep original"}
               </dd>
             </div>
@@ -441,14 +418,6 @@ export function FolderMonitorPanel({
               {busy ? "Working…" : "Refresh scan"}
             </button>
             <button
-              className="secondary-action"
-              disabled={busy}
-              onClick={() => void processExisting()}
-              type="button"
-            >
-              {busy ? "Working…" : "Process existing files"}
-            </button>
-            <button
               className="danger-button"
               disabled={busy}
               onClick={() => void disable()}
@@ -489,7 +458,7 @@ export function FolderMonitorPanel({
                   }
                   type="checkbox"
                 />{" "}
-                Delete original only after YouTube confirms each upload
+                Automatically delete original only after YouTube confirms each upload
               </label>
               <label className="folder-monitor__visibility">
                 <span>Audience</span>
@@ -561,12 +530,12 @@ export function FolderMonitorPanel({
         </p>
       )}
       <p className="folder-monitor__footnote">
-        The monitor scans direct child files only. Existing files remain a safe
-        baseline until you select Process existing files. Every selected file
-        must still stop changing before it is accepted; a matching local SHA-256
-        record or title in the last synced YouTube library is not uploaded
-        automatically. Source cleanup re-hashes the original after a confirmed
-        upload and never deletes the managed app copy.
+        The monitor scans direct child files only. Every supported file must
+        still stop changing before it is accepted; files over YouTube’s 256 GB
+        or 12-hour limits are rejected before copying. A matching local
+        SHA-256 record or title in the last synced YouTube library is not
+        uploaded automatically. Source cleanup re-hashes the original after a
+        confirmed upload and never deletes the managed app copy.
       </p>
     </section>
   );

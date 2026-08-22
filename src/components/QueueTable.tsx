@@ -8,6 +8,7 @@ interface QueueTableProps {
   onQueue: (item: UploadItem) => void;
   onVisibilityChange: (item: UploadItem, visibility: UploadVisibility) => void;
   onDeleteSourceAfterUploadChange: (item: UploadItem, enabled: boolean) => void;
+  onDeleteUploadedSource: (item: UploadItem, confirmation: string) => void;
 }
 
 function formatSize(bytes: number) {
@@ -34,8 +35,11 @@ export function QueueTable({
   onQueue,
   onVisibilityChange,
   onDeleteSourceAfterUploadChange,
+  onDeleteUploadedSource,
 }: QueueTableProps) {
   const [titleQuery, setTitleQuery] = useState("");
+  const [pendingSourceDelete, setPendingSourceDelete] = useState<UploadItem>();
+  const [sourceDeleteConfirmation, setSourceDeleteConfirmation] = useState("");
 
   if (items.length === 0) {
     return (
@@ -54,6 +58,34 @@ export function QueueTable({
 
   return (
     <div className="queue-table-wrap queue-table-rail">
+      {pendingSourceDelete && (
+        <div className="queue-table__cleanup-confirmation" role="dialog" aria-modal="true" aria-labelledby="source-cleanup-heading">
+          <h3 id="source-cleanup-heading">Delete the original file?</h3>
+          <p>YouTube has confirmed this upload. The managed app copy and the YouTube video will remain.</p>
+          <p>Type <strong>{pendingSourceDelete.fileName}</strong> to permanently delete only its original external file.</p>
+          <input
+            aria-label="Exact original filename"
+            onChange={(event) => setSourceDeleteConfirmation(event.target.value)}
+            placeholder={pendingSourceDelete.fileName}
+            value={sourceDeleteConfirmation}
+          />
+          <div className="queue-table__actions">
+            <button className="secondary-action" onClick={() => { setPendingSourceDelete(undefined); setSourceDeleteConfirmation(""); }} type="button">Keep original</button>
+            <button
+              className="danger-button"
+              disabled={busy || sourceDeleteConfirmation.trim() !== pendingSourceDelete.fileName}
+              onClick={() => {
+                onDeleteUploadedSource(pendingSourceDelete, sourceDeleteConfirmation);
+                setPendingSourceDelete(undefined);
+                setSourceDeleteConfirmation("");
+              }}
+              type="button"
+            >
+              Delete original
+            </button>
+          </div>
+        </div>
+      )}
       <div className="queue-table__search">
         <label htmlFor="upload-queue-title-search">Search video titles</label>
         <div className="queue-table__search-control">
@@ -163,7 +195,7 @@ export function QueueTable({
                       }
                       type="checkbox"
                     />{" "}
-                    Delete original after confirmed upload
+                    Automatically delete original after YouTube confirms upload
                   </label>
                   {item.sourceDeleteStatus ? (
                     <span className="queue-table__visibility-note">
@@ -210,7 +242,18 @@ export function QueueTable({
                         Add to queue
                       </button>
                     ) : (
-                      <span className="queue-table__saved">Saved locally</span>
+                      item.status === "uploaded" && !item.deleteSourceAfterUpload && !item.sourceDeleteStatus ? (
+                        <button
+                          className="danger-button queue-button"
+                          disabled={busy}
+                          onClick={() => setPendingSourceDelete(item)}
+                          type="button"
+                        >
+                          Delete original…
+                        </button>
+                      ) : (
+                        <span className="queue-table__saved">Saved locally</span>
+                      )
                     )}
                   </div>
                 </td>

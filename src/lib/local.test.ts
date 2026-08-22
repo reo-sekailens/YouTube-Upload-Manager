@@ -234,6 +234,17 @@ describe("manual upload source cleanup command", () => {
       deleteSourceAfterUpload: true,
     });
   });
+
+  it("requests original-source deletion only through the completed-upload boundary", async () => {
+    const { deleteUploadedSource } = await import("./local");
+
+    await deleteUploadedSource("completed-item", "original.mp4");
+
+    expect(invoke).toHaveBeenCalledWith("delete_uploaded_source", {
+      id: "completed-item",
+      confirmation: "original.mp4",
+    });
+  });
 });
 
 describe("manual upload intake settings", () => {

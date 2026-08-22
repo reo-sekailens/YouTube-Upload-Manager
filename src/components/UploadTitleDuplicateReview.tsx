@@ -34,6 +34,11 @@ export function UploadTitleDuplicateReview({ candidates, busy = false, onResolve
     void onResolve(targetIds, decision);
   };
   const isIgnore = decision === "ignore";
+  const matchScopeLabel = activeCandidate.matchScope === "youtube"
+    ? "YouTube library"
+    : activeCandidate.matchScope === "local_queue"
+      ? "Local batch or queue"
+      : "YouTube library and local queue";
   const submitLabel = busy
     ? "Saving…"
     : applyToAll
@@ -45,16 +50,16 @@ export function UploadTitleDuplicateReview({ candidates, busy = false, onResolve
       <header className="section-heading upload-title-duplicate-review__heading">
         <div>
           <p className="eyebrow">UPLOAD CHECK REQUIRED</p>
-          <h2 id="upload-title-duplicate-heading">A title already exists on YouTube</h2>
-          <p className="section-copy">This file has not been uploaded. Choose whether to upload it anyway or skip it before the queue continues.</p>
+          <h2 id="upload-title-duplicate-heading">A possible duplicate needs review</h2>
+          <p className="section-copy">Native light dedupe found a normalized filename/title match before upload. This file has not been uploaded.</p>
         </div>
         {candidates.length > 1 && <span className="item-count">{activeIndex + 1} of {candidates.length}</span>}
       </header>
 
       <div className="upload-title-duplicate-review__match">
-        <span className="match-badge match-badge--possible">Uploaded-title match</span>
+        <span className="match-badge match-badge--possible">Light duplicate match</span>
         <h3>{activeCandidate.title}</h3>
-        <p>Matches already uploaded title{activeCandidate.matchedTitles.length === 1 ? "" : "s"}:</p>
+        <p>Matching title{activeCandidate.matchedTitles.length === 1 ? "" : "s"} in {matchScopeLabel}:</p>
         <ul>{activeCandidate.matchedTitles.map((title, index) => <li key={`${title}-${index}`}>{title}</li>)}</ul>
       </div>
 

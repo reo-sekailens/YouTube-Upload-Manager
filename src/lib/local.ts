@@ -311,6 +311,14 @@ export async function setItemDeleteSourceAfterUpload(
   });
 }
 
+/** Deletes a verified external original only after a completed YouTube upload. */
+export async function deleteUploadedSource(
+  id: string,
+  confirmation: string,
+): Promise<void> {
+  return invoke("delete_uploaded_source", { id, confirmation });
+}
+
 export async function reconcileQueue(): Promise<UploadItem[]> {
   return invoke<UploadItem[]>("reconcile_queue");
 }

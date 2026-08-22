@@ -720,6 +720,37 @@ input:focus-visible {
   display: flex;
   justify-content: flex-end;
 }
+.queue-table__cleanup-confirmation {
+  background: #fff;
+  border: 1px solid #edc7c3;
+  border-radius: 0.58rem;
+  box-shadow: 0 12px 32px rgba(35, 49, 72, 0.16);
+  display: grid;
+  gap: 0.55rem;
+  margin: 0 0 0.8rem;
+  max-width: 36rem;
+  padding: 0.85rem;
+}
+.queue-table__cleanup-confirmation h3 {
+  color: #8d3932;
+  font-size: 0.95rem;
+  margin: 0;
+}
+.queue-table__cleanup-confirmation p {
+  color: #5f6c80;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  margin: 0;
+}
+.queue-table__cleanup-confirmation input {
+  border: 1px solid #ccd6e4;
+  border-radius: 0.42rem;
+  font: inherit;
+  padding: 0.55rem 0.6rem;
+}
+.queue-table__cleanup-confirmation .queue-table__actions {
+  gap: 0.45rem;
+}
 .queue-table__empty,
 .duplicate-review__empty {
   color: #758196;

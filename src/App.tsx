@@ -5,6 +5,7 @@ import {
   cancelPreflightDuplicateScan,
   checkUploadTitleDuplicates,
   clearUploadQueue,
+  deleteUploadedSource,
   exitApplication,
   deletePreflightDuplicateFile,
   ignoreDuplicateCandidate,
@@ -417,11 +418,11 @@ export default function App() {
         await refresh();
         const importNotice =
           duplicateIds.size > 0
-            ? `${importedItems.length} video${importedItems.length === 1 ? "" : "s"} imported locally. ${duplicateIds.size} matching title${duplicateIds.size === 1 ? " needs" : "s need"} your decision.`
+            ? `${importedItems.length} video${importedItems.length === 1 ? "" : "s"} imported locally. ${duplicateIds.size} light duplicate match${duplicateIds.size === 1 ? " needs" : "es need"} your decision.`
             : `${importedItems.length} video${importedItems.length === 1 ? "" : "s"} imported and queued locally.`;
         const failuresNotice =
           failures.length > 0 || queueFailures.length > 0
-            ? ` ${failures.length + queueFailures.length} item${failures.length + queueFailures.length === 1 ? "" : "s"} need attention.`
+            ? ` ${failures.length + queueFailures.length} item${failures.length + queueFailures.length === 1 ? "" : "s"} need attention.${failures[0] ? ` ${failures[0]}` : ""}`
             : "";
         setNotice(`${importNotice} ${startNotice}${failuresNotice}`.trim());
       } finally {
@@ -534,7 +535,7 @@ export default function App() {
       if (duplicates.length > 0) {
         await refresh();
         setNotice(
-          "A matching uploaded title was found. Choose Upload anyway or Skip duplicate below.",
+          "A light duplicate match was found. Choose Upload anyway or Skip duplicate below.",
         );
         return;
       }
@@ -644,6 +645,28 @@ export default function App() {
         error instanceof Error
           ? error.message
           : "The source cleanup choice could not be saved.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteOriginalAfterUpload = async (
+    item: UploadItem,
+    confirmation: string,
+  ) => {
+    setBusy(true);
+    try {
+      await deleteUploadedSource(item.id, confirmation);
+      await refresh();
+      setNotice(
+        `Original source cleanup completed for “${item.fileName}”. The managed app copy and YouTube video were retained.`,
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "The original source could not be deleted.",
       );
     } finally {
       setBusy(false);
@@ -999,7 +1022,9 @@ export default function App() {
                   <strong>Drag and drop videos here</strong>
                   <p>
                     They are copied into this device’s managed workspace before
-                    any upload. You can also choose multiple files.
+                    any upload. Files over YouTube’s 256 GB or 12-hour limits
+                    are stopped before copying. You can also choose multiple
+                    files.
                   </p>
                 </div>
                 <button
@@ -1020,6 +1045,9 @@ export default function App() {
                 }
                 onDeleteSourceAfterUploadChange={(item, enabled) =>
                   void changeSourceCleanup(item, enabled)
+                }
+                onDeleteUploadedSource={(item, confirmation) =>
+                  void deleteOriginalAfterUpload(item, confirmation)
                 }
               />
             </section>
