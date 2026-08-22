@@ -2,7 +2,7 @@
 
 ## Purpose
 
-YouTube Mass Uploader is intended to provide a cross-platform, local-first native application for repeatable, controlled uploads and safe channel-library maintenance.
+YouTube Upload Manager is intended to provide a cross-platform, local-first native application for repeatable, controlled uploads and safe channel-library maintenance.
 
 ## Initial product outcome
 

@@ -2,9 +2,14 @@
 
 **Effective date:** 22 August 2026
 
-YouTube Mass Uploader is a local-first application for preparing, uploading,
+YouTube Upload Manager is a local-first application for preparing, uploading,
 reviewing, and managing videos in a YouTube channel you authorize. This policy
 explains what the app handles and where that information goes.
+
+YouTube Upload Manager is an independent project and is not affiliated with,
+endorsed by, sponsored by, or provided by Google or YouTube. Google and
+YouTube are trademarks of Google LLC; all other names and marks belong to their
+respective owners.
 
 ## Information stored on your device
 

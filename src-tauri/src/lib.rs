@@ -1,26 +1,42 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::Utc;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use keyring::v1::Entry as CredentialEntry;
-use rusqlite::{params, Connection};
-use serde::Serialize;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
+
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
+// OAuth client IDs identify an installed application; they are public identifiers,
+// not credentials. Secrets and user tokens never belong in this source tree.
+const BUILTIN_OAUTH_CLIENT_ID: &str =
+    "1008372723796-t6isv5s6nb8h77q38tsg653i2oi6obl8.apps.googleusercontent.com";
+const FOLDER_MONITOR_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const QUOTA_RESUME_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const DAILY_UPLOAD_LIMIT_MARKER: &str = "youtube_daily_upload_limit";
+const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &[
+    "3g2", "3gp", "avi", "flv", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "webm", "wmv",
+];
 
 #[derive(Clone)]
 struct AppState {
     database_path: PathBuf,
     media_directory: PathBuf,
+    folder_monitor_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Serialize)]
@@ -36,7 +52,28 @@ struct UploadItem {
     total_bytes: u64,
     video_id: Option<String>,
     detail: Option<String>,
+    visibility: String,
+    made_for_kids: bool,
+    playlist_id: Option<String>,
+    playlist_title: Option<String>,
+    upload_started_at: Option<String>,
+    transfer_bytes_per_second: Option<f64>,
     updated_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManualUploadSettings {
+    made_for_kids: bool,
+    visibility: String,
+    playlist_id: Option<String>,
+    playlist_title: Option<String>,
+}
+
+#[derive(Serialize)]
+struct YouTubePlaylist {
+    id: String,
+    title: String,
 }
 
 #[derive(Serialize)]
@@ -46,6 +83,8 @@ struct DuplicateCandidate {
     confidence: String,
     left_title: String,
     right_title: String,
+    left_video_id: Option<String>,
+    right_video_id: Option<String>,
     evidence: String,
     decision: Option<String>,
 }
@@ -71,8 +110,26 @@ struct ConnectionSettings {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ManualUploadDefaults {
+    made_for_kids: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct OAuthStart {
     authorization_url: String,
+}
+
+#[derive(Deserialize)]
+struct DesktopOAuthClientFile {
+    installed: DesktopOAuthClient,
+}
+
+#[derive(Deserialize)]
+struct DesktopOAuthClient {
+    client_id: String,
+    #[serde(default)]
+    client_secret: String,
 }
 
 #[derive(Serialize)]
@@ -96,6 +153,19 @@ struct DeletionRequest {
     updated_at: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderMonitorSettings {
+    enabled: bool,
+    folder_path: Option<String>,
+    channel_name: Option<String>,
+    visibility: String,
+    status: String,
+    detail: String,
+    last_scan_at: Option<String>,
+    last_file_name: Option<String>,
+}
+
 fn user_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -110,6 +180,7 @@ fn database(state: &AppState) -> Result<Connection, String> {
               id TEXT PRIMARY KEY NOT NULL,
               title TEXT NOT NULL,
               file_name TEXT NOT NULL,
+              channel_name TEXT,
               source_path TEXT,
               workspace_path TEXT NOT NULL,
               partial_path TEXT,
@@ -122,6 +193,12 @@ fn database(state: &AppState) -> Result<Connection, String> {
               resumable_session_uri TEXT,
               video_id TEXT,
               detail TEXT,
+              visibility TEXT NOT NULL DEFAULT 'private',
+              made_for_kids INTEGER NOT NULL DEFAULT 0,
+              playlist_id TEXT,
+              playlist_title TEXT,
+              upload_started_at TEXT,
+              transfer_bytes_per_second REAL,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -132,6 +209,8 @@ fn database(state: &AppState) -> Result<Connection, String> {
               active_channel TEXT,
               connection_detail TEXT,
               deletion_authorized INTEGER NOT NULL DEFAULT 0,
+              manual_made_for_kids_default INTEGER NOT NULL DEFAULT 0,
+              upload_quota_pause_until TEXT,
               updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS remote_videos (
@@ -154,11 +233,38 @@ fn database(state: &AppState) -> Result<Connection, String> {
             CREATE TABLE IF NOT EXISTS audit_events (
               id TEXT PRIMARY KEY NOT NULL,
               item_id TEXT,
+              channel_name TEXT,
               kind TEXT NOT NULL,
               detail TEXT,
               created_at TEXT NOT NULL,
               FOREIGN KEY(item_id) REFERENCES upload_items(id)
             );
+            CREATE TABLE IF NOT EXISTS folder_monitor_settings (
+              singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+              enabled INTEGER NOT NULL DEFAULT 0,
+              folder_path TEXT,
+              channel_name TEXT,
+              visibility TEXT NOT NULL DEFAULT 'private',
+              status TEXT NOT NULL DEFAULT 'disabled',
+              detail TEXT NOT NULL DEFAULT 'Folder monitoring is disabled.',
+              last_scan_at TEXT,
+              last_file_name TEXT,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS folder_monitor_observations (
+              channel_name TEXT NOT NULL,
+              file_path TEXT NOT NULL,
+              size_bytes INTEGER NOT NULL,
+              modified_key TEXT NOT NULL,
+              state TEXT NOT NULL,
+              digest TEXT,
+              upload_item_id TEXT,
+              first_seen_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(channel_name, file_path)
+            );
+            CREATE INDEX IF NOT EXISTS folder_monitor_observation_state_idx
+              ON folder_monitor_observations(channel_name, state);
             ",
         )
         .map_err(user_error)?;
@@ -168,6 +274,17 @@ fn database(state: &AppState) -> Result<Connection, String> {
         "ALTER TABLE upload_items ADD COLUMN imported_bytes INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE connection_settings ADD COLUMN connection_detail TEXT",
         "ALTER TABLE connection_settings ADD COLUMN deletion_authorized INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE connection_settings ADD COLUMN manual_made_for_kids_default INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE connection_settings ADD COLUMN upload_quota_pause_until TEXT",
+        "ALTER TABLE upload_items ADD COLUMN channel_name TEXT",
+        "ALTER TABLE audit_events ADD COLUMN channel_name TEXT",
+        "ALTER TABLE upload_items ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
+        "ALTER TABLE upload_items ADD COLUMN upload_started_at TEXT",
+        "ALTER TABLE upload_items ADD COLUMN transfer_bytes_per_second REAL",
+        "ALTER TABLE folder_monitor_settings ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
+        "ALTER TABLE upload_items ADD COLUMN made_for_kids INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE upload_items ADD COLUMN playlist_id TEXT",
+        "ALTER TABLE upload_items ADD COLUMN playlist_title TEXT",
     ] {
         let _ = connection.execute(migration, []);
     }
@@ -178,14 +295,102 @@ fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
+fn active_upload_quota_pause(connection: &Connection) -> Result<Option<String>, String> {
+    let pause_until = connection
+        .query_row(
+            "SELECT upload_quota_pause_until FROM connection_settings WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(user_error)?
+        .flatten();
+    let Some(pause_until) = pause_until else {
+        return Ok(None);
+    };
+    let parsed = DateTime::parse_from_rfc3339(&pause_until)
+        .map_err(|_| "The saved YouTube upload-limit pause is invalid.".to_string())?
+        .with_timezone(&Utc);
+    if parsed > Utc::now() {
+        return Ok(Some(pause_until));
+    }
+    connection
+        .execute(
+            "UPDATE connection_settings SET upload_quota_pause_until = NULL, updated_at = ?1 WHERE singleton = 1",
+            params![now()],
+        )
+        .map_err(user_error)?;
+    audit_global(
+        connection,
+        "youtube_daily_upload_limit_elapsed",
+        "The saved 24-hour YouTube upload-limit pause elapsed; queued uploads may resume.",
+    )?;
+    Ok(None)
+}
+
+fn quota_pause_detail(pause_until: &str) -> String {
+    format!(
+        "YouTube's daily upload limit was reached. This item stays safely queued and will resume after {pause_until}."
+    )
+}
+
+fn record_upload_quota_pause(state: &AppState, item_id: &str) -> Result<String, String> {
+    let pause_until = (Utc::now() + ChronoDuration::hours(24)).to_rfc3339();
+    let detail = quota_pause_detail(&pause_until);
+    let connection = database(state)?;
+    connection
+        .execute(
+            "INSERT INTO connection_settings (singleton, upload_quota_pause_until, updated_at) VALUES (1, ?1, ?2) ON CONFLICT(singleton) DO UPDATE SET upload_quota_pause_until = excluded.upload_quota_pause_until, updated_at = excluded.updated_at",
+            params![pause_until, now()],
+        )
+        .map_err(user_error)?;
+    connection
+        .execute(
+            "UPDATE upload_items SET status = 'queued', detail = ?1, updated_at = ?2 WHERE id = ?3",
+            params![detail, now(), item_id],
+        )
+        .map_err(user_error)?;
+    audit(
+        &connection,
+        item_id,
+        "youtube_daily_upload_limit_paused",
+        "YouTube reported a daily upload limit; this device paused queued uploads for 24 hours.",
+    )?;
+    Ok(pause_until)
+}
+
+fn defer_item_for_active_quota_pause(
+    state: &AppState,
+    item_id: &str,
+    pause_until: &str,
+) -> Result<(), String> {
+    let confirmed_bytes = database(state)?
+        .query_row(
+            "SELECT confirmed_bytes FROM upload_items WHERE id = ?1",
+            [item_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(user_error)? as u64;
+    mark_upload_state(
+        state,
+        item_id,
+        "queued",
+        confirmed_bytes,
+        &quota_pause_detail(pause_until),
+        None,
+    )
+}
+
 fn connection_settings(connection: &Connection) -> Result<ConnectionSettings, String> {
     connection
         .query_row(
             "SELECT oauth_client_id, active_channel, connection_detail, deletion_authorized FROM connection_settings WHERE singleton = 1",
             [],
             |row| {
+                let configured_client_id: Option<String> = row.get(0)?;
                 Ok(ConnectionSettings {
-                    client_id: row.get(0)?,
+                    client_id: configured_client_id
+                        .or_else(|| Some(BUILTIN_OAUTH_CLIENT_ID.to_string())),
                     active_channel: row.get(1)?,
                     connected: row.get::<_, Option<String>>(1)?.is_some(),
                     secure_store_available: secure_store_available(),
@@ -196,7 +401,7 @@ fn connection_settings(connection: &Connection) -> Result<ConnectionSettings, St
         )
         .or_else(|error| match error {
             rusqlite::Error::QueryReturnedNoRows => Ok(ConnectionSettings {
-                client_id: None,
+                client_id: Some(BUILTIN_OAUTH_CLIENT_ID.to_string()),
                 active_channel: None,
                 connected: false,
                 secure_store_available: secure_store_available(),
@@ -215,6 +420,38 @@ fn secure_store_available() -> bool {
 fn refresh_token_entry() -> Result<CredentialEntry, String> {
     CredentialEntry::new("ph.furries.youtube-mass-uploader", "youtube-refresh-token")
         .map_err(user_error)
+}
+
+fn oauth_client_secret_entry() -> Result<CredentialEntry, String> {
+    CredentialEntry::new(
+        "ph.furries.youtube-mass-uploader",
+        "youtube-oauth-client-secret",
+    )
+    .map_err(user_error)
+}
+
+fn configured_oauth_client_secret() -> Result<Option<String>, String> {
+    match oauth_client_secret_entry()?.get_password() {
+        Ok(secret) if !secret.is_empty() => Ok(Some(secret)),
+        Ok(_) | Err(_) => Ok(None),
+    }
+}
+
+fn clear_oauth_client_secret() -> Result<(), String> {
+    match oauth_client_secret_entry()?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(user_error(error)),
+    }
+}
+
+fn desktop_oauth_client_from_file(contents: &str) -> Result<(String, String), String> {
+    let parsed: DesktopOAuthClientFile = serde_json::from_str(contents)
+        .map_err(|_| "Choose the downloaded JSON for a Google Desktop OAuth client.".to_string())?;
+    let client_id = parsed.installed.client_id.trim().to_string();
+    if !valid_google_client_id(&client_id) {
+        return Err("The JSON does not contain a valid Google Desktop OAuth client ID.".into());
+    }
+    Ok((client_id, parsed.installed.client_secret.trim().to_string()))
 }
 
 // OAuth callbacks use this boundary so credentials stay out of the database and webview.
@@ -292,6 +529,29 @@ fn oauth_error_message(error: &str) -> String {
     }
 }
 
+fn oauth_token_error_message(response: &serde_json::Value, refreshing: bool) -> String {
+    let error = response
+        .get("error")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    match error {
+        "invalid_grant" if refreshing => {
+            "Google rejected the saved authorization (invalid_grant). Connect YouTube again."
+                .into()
+        }
+        "invalid_grant" => "Google rejected the authorization code (invalid_grant). It may have expired or the PKCE callback did not match; connect again.".into(),
+        "invalid_client" | "deleted_client" => "Google rejected this OAuth desktop client (invalid_client). Verify that the client ID still exists in the selected Google Cloud project.".into(),
+        "unauthorized_client" => "Google does not allow this OAuth client to use the installed-app authorization flow (unauthorized_client). Verify that it is a Desktop app client.".into(),
+        "invalid_request" => "Google rejected the token request (invalid_request). Verify the OAuth desktop-client configuration and try again.".into(),
+        "unsupported_grant_type" => "Google rejected the token request type (unsupported_grant_type). The OAuth client configuration is incompatible with this app.".into(),
+        "access_denied" => "Google denied the token exchange (access_denied). Confirm the Google account is an allowed test user and authorize the requested access.".into(),
+        _ if refreshing => {
+            "Google rejected the saved YouTube authorization. Connect YouTube again.".into()
+        }
+        _ => "Google rejected the authorization response with an unrecognized OAuth error. Verify the Google Auth Platform configuration and try again.".into(),
+    }
+}
+
 fn callback_value(target: &str, key: &str) -> Option<String> {
     let callback = url::Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
     callback
@@ -300,7 +560,7 @@ fn callback_value(target: &str, key: &str) -> Option<String> {
 }
 
 fn respond_to_callback(stream: &mut TcpStream, text: &str) {
-    let body = format!("<!doctype html><title>YouTube Mass Uploader</title><p>{text}</p><p>You may close this window and return to the app.</p>");
+    let body = format!("<!doctype html><title>YouTube Upload Manager</title><p>{text}</p><p>You may close this window and return to the app.</p>");
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(), body
@@ -316,21 +576,33 @@ fn complete_oauth_connection(
     code: &str,
     deletion_authorized: bool,
 ) -> Result<String, String> {
-    let token_response: serde_json::Value = reqwest::blocking::Client::new()
+    let client_secret = configured_oauth_client_secret()?;
+    let mut token_form = vec![
+        ("code", code),
+        ("client_id", client_id),
+        ("code_verifier", verifier),
+        ("redirect_uri", redirect_uri),
+        ("grant_type", "authorization_code"),
+    ];
+    if let Some(secret) = client_secret.as_deref() {
+        token_form.push(("client_secret", secret));
+    }
+    let token_response = reqwest::blocking::Client::new()
         .post("https://oauth2.googleapis.com/token")
-        .form(&[
-            ("code", code),
-            ("client_id", client_id),
-            ("code_verifier", verifier),
-            ("redirect_uri", redirect_uri),
-            ("grant_type", "authorization_code"),
-        ])
+        .form(&token_form)
         .send()
-        .map_err(|_| "Google token exchange could not be reached.".to_string())?
-        .error_for_status()
-        .map_err(|_| "Google rejected the authorization response.".to_string())?
-        .json()
-        .map_err(|_| "Google returned an unreadable authorization response.".to_string())?;
+        .map_err(|_| "Google token exchange could not be reached.".to_string())?;
+    let token_status = token_response.status();
+    let token_response: serde_json::Value = token_response.json().map_err(|_| {
+        if token_status.is_success() {
+            "Google returned an unreadable authorization response.".to_string()
+        } else {
+            "Google rejected the authorization response with an unreadable OAuth error.".to_string()
+        }
+    })?;
+    if !token_status.is_success() {
+        return Err(oauth_token_error_message(&token_response, false));
+    }
     let access_token = token_response
         .get("access_token")
         .and_then(|value| value.as_str())
@@ -389,19 +661,32 @@ fn refreshed_access_token(state: &AppState) -> Result<String, String> {
     let refresh_token = refresh_token_entry()?.get_password().map_err(|_| {
         "This device no longer has a YouTube credential; connect YouTube again.".to_string()
     })?;
-    let token_response: serde_json::Value = reqwest::blocking::Client::new()
+    let client_secret = configured_oauth_client_secret()?;
+    let mut token_form = vec![
+        ("client_id", client_id.as_str()),
+        ("refresh_token", refresh_token.as_str()),
+        ("grant_type", "refresh_token"),
+    ];
+    if let Some(secret) = client_secret.as_deref() {
+        token_form.push(("client_secret", secret));
+    }
+    let token_response = reqwest::blocking::Client::new()
         .post("https://oauth2.googleapis.com/token")
-        .form(&[
-            ("client_id", client_id.as_str()),
-            ("refresh_token", refresh_token.as_str()),
-            ("grant_type", "refresh_token"),
-        ])
+        .form(&token_form)
         .send()
-        .map_err(|_| "Google token refresh could not be reached.".to_string())?
-        .error_for_status()
-        .map_err(|_| "Google rejected the saved YouTube authorization. Connect again.".to_string())?
-        .json()
-        .map_err(|_| "Google returned an unreadable token refresh response.".to_string())?;
+        .map_err(|_| "Google token refresh could not be reached.".to_string())?;
+    let token_status = token_response.status();
+    let token_response: serde_json::Value = token_response.json().map_err(|_| {
+        if token_status.is_success() {
+            "Google returned an unreadable token refresh response.".to_string()
+        } else {
+            "Google rejected the saved YouTube authorization with an unreadable OAuth error."
+                .to_string()
+        }
+    })?;
+    if !token_status.is_success() {
+        return Err(oauth_token_error_message(&token_response, true));
+    }
     token_response
         .get("access_token")
         .and_then(|value| value.as_str())
@@ -434,11 +719,88 @@ fn mark_upload_state(
     Ok(())
 }
 
+fn begin_upload_transfer(
+    state: &AppState,
+    item_id: &str,
+    confirmed_bytes: u64,
+    detail: &str,
+) -> Result<Instant, String> {
+    let started_at = now();
+    let connection = database(state)?;
+    connection
+        .execute(
+            "UPDATE upload_items SET status = 'uploading', confirmed_bytes = ?1, detail = ?2, upload_started_at = ?3, transfer_bytes_per_second = NULL, updated_at = ?3 WHERE id = ?4",
+            params![confirmed_bytes as i64, detail, started_at, item_id],
+        )
+        .map_err(user_error)?;
+    Ok(Instant::now())
+}
+
+fn record_upload_progress(
+    state: &AppState,
+    item_id: &str,
+    confirmed_bytes: u64,
+    initial_offset: u64,
+    transfer_started: Instant,
+) -> Result<(), String> {
+    let elapsed_seconds = transfer_started.elapsed().as_secs_f64();
+    let transfer_bytes_per_second = if elapsed_seconds > 0.0 && confirmed_bytes > initial_offset {
+        Some((confirmed_bytes - initial_offset) as f64 / elapsed_seconds)
+    } else {
+        None
+    };
+    let connection = database(state)?;
+    connection
+        .execute(
+            "UPDATE upload_items SET status = 'uploading', confirmed_bytes = ?1, detail = 'YouTube confirmed upload bytes.', transfer_bytes_per_second = ?2, updated_at = ?3 WHERE id = ?4",
+            params![confirmed_bytes as i64, transfer_bytes_per_second, now(), item_id],
+        )
+        .map_err(user_error)?;
+    Ok(())
+}
+
+fn valid_upload_visibility(visibility: &str) -> Result<&str, String> {
+    match visibility {
+        "private" | "unlisted" | "public" => Ok(visibility),
+        _ => Err("Choose private, unlisted, or public visibility.".into()),
+    }
+}
+
+fn valid_folder_monitor_visibility(visibility: &str) -> Result<&str, String> {
+    match visibility {
+        "private" | "unlisted" => Ok(visibility),
+        _ => Err("Watched-folder uploads can be private or unlisted only.".into()),
+    }
+}
+
+fn valid_playlist_selection(
+    playlist_id: Option<String>,
+    playlist_title: Option<String>,
+) -> Result<(Option<String>, Option<String>), String> {
+    match (playlist_id, playlist_title) {
+        (None, None) => Ok((None, None)),
+        (Some(id), Some(title))
+            if !id.is_empty()
+                && id.len() <= 128
+                && id.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || character == '_' || character == '-'
+                })
+                && !title.trim().is_empty()
+                && title.chars().count() <= 150 =>
+        {
+            Ok((Some(id), Some(title.trim().to_string())))
+        }
+        _ => Err("Choose a valid YouTube playlist or select no playlist.".into()),
+    }
+}
+
 fn establish_upload_session(
     state: &AppState,
     item_id: &str,
     title: &str,
     total_bytes: u64,
+    visibility: &str,
+    made_for_kids: bool,
     access_token: &str,
 ) -> Result<String, String> {
     let response = reqwest::blocking::Client::new()
@@ -449,11 +811,14 @@ fn establish_upload_session(
         .header("X-Upload-Content-Type", "application/octet-stream")
         .json(&serde_json::json!({
             "snippet": { "title": title },
-            "status": { "privacyStatus": "private" }
+            "status": { "privacyStatus": visibility, "selfDeclaredMadeForKids": made_for_kids }
         }))
         .send()
         .map_err(|_| "YouTube could not start the resumable upload.".to_string())?;
     if !response.status().is_success() {
+        if youtube_daily_upload_limit_response(response) {
+            return Err(DAILY_UPLOAD_LIMIT_MARKER.into());
+        }
         return Err("YouTube rejected the upload setup request.".into());
     }
     let session_uri = response
@@ -462,15 +827,52 @@ fn establish_upload_session(
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| "YouTube did not return an upload session.".to_string())?;
     save_upload_session(item_id, session_uri)?;
-    mark_upload_state(
-        state,
+    begin_upload_transfer(state, item_id, 0, "YouTube resumable session started.")?;
+    let connection = database(state)?;
+    audit(
+        &connection,
         item_id,
-        "uploading",
-        0,
-        "YouTube resumable session started.",
-        None,
+        "youtube_upload_session_started",
+        &format!("YouTube resumable session started with {visibility} visibility and made-for-kids declaration {made_for_kids}."),
     )?;
     Ok(session_uri.to_string())
+}
+
+fn youtube_daily_upload_limit_response(response: reqwest::blocking::Response) -> bool {
+    let status = response.status().as_u16();
+    if status != 403 && status != 429 {
+        return false;
+    }
+    let body = response.text().unwrap_or_default();
+    ["quotaExceeded", "dailyLimitExceeded", "uploadLimitExceeded"]
+        .iter()
+        .any(|reason| body.contains(reason))
+}
+
+fn add_video_to_playlist(
+    access_token: &str,
+    playlist_id: &str,
+    video_id: &str,
+) -> Result<(), String> {
+    reqwest::blocking::Client::new()
+        .post("https://www.googleapis.com/youtube/v3/playlistItems")
+        .query(&[("part", "snippet")])
+        .bearer_auth(access_token)
+        .json(&serde_json::json!({
+            "snippet": {
+                "playlistId": playlist_id,
+                "resourceId": { "kind": "youtube#video", "videoId": video_id }
+            }
+        }))
+        .send()
+        .map_err(|_| {
+            "YouTube could not add the uploaded video to the selected playlist.".to_string()
+        })?
+        .error_for_status()
+        .map_err(|_| {
+            "YouTube did not authorize adding this video to the selected playlist.".to_string()
+        })?;
+    Ok(())
 }
 
 fn query_upload_session(session_uri: &str, total_bytes: u64) -> Result<Option<u64>, String> {
@@ -497,27 +899,64 @@ fn query_upload_session(session_uri: &str, total_bytes: u64) -> Result<Option<u6
 
 fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
     let connection = database(state)?;
-    let (title, workspace_path, total_bytes): (String, String, u64) = connection
+    let (title, workspace_path, total_bytes, channel_name, requested_visibility, made_for_kids, playlist_id, playlist_title): (
+        String,
+        String,
+        u64,
+        Option<String>,
+        String,
+        bool,
+        Option<String>,
+        Option<String>,
+    ) = connection
         .query_row(
-            "SELECT title, workspace_path, total_bytes FROM upload_items WHERE id = ?1 AND status IN ('queued', 'uploading', 'needs_reconciliation')",
+            "SELECT title, workspace_path, total_bytes, channel_name, visibility, made_for_kids, playlist_id, playlist_title FROM upload_items WHERE id = ?1 AND status IN ('queued', 'dispatching', 'uploading', 'needs_reconciliation')",
             [item_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? as u64)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get::<_, i64>(5)? != 0,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
         )
         .map_err(|_| "This upload is no longer eligible to run.".to_string())?;
     if !Path::new(&workspace_path).is_file() {
         return Err("The managed local media file is missing; this upload cannot continue.".into());
     }
+    if let Some(expected_channel) = channel_name.as_deref() {
+        let active_channel = connection_settings(&connection)?.active_channel;
+        if active_channel.as_deref() != Some(expected_channel) {
+            connection
+                .execute(
+                    "UPDATE upload_items SET status = 'queued', detail = 'Automatic private upload paused until its bound YouTube channel is active.', updated_at = ?1 WHERE id = ?2 AND status = 'dispatching'",
+                    params![now(), item_id],
+                )
+                .map_err(user_error)?;
+            return Ok(());
+        }
+    }
+    // Watched-folder automation is limited to the operator's persisted private
+    // or unlisted choice; public visibility remains available only for manual intake.
+    let visibility = if channel_name.is_some() {
+        valid_folder_monitor_visibility(&requested_visibility)?
+    } else {
+        valid_upload_visibility(&requested_visibility)?
+    };
     let access_token = refreshed_access_token(state)?;
     let session_uri = match stored_upload_session(item_id)? {
         Some(uri) => match query_upload_session(&uri, total_bytes)? {
             Some(offset) => {
-                mark_upload_state(
+                begin_upload_transfer(
                     state,
                     item_id,
-                    "uploading",
                     offset,
                     "Resuming from YouTube-confirmed byte range.",
-                    None,
                 )?;
                 uri
             }
@@ -533,7 +972,15 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
                 return Ok(());
             }
         },
-        None => establish_upload_session(state, item_id, &title, total_bytes, &access_token)?,
+        None => establish_upload_session(
+            state,
+            item_id,
+            &title,
+            total_bytes,
+            visibility,
+            made_for_kids,
+            &access_token,
+        )?,
     };
     let start_offset = database(state)?
         .query_row(
@@ -547,6 +994,7 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
         .seek(SeekFrom::Start(start_offset))
         .map_err(user_error)?;
     let mut offset = start_offset;
+    let transfer_started = Instant::now();
     let mut buffer = vec![0_u8; 8 * 1024 * 1024];
     while offset < total_bytes {
         let bytes = source.read(&mut buffer).map_err(user_error)?;
@@ -575,14 +1023,7 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
                     .get("range")
                     .and_then(|value| value.to_str().ok()),
             )?;
-            mark_upload_state(
-                state,
-                item_id,
-                "uploading",
-                offset,
-                "YouTube confirmed upload bytes.",
-                None,
-            )?;
+            record_upload_progress(state, item_id, offset, start_offset, transfer_started)?;
             continue;
         }
         if response.status().is_success() {
@@ -593,12 +1034,36 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
                 .get("id")
                 .and_then(|value| value.as_str())
                 .ok_or_else(|| "YouTube completed the upload without a video ID.".to_string())?;
+            let playlist_detail = if let Some(playlist_id) = playlist_id.as_deref() {
+                match add_video_to_playlist(&access_token, playlist_id, video_id) {
+                    Ok(()) => {
+                        let connection = database(state)?;
+                        audit(
+                            &connection,
+                            item_id,
+                            "playlist_item_added",
+                            &format!(
+                                "Uploaded video added to {}.",
+                                playlist_title.as_deref().unwrap_or("selected playlist")
+                            ),
+                        )?;
+                        " Uploaded video was added to the selected playlist."
+                    }
+                    Err(error) => {
+                        let connection = database(state)?;
+                        audit(&connection, item_id, "playlist_item_failed", &error)?;
+                        " Uploaded video was not added to the selected playlist; see the local audit record."
+                    }
+                }
+            } else {
+                ""
+            };
             mark_upload_state(
                 state,
                 item_id,
                 "uploaded",
                 total_bytes,
-                "Uploaded to YouTube; processing status can be checked from inventory.",
+                &format!("Uploaded to YouTube; processing status can be checked from inventory.{playlist_detail}"),
                 Some(video_id),
             )?;
             let _ = upload_session_entry(item_id)
@@ -612,6 +1077,9 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
             )?;
             return Ok(());
         }
+        if youtube_daily_upload_limit_response(response) {
+            return Err(DAILY_UPLOAD_LIMIT_MARKER.into());
+        }
         return Err(
             "YouTube rejected an upload chunk; the session was preserved for reconciliation."
                 .into(),
@@ -622,7 +1090,21 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
 
 fn run_queued_uploads(state: AppState, item_ids: Vec<String>) {
     for item_id in item_ids {
+        let pause_until =
+            database(&state).and_then(|connection| active_upload_quota_pause(&connection));
+        match pause_until {
+            Ok(Some(pause_until)) => {
+                let _ = defer_item_for_active_quota_pause(&state, &item_id, &pause_until);
+                break;
+            }
+            Err(_) => break,
+            Ok(None) => {}
+        }
         if let Err(error) = upload_item(&state, &item_id) {
+            if error == DAILY_UPLOAD_LIMIT_MARKER {
+                let _ = record_upload_quota_pause(&state, &item_id);
+                break;
+            }
             let confirmed_bytes = database(&state)
                 .and_then(|connection| {
                     connection
@@ -866,6 +1348,12 @@ fn row_to_upload_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<UploadItem> {
         total_bytes: row.get::<_, i64>("total_bytes")? as u64,
         video_id: row.get("video_id")?,
         detail: row.get("detail")?,
+        visibility: row.get("visibility")?,
+        made_for_kids: row.get::<_, i64>("made_for_kids")? != 0,
+        playlist_id: row.get("playlist_id")?,
+        playlist_title: row.get("playlist_title")?,
+        upload_started_at: row.get("upload_started_at")?,
+        transfer_bytes_per_second: row.get("transfer_bytes_per_second")?,
         updated_at: row.get("updated_at")?,
     })
 }
@@ -873,7 +1361,7 @@ fn row_to_upload_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<UploadItem> {
 fn find_item(connection: &Connection, id: &str) -> Result<UploadItem, String> {
     connection
         .query_row(
-            "SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, updated_at FROM upload_items WHERE id = ?1",
+            "SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, updated_at FROM upload_items WHERE id = ?1",
             [id],
             row_to_upload_item,
         )
@@ -913,6 +1401,8 @@ fn exact_local_duplicates(connection: &Connection) -> Result<Vec<DuplicateCandid
                 confidence: "exact_local".into(),
                 left_title: left_title.clone(),
                 right_title: right_title.clone(),
+                left_video_id: None,
+                right_video_id: None,
                 evidence: format!("Matching managed-media SHA-256: {digest}"),
                 decision: None,
             });
@@ -921,10 +1411,132 @@ fn exact_local_duplicates(connection: &Connection) -> Result<Vec<DuplicateCandid
     Ok(candidates)
 }
 
+fn normalized_uploaded_title(title: &str) -> String {
+    title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn canonical_uploaded_title(title: &str) -> (String, bool) {
+    let normalized = normalized_uploaded_title(title);
+    let Some(without_closing_parenthesis) = normalized.strip_suffix(')') else {
+        return (normalized, false);
+    };
+    let Some(marker_start) = without_closing_parenthesis.rfind(" (") else {
+        return (normalized, false);
+    };
+    let base = &without_closing_parenthesis[..marker_start];
+    let marker_number = &without_closing_parenthesis[marker_start + 2..];
+    let is_duplicate_marker = !base.is_empty()
+        && !marker_number.is_empty()
+        && marker_number
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        && marker_number.parse::<u64>().is_ok_and(|number| number >= 2);
+    if is_duplicate_marker {
+        (base.to_string(), true)
+    } else {
+        (normalized, false)
+    }
+}
+
+fn uploaded_titles_match(left: &str, right: &str) -> bool {
+    let left_normalized = normalized_uploaded_title(left);
+    let right_normalized = normalized_uploaded_title(right);
+    if left_normalized == right_normalized {
+        return true;
+    }
+    let (left_canonical, left_has_suffix) = canonical_uploaded_title(left);
+    let (right_canonical, right_has_suffix) = canonical_uploaded_title(right);
+    left_canonical == right_canonical && (left_has_suffix || right_has_suffix)
+}
+
+fn synced_uploaded_title_exists(
+    connection: &Connection,
+    channel_name: &str,
+    title: &str,
+) -> Result<bool, String> {
+    let mut statement = connection
+        .prepare("SELECT title FROM remote_videos WHERE channel_name = ?1 ORDER BY video_id ASC")
+        .map_err(user_error)?;
+    let titles = statement
+        .query_map([channel_name], |row| row.get::<_, String>(0))
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?;
+    Ok(titles
+        .iter()
+        .any(|uploaded_title| uploaded_titles_match(title, uploaded_title)))
+}
+
+fn uploaded_title_duplicates(
+    connection: &Connection,
+    channel_name: &str,
+) -> Result<Vec<DuplicateCandidate>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT video_id, title FROM remote_videos WHERE channel_name = ?1 ORDER BY video_id ASC",
+        )
+        .map_err(user_error)?;
+    let videos = statement
+        .query_map([channel_name], |row| {
+            let video_id = row.get::<_, String>(0)?;
+            let title = row.get::<_, String>(1)?;
+            let normalized = normalized_uploaded_title(&title);
+            let (canonical, has_duplicate_suffix) = canonical_uploaded_title(&title);
+            Ok((video_id, title, normalized, canonical, has_duplicate_suffix))
+        })
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?;
+
+    let mut by_canonical_title = BTreeMap::<String, Vec<_>>::new();
+    for video in videos {
+        by_canonical_title
+            .entry(video.3.clone())
+            .or_default()
+            .push(video);
+    }
+
+    let mut candidates = Vec::new();
+    for videos in by_canonical_title.values() {
+        for left_index in 0..videos.len() {
+            let (left_id, left_title, left_normalized, _, left_has_suffix) = &videos[left_index];
+            for (right_id, right_title, right_normalized, _, right_has_suffix) in
+                videos.iter().skip(left_index + 1)
+            {
+                let evidence = if left_normalized == right_normalized {
+                    Some("Normalized uploaded titles match exactly; case and repeated whitespace are ignored.")
+                } else if *left_has_suffix || *right_has_suffix {
+                    Some("Uploaded titles match after removing a trailing duplicate-copy marker of (2) or higher.")
+                } else {
+                    None
+                };
+                let Some(evidence) = evidence else {
+                    continue;
+                };
+                candidates.push(DuplicateCandidate {
+                    id: format!("remote:{left_id}:{right_id}"),
+                    confidence: "metadata".into(),
+                    left_title: left_title.clone(),
+                    right_title: right_title.clone(),
+                    left_video_id: Some(left_id.clone()),
+                    right_video_id: Some(right_id.clone()),
+                    evidence: evidence.into(),
+                    decision: None,
+                });
+            }
+        }
+    }
+    Ok(candidates)
+}
+
 fn audit(connection: &Connection, item_id: &str, kind: &str, detail: &str) -> Result<(), String> {
     connection
         .execute(
-            "INSERT INTO audit_events (id, item_id, kind, detail, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO audit_events (id, item_id, channel_name, kind, detail, created_at) VALUES (?1, ?2, (SELECT channel_name FROM upload_items WHERE id = ?2), ?3, ?4, ?5)",
             params![Uuid::new_v4().to_string(), item_id, kind, detail, now()],
         )
         .map_err(user_error)?;
@@ -936,6 +1548,21 @@ fn audit_global(connection: &Connection, kind: &str, detail: &str) -> Result<(),
         .execute(
             "INSERT INTO audit_events (id, item_id, kind, detail, created_at) VALUES (?1, NULL, ?2, ?3, ?4)",
             params![Uuid::new_v4().to_string(), kind, detail, now()],
+        )
+        .map_err(user_error)?;
+    Ok(())
+}
+
+fn audit_global_scoped(
+    connection: &Connection,
+    channel_name: &str,
+    kind: &str,
+    detail: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO audit_events (id, item_id, channel_name, kind, detail, created_at) VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+            params![Uuid::new_v4().to_string(), channel_name, kind, detail, now()],
         )
         .map_err(user_error)?;
     Ok(())
@@ -960,7 +1587,10 @@ fn copy_and_digest(source: &Path, destination_partial: &Path) -> Result<(u64, St
         .open(destination_partial)
         .map_err(user_error)?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // Keep large streaming buffers on the heap. In release builds these helpers can
+    // inline into native startup reconciliation, whose Windows GUI thread has a
+    // comparatively small stack.
+    let mut buffer = vec![0_u8; 1024 * 1024];
 
     if existing_bytes > 0 {
         let mut prior = File::open(destination_partial).map_err(user_error)?;
@@ -985,6 +1615,22 @@ fn copy_and_digest(source: &Path, destination_partial: &Path) -> Result<(u64, St
     }
     output.sync_all().map_err(user_error)?;
     Ok((copied, format!("{:x}", hasher.finalize())))
+}
+
+fn digest_file(path: &Path) -> Result<(u64, String), String> {
+    let mut input = File::open(path).map_err(user_error)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut bytes_read = 0_u64;
+    loop {
+        let bytes = input.read(&mut buffer).map_err(user_error)?;
+        if bytes == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes]);
+        bytes_read += bytes as u64;
+    }
+    Ok((bytes_read, format!("{:x}", hasher.finalize())))
 }
 
 fn finish_import(
@@ -1015,6 +1661,904 @@ fn finish_import(
     find_item(connection, id)
 }
 
+struct MonitoredFile {
+    path: PathBuf,
+    file_name: String,
+    size_bytes: u64,
+    modified_key: String,
+}
+
+enum MonitorDisposition {
+    Queued,
+    Skipped,
+    Waiting,
+    Paused,
+}
+
+struct MonitorFileOutcome {
+    disposition: MonitorDisposition,
+    dispatch_item_id: Option<String>,
+}
+
+fn folder_monitor_settings(connection: &Connection) -> Result<FolderMonitorSettings, String> {
+    connection
+        .query_row(
+            "SELECT enabled, folder_path, channel_name, visibility, status, detail, last_scan_at, last_file_name FROM folder_monitor_settings WHERE singleton = 1",
+            [],
+            |row| {
+                Ok(FolderMonitorSettings {
+                    enabled: row.get::<_, i64>(0)? != 0,
+                    folder_path: row.get(1)?,
+                    channel_name: row.get(2)?,
+                    visibility: row.get(3)?,
+                    status: row.get(4)?,
+                    detail: row.get(5)?,
+                    last_scan_at: row.get(6)?,
+                    last_file_name: row.get(7)?,
+                })
+            },
+        )
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(FolderMonitorSettings {
+                enabled: false,
+                folder_path: None,
+                channel_name: None,
+                visibility: "private".into(),
+                status: "disabled".into(),
+                detail: "Folder monitoring is disabled.".into(),
+                last_scan_at: None,
+                last_file_name: None,
+            }),
+            other => Err(other),
+        })
+        .map_err(user_error)
+}
+
+fn monitored_file_signature(metadata: &fs::Metadata) -> Result<(u64, String), String> {
+    let modified = metadata.modified().map_err(user_error)?;
+    let duration = modified
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "A watched file has an unsupported modification time.".to_string())?;
+    Ok((
+        metadata.len(),
+        format!("{}:{}", duration.as_secs(), duration.subsec_nanos()),
+    ))
+}
+
+fn is_hidden_monitored_file(path: &Path, metadata: &fs::Metadata) -> bool {
+    if path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.starts_with('.'))
+    {
+        return true;
+    }
+    #[cfg(windows)]
+    if metadata.file_attributes() & 0x2 != 0 {
+        return true;
+    }
+    false
+}
+
+fn is_temporary_monitored_name(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    if lower.starts_with('~') || lower.ends_with('~') {
+        return true;
+    }
+    let mut segments = lower.split('.').collect::<Vec<_>>();
+    let _ = segments.pop();
+    segments.iter().any(|segment| {
+        matches!(
+            *segment,
+            "tmp" | "temp" | "part" | "partial" | "download" | "crdownload"
+        )
+    })
+}
+
+fn is_supported_monitored_video(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|extension| SUPPORTED_VIDEO_EXTENSIONS.contains(&extension.as_str()))
+}
+
+fn monitored_files(folder: &Path) -> Result<Vec<MonitoredFile>, String> {
+    let mut files = Vec::new();
+    for result in fs::read_dir(folder).map_err(user_error)? {
+        let entry = result.map_err(user_error)?;
+        let file_type = entry.file_type().map_err(user_error)?;
+        if file_type.is_symlink() || !file_type.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let file_name = file_name.to_string();
+        let metadata = entry.metadata().map_err(user_error)?;
+        if is_hidden_monitored_file(&path, &metadata)
+            || is_temporary_monitored_name(&file_name)
+            || !is_supported_monitored_video(&path)
+        {
+            continue;
+        }
+        let (size_bytes, modified_key) = monitored_file_signature(&metadata)?;
+        if size_bytes == 0 {
+            continue;
+        }
+        files.push(MonitoredFile {
+            path,
+            file_name,
+            size_bytes,
+            modified_key,
+        });
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+fn monitor_authorized(
+    connection: &Connection,
+    folder_path: &str,
+    channel_name: &str,
+) -> Result<bool, String> {
+    let monitor = folder_monitor_settings(connection)?;
+    let connection_settings = connection_settings(connection)?;
+    Ok(monitor.enabled
+        && monitor.folder_path.as_deref() == Some(folder_path)
+        && monitor.channel_name.as_deref() == Some(channel_name)
+        && connection_settings.active_channel.as_deref() == Some(channel_name))
+}
+
+fn set_observation_state(
+    connection: &Connection,
+    file: &MonitoredFile,
+    channel_name: &str,
+    state: &str,
+    digest: Option<&str>,
+    item_id: Option<&str>,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE folder_monitor_observations SET size_bytes = ?1, modified_key = ?2, state = ?3, digest = ?4, upload_item_id = ?5, updated_at = ?6 WHERE channel_name = ?7 AND file_path = ?8",
+            params![
+                file.size_bytes as i64,
+                file.modified_key,
+                state,
+                digest,
+                item_id,
+                now(),
+                channel_name,
+                file.path.to_string_lossy()
+            ],
+        )
+        .map_err(user_error)?;
+    Ok(())
+}
+
+fn queue_monitored_item(
+    connection: &Connection,
+    item_id: &str,
+    folder_path: &str,
+    channel_name: &str,
+    visibility: &str,
+) -> Result<MonitorFileOutcome, String> {
+    if !monitor_authorized(connection, folder_path, channel_name)? {
+        connection
+            .execute(
+                "UPDATE upload_items SET detail = 'Automatic private upload paused because the watched-folder channel is no longer active.', updated_at = ?1 WHERE id = ?2 AND status = 'draft'",
+                params![now(), item_id],
+            )
+            .map_err(user_error)?;
+        return Ok(MonitorFileOutcome {
+            disposition: MonitorDisposition::Paused,
+            dispatch_item_id: None,
+        });
+    }
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM upload_items WHERE id = ?1",
+            [item_id],
+            |row| row.get(0),
+        )
+        .map_err(user_error)?;
+    if status == "draft" {
+        connection
+            .execute(
+                "UPDATE upload_items SET channel_name = ?1, visibility = ?2, status = 'queued', detail = ?3, updated_at = ?4 WHERE id = ?5",
+                params![channel_name, visibility, format!("Watched-folder file verified and queued for automatic {visibility} upload."), now(), item_id],
+            )
+            .map_err(user_error)?;
+        audit(
+            connection,
+            item_id,
+            "folder_monitor_queued",
+            &format!("Stable managed asset queued for automatic {visibility} upload"),
+        )?;
+        return Ok(MonitorFileOutcome {
+            disposition: MonitorDisposition::Queued,
+            dispatch_item_id: Some(item_id.to_string()),
+        });
+    }
+    if status == "queued" {
+        return Ok(MonitorFileOutcome {
+            disposition: MonitorDisposition::Queued,
+            dispatch_item_id: Some(item_id.to_string()),
+        });
+    }
+    Ok(MonitorFileOutcome {
+        disposition: MonitorDisposition::Skipped,
+        dispatch_item_id: None,
+    })
+}
+
+fn ingest_stable_monitored_file(
+    state: &AppState,
+    connection: &Connection,
+    folder_path: &str,
+    channel_name: &str,
+    visibility: &str,
+    file: &MonitoredFile,
+) -> Result<MonitorFileOutcome, String> {
+    let item_id = Uuid::new_v4().to_string();
+    set_observation_state(
+        connection,
+        file,
+        channel_name,
+        "processing",
+        None,
+        Some(&item_id),
+    )?;
+    let partial_path = state.media_directory.join(format!("{item_id}.partial"));
+    let workspace_path = state.media_directory.join(format!("{item_id}.media"));
+    let (copied, digest) = copy_and_digest(&file.path, &partial_path)?;
+    let current_metadata = fs::metadata(&file.path).map_err(user_error)?;
+    let (current_size, current_modified) = monitored_file_signature(&current_metadata)?;
+    if copied != file.size_bytes
+        || current_size != file.size_bytes
+        || current_modified != file.modified_key
+    {
+        let _ = fs::remove_file(&partial_path);
+        let changed_file = MonitoredFile {
+            path: file.path.clone(),
+            file_name: file.file_name.clone(),
+            size_bytes: current_size,
+            modified_key: current_modified,
+        };
+        set_observation_state(
+            connection,
+            &changed_file,
+            channel_name,
+            "observed",
+            None,
+            None,
+        )?;
+        return Ok(MonitorFileOutcome {
+            disposition: MonitorDisposition::Waiting,
+            dispatch_item_id: None,
+        });
+    }
+
+    let title = file
+        .path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Untitled video");
+    let existing = connection
+        .query_row(
+            "SELECT id, status FROM upload_items WHERE digest = ?1 AND (channel_name = ?2 OR channel_name IS NULL) ORDER BY created_at ASC LIMIT 1",
+            params![digest, channel_name],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(user_error)?;
+    if let Some((existing_id, existing_status)) = existing {
+        let _ = fs::remove_file(&partial_path);
+        let outcome = if matches!(existing_status.as_str(), "draft" | "queued") {
+            queue_monitored_item(
+                connection,
+                &existing_id,
+                folder_path,
+                channel_name,
+                visibility,
+            )?
+        } else {
+            MonitorFileOutcome {
+                disposition: MonitorDisposition::Skipped,
+                dispatch_item_id: None,
+            }
+        };
+        let state_name = if outcome.dispatch_item_id.is_some() {
+            "queued"
+        } else {
+            "duplicate"
+        };
+        set_observation_state(
+            connection,
+            file,
+            channel_name,
+            state_name,
+            Some(&digest),
+            Some(&existing_id),
+        )?;
+        audit(
+            connection,
+            &existing_id,
+            "folder_monitor_digest_reused",
+            "Watched file matched an existing channel-scoped SHA-256 ledger record",
+        )?;
+        return Ok(outcome);
+    }
+
+    if synced_uploaded_title_exists(connection, channel_name, title)? {
+        let _ = fs::remove_file(&partial_path);
+        set_observation_state(
+            connection,
+            file,
+            channel_name,
+            "duplicate_title",
+            Some(&digest),
+            None,
+        )?;
+        audit_global_scoped(
+            connection,
+            channel_name,
+            "folder_monitor_synced_title_skipped",
+            "Watched file matched the last synced YouTube title inventory and was not uploaded automatically",
+        )?;
+        return Ok(MonitorFileOutcome {
+            disposition: MonitorDisposition::Skipped,
+            dispatch_item_id: None,
+        });
+    }
+
+    let timestamp = now();
+    connection
+        .execute(
+            "INSERT INTO upload_items (id, title, file_name, channel_name, source_path, workspace_path, partial_path, size_bytes, status, total_bytes, visibility, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'importing', ?8, ?9, ?10, ?10, 'Importing stable watched file into device-local workspace')",
+            params![
+                item_id,
+                title,
+                file.file_name,
+                channel_name,
+                file.path.to_string_lossy(),
+                workspace_path.to_string_lossy(),
+                partial_path.to_string_lossy(),
+                file.size_bytes as i64,
+                visibility,
+                timestamp
+            ],
+        )
+        .map_err(user_error)?;
+    audit(
+        connection,
+        &item_id,
+        "folder_monitor_import_started",
+        "Stable watched file is being copied into managed local storage",
+    )?;
+    finish_import(
+        connection,
+        &item_id,
+        &file.path,
+        &partial_path,
+        &workspace_path,
+        file.size_bytes,
+    )?;
+    let outcome =
+        queue_monitored_item(connection, &item_id, folder_path, channel_name, visibility)?;
+    let state_name = if matches!(outcome.disposition, MonitorDisposition::Paused) {
+        "paused"
+    } else {
+        "queued"
+    };
+    set_observation_state(
+        connection,
+        file,
+        channel_name,
+        state_name,
+        Some(&digest),
+        Some(&item_id),
+    )?;
+    Ok(outcome)
+}
+
+fn recover_monitored_file(
+    state: &AppState,
+    connection: &Connection,
+    folder_path: &str,
+    channel_name: &str,
+    visibility: &str,
+    file: &MonitoredFile,
+    item_id: Option<String>,
+) -> Result<MonitorFileOutcome, String> {
+    let Some(item_id) = item_id else {
+        set_observation_state(connection, file, channel_name, "observed", None, None)?;
+        return Ok(MonitorFileOutcome {
+            disposition: MonitorDisposition::Waiting,
+            dispatch_item_id: None,
+        });
+    };
+    let item = connection
+        .query_row(
+            "SELECT source_path, workspace_path, partial_path, size_bytes, status, digest FROM upload_items WHERE id = ?1",
+            [&item_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)? as u64,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(user_error)?;
+    let Some((source_path, workspace_path, partial_path, size_bytes, status, digest)) = item else {
+        if Uuid::parse_str(&item_id).is_ok() {
+            let _ = fs::remove_file(state.media_directory.join(format!("{item_id}.partial")));
+            let _ = fs::remove_file(state.media_directory.join(format!("{item_id}.media")));
+        }
+        set_observation_state(connection, file, channel_name, "observed", None, None)?;
+        return Ok(MonitorFileOutcome {
+            disposition: MonitorDisposition::Waiting,
+            dispatch_item_id: None,
+        });
+    };
+    if status == "importing" {
+        let source = source_path
+            .as_deref()
+            .filter(|value| Path::new(value).is_file())
+            .ok_or_else(|| {
+                "The watched source disappeared before its managed import completed.".to_string()
+            })?;
+        let partial = partial_path.as_deref().ok_or_else(|| {
+            "The watched import has no resumable local-copy checkpoint.".to_string()
+        })?;
+        finish_import(
+            connection,
+            &item_id,
+            Path::new(source),
+            Path::new(partial),
+            Path::new(&workspace_path),
+            size_bytes,
+        )?;
+    }
+    let outcome =
+        queue_monitored_item(connection, &item_id, folder_path, channel_name, visibility)?;
+    let state_name = if matches!(outcome.disposition, MonitorDisposition::Paused) {
+        "paused"
+    } else if outcome.dispatch_item_id.is_some() {
+        "queued"
+    } else {
+        "complete"
+    };
+    set_observation_state(
+        connection,
+        file,
+        channel_name,
+        state_name,
+        digest.as_deref(),
+        Some(&item_id),
+    )?;
+    Ok(outcome)
+}
+
+fn update_monitor_result(
+    connection: &Connection,
+    status: &str,
+    detail: &str,
+    last_file_name: Option<&str>,
+) -> Result<FolderMonitorSettings, String> {
+    connection
+        .execute(
+            "UPDATE folder_monitor_settings SET status = ?1, detail = ?2, last_scan_at = ?3, last_file_name = COALESCE(?4, last_file_name), updated_at = ?3 WHERE singleton = 1",
+            params![status, detail, now(), last_file_name],
+        )
+        .map_err(user_error)?;
+    folder_monitor_settings(connection)
+}
+
+fn scan_folder_monitor_locked(
+    state: &AppState,
+    dispatch_uploads: bool,
+) -> Result<FolderMonitorSettings, String> {
+    let connection = database(state)?;
+    let settings = folder_monitor_settings(&connection)?;
+    if !settings.enabled {
+        return Ok(settings);
+    }
+    let folder_path = settings
+        .folder_path
+        .as_deref()
+        .ok_or_else(|| "The enabled folder monitor has no folder path.".to_string())?;
+    let channel_name = settings
+        .channel_name
+        .as_deref()
+        .ok_or_else(|| "The enabled folder monitor has no channel binding.".to_string())?;
+    let visibility = valid_folder_monitor_visibility(&settings.visibility)?;
+    if connection_settings(&connection)?.active_channel.as_deref() != Some(channel_name) {
+        return update_monitor_result(
+            &connection,
+            "paused",
+            "Monitoring is paused until its originally authorized YouTube channel is active again.",
+            None,
+        );
+    }
+    let folder = Path::new(folder_path);
+    if !folder.is_dir() {
+        return update_monitor_result(
+            &connection,
+            "error",
+            "The watched folder is unavailable; no files were uploaded.",
+            None,
+        );
+    }
+    let files = match monitored_files(folder) {
+        Ok(files) => files,
+        Err(error) => {
+            return update_monitor_result(
+                &connection,
+                "error",
+                &format!("The watched folder could not be scanned: {error}"),
+                None,
+            )
+        }
+    };
+    let mut waiting = 0_usize;
+    let mut queued = 0_usize;
+    let mut skipped = 0_usize;
+    let mut paused = false;
+    let mut failures = Vec::new();
+    let mut dispatch_ids = Vec::new();
+    let mut last_file_name = None;
+
+    for file in files {
+        last_file_name = Some(file.file_name.clone());
+        let file_path = file.path.to_string_lossy().to_string();
+        let observation = connection
+            .query_row(
+                "SELECT size_bytes, modified_key, state, upload_item_id FROM folder_monitor_observations WHERE channel_name = ?1 AND file_path = ?2",
+                params![channel_name, file_path],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as u64,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(user_error)?;
+        let outcome = match observation {
+            None => {
+                let timestamp = now();
+                connection
+                    .execute(
+                        "INSERT INTO folder_monitor_observations (channel_name, file_path, size_bytes, modified_key, state, first_seen_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'observed', ?5, ?5)",
+                        params![channel_name, file_path, file.size_bytes as i64, file.modified_key, timestamp],
+                    )
+                    .map_err(user_error)?;
+                waiting += 1;
+                continue;
+            }
+            Some((size_bytes, modified_key, _, _))
+                if size_bytes != file.size_bytes || modified_key != file.modified_key =>
+            {
+                set_observation_state(&connection, &file, channel_name, "observed", None, None)?;
+                waiting += 1;
+                continue;
+            }
+            Some((_, _, state_name, item_id)) if state_name == "observed" => {
+                let claimed = connection
+                    .execute(
+                        "UPDATE folder_monitor_observations SET state = 'processing', updated_at = ?1 WHERE channel_name = ?2 AND file_path = ?3 AND state = 'observed' AND size_bytes = ?4 AND modified_key = ?5",
+                        params![now(), channel_name, file_path, file.size_bytes as i64, file.modified_key],
+                    )
+                    .map_err(user_error)?;
+                if claimed == 0 {
+                    continue;
+                }
+                let _ = item_id;
+                ingest_stable_monitored_file(
+                    state,
+                    &connection,
+                    folder_path,
+                    channel_name,
+                    visibility,
+                    &file,
+                )
+            }
+            Some((_, _, state_name, item_id))
+                if matches!(
+                    state_name.as_str(),
+                    "processing" | "paused" | "queued" | "error"
+                ) =>
+            {
+                recover_monitored_file(
+                    state,
+                    &connection,
+                    folder_path,
+                    channel_name,
+                    visibility,
+                    &file,
+                    item_id,
+                )
+            }
+            Some((_, _, state_name, item_id)) if state_name == "dispatched" => {
+                let should_resume = item_id
+                    .as_deref()
+                    .and_then(|item_id| {
+                        connection
+                            .query_row(
+                                "SELECT status FROM upload_items WHERE id = ?1",
+                                [item_id],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .optional()
+                            .ok()
+                            .flatten()
+                    })
+                    .is_some_and(|status| status == "queued");
+                if !should_resume {
+                    continue;
+                }
+                recover_monitored_file(
+                    state,
+                    &connection,
+                    folder_path,
+                    channel_name,
+                    visibility,
+                    &file,
+                    item_id,
+                )
+            }
+            Some(_) => continue,
+        };
+        match outcome {
+            Ok(result) => {
+                match result.disposition {
+                    MonitorDisposition::Queued => queued += 1,
+                    MonitorDisposition::Skipped => skipped += 1,
+                    MonitorDisposition::Waiting => waiting += 1,
+                    MonitorDisposition::Paused => paused = true,
+                }
+                if let Some(item_id) = result.dispatch_item_id {
+                    dispatch_ids.push(item_id);
+                }
+            }
+            Err(error) => {
+                failures.push(error);
+                connection
+                    .execute(
+                        "UPDATE folder_monitor_observations SET state = 'error', updated_at = ?1 WHERE channel_name = ?2 AND file_path = ?3",
+                        params![now(), channel_name, file_path],
+                    )
+                    .map_err(user_error)?;
+            }
+        }
+    }
+
+    dispatch_ids.sort();
+    dispatch_ids.dedup();
+    if dispatch_uploads && !dispatch_ids.is_empty() {
+        let mut claimed_dispatch_ids = Vec::new();
+        for item_id in &dispatch_ids {
+            let claimed = connection
+                .execute(
+                    "UPDATE upload_items SET status = 'dispatching', detail = ?1, updated_at = ?2 WHERE id = ?3 AND status = 'queued'",
+                    params![format!("Starting automatic {visibility} YouTube upload."), now(), item_id],
+                )
+                .map_err(user_error)?;
+            if claimed == 0 {
+                continue;
+            }
+            connection
+                .execute(
+                    "UPDATE folder_monitor_observations SET state = 'dispatched', updated_at = ?1 WHERE channel_name = ?2 AND upload_item_id = ?3 AND state = 'queued'",
+                    params![now(), channel_name, item_id],
+                )
+                .map_err(user_error)?;
+            claimed_dispatch_ids.push(item_id.clone());
+        }
+        dispatch_ids = claimed_dispatch_ids;
+    }
+    let (status, detail) = if !failures.is_empty() {
+        (
+            "error",
+            format!(
+                "{} watched file(s) could not be prepared; the next scan will retry safely. {}",
+                failures.len(),
+                failures[0]
+            ),
+        )
+    } else if paused {
+        (
+            "paused",
+            "Monitoring paused before network dispatch because the bound channel changed.".into(),
+        )
+    } else if queued > 0 {
+        (
+            "watching",
+            format!("Queued {queued} stable video(s) for {visibility} YouTube upload."),
+        )
+    } else if waiting > 0 {
+        (
+            "watching",
+            format!("Waiting for {waiting} video(s) to remain unchanged across another scan."),
+        )
+    } else if skipped > 0 {
+        (
+            "watching",
+            format!("Skipped {skipped} video(s) already represented by a local digest or synced YouTube title."),
+        )
+    } else {
+        (
+            "watching",
+            "Folder scan complete; no new stable videos were found.".into(),
+        )
+    };
+    let result = update_monitor_result(&connection, status, &detail, last_file_name.as_deref())?;
+    drop(connection);
+    if dispatch_uploads && !dispatch_ids.is_empty() {
+        let worker_state = state.clone();
+        thread::spawn(move || run_queued_uploads(worker_state, dispatch_ids));
+    }
+    Ok(result)
+}
+
+fn scan_folder_monitor_impl(
+    state: &AppState,
+    dispatch_uploads: bool,
+) -> Result<FolderMonitorSettings, String> {
+    let _guard = state
+        .folder_monitor_lock
+        .lock()
+        .map_err(|_| "The folder monitor lock is unavailable.".to_string())?;
+    scan_folder_monitor_locked(state, dispatch_uploads)
+}
+
+fn enable_folder_monitor_impl(
+    state: &AppState,
+    path: String,
+    visibility: String,
+) -> Result<FolderMonitorSettings, String> {
+    let _guard = state
+        .folder_monitor_lock
+        .lock()
+        .map_err(|_| "The folder monitor lock is unavailable.".to_string())?;
+    if path.trim().is_empty() {
+        return Err("Choose a folder to monitor.".into());
+    }
+    let folder = PathBuf::from(&path);
+    if !folder.is_dir() {
+        return Err("Choose an existing local folder to monitor.".into());
+    }
+    let visibility = valid_folder_monitor_visibility(visibility.trim())?;
+    let baseline_files = monitored_files(&folder)?;
+    let mut connection = database(state)?;
+    let channel_name = connection_settings(&connection)?
+        .active_channel
+        .ok_or_else(|| {
+            "Connect the YouTube channel that should receive watched-folder uploads first."
+                .to_string()
+        })?;
+    let timestamp = now();
+    let transaction = connection.transaction().map_err(user_error)?;
+    transaction
+        .execute(
+            "INSERT INTO folder_monitor_settings (singleton, enabled, folder_path, channel_name, visibility, status, detail, updated_at) VALUES (1, 1, ?1, ?2, ?3, 'watching', ?4, ?5) ON CONFLICT(singleton) DO UPDATE SET enabled = 1, folder_path = excluded.folder_path, channel_name = excluded.channel_name, visibility = excluded.visibility, status = excluded.status, detail = excluded.detail, last_scan_at = NULL, last_file_name = NULL, updated_at = excluded.updated_at",
+            params![folder.to_string_lossy(), channel_name, visibility, format!("Folder monitoring enabled; supported videos must remain unchanged across two scans before {visibility} upload."), timestamp],
+        )
+        .map_err(user_error)?;
+    for file in baseline_files {
+        transaction
+            .execute(
+                "INSERT INTO folder_monitor_observations (channel_name, file_path, size_bytes, modified_key, state, first_seen_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'baseline', ?5, ?5) ON CONFLICT(channel_name, file_path) DO UPDATE SET size_bytes = excluded.size_bytes, modified_key = excluded.modified_key, state = 'baseline', digest = NULL, upload_item_id = NULL, first_seen_at = excluded.first_seen_at, updated_at = excluded.updated_at",
+                params![channel_name, file.path.to_string_lossy(), file.size_bytes as i64, file.modified_key, timestamp],
+            )
+            .map_err(user_error)?;
+    }
+    audit_global_scoped(
+        &transaction,
+        &channel_name,
+        "folder_monitor_enabled",
+        &format!("Operator enabled recurring {visibility} uploads for a device-local folder"),
+    )?;
+    transaction.commit().map_err(user_error)?;
+    folder_monitor_settings(&connection)
+}
+
+fn disable_folder_monitor_impl(state: &AppState) -> Result<FolderMonitorSettings, String> {
+    let _guard = state
+        .folder_monitor_lock
+        .lock()
+        .map_err(|_| "The folder monitor lock is unavailable.".to_string())?;
+    let connection = database(state)?;
+    let channel_name = folder_monitor_settings(&connection)?.channel_name;
+    let timestamp = now();
+    connection
+        .execute(
+            "INSERT INTO folder_monitor_settings (singleton, enabled, status, detail, updated_at) VALUES (1, 0, 'disabled', 'Folder monitoring is disabled; queued files and source media were not deleted.', ?1) ON CONFLICT(singleton) DO UPDATE SET enabled = 0, status = excluded.status, detail = excluded.detail, updated_at = excluded.updated_at",
+            params![timestamp],
+        )
+        .map_err(user_error)?;
+    if let Some(channel_name) = channel_name.as_deref() {
+        audit_global_scoped(
+            &connection,
+            channel_name,
+            "folder_monitor_disabled",
+            "Operator disabled watched-folder discovery without deleting queued media",
+        )?;
+    } else {
+        audit_global(
+            &connection,
+            "folder_monitor_disabled",
+            "Operator disabled watched-folder discovery without deleting queued media",
+        )?;
+    }
+    folder_monitor_settings(&connection)
+}
+
+fn folder_monitor_poll_loop(state: AppState) {
+    loop {
+        let _ = scan_folder_monitor_impl(&state, true);
+        thread::sleep(FOLDER_MONITOR_POLL_INTERVAL);
+    }
+}
+
+fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
+    let connection = database(state)?;
+    let settings = connection_settings(&connection)?;
+    if !settings.connected {
+        return Err("Connect a YouTube channel before starting uploads.".into());
+    }
+    if let Some(pause_until) = active_upload_quota_pause(&connection)? {
+        return Err(format!(
+            "YouTube's daily upload limit was reached. Saved uploads will resume automatically after {pause_until}."
+        ));
+    }
+    let item_ids = connection
+        .prepare("SELECT id FROM upload_items WHERE status = 'queued' ORDER BY created_at ASC")
+        .map_err(user_error)?
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?;
+    if item_ids.is_empty() {
+        return Err("No reviewed uploads are waiting in the local queue.".into());
+    }
+    let total = item_ids.len();
+    let worker_state = state.clone();
+    thread::spawn(move || run_queued_uploads(worker_state, item_ids));
+    Ok(total)
+}
+
+fn quota_resume_poll_loop(state: AppState) {
+    let mut quota_pause_active = database(&state)
+        .and_then(|connection| active_upload_quota_pause(&connection))
+        .ok()
+        .flatten()
+        .is_some();
+    if !quota_pause_active {
+        let _ = start_queued_uploads_impl(&state);
+    }
+    loop {
+        thread::sleep(QUOTA_RESUME_POLL_INTERVAL);
+        let active = database(&state)
+            .and_then(|connection| active_upload_quota_pause(&connection))
+            .ok()
+            .flatten()
+            .is_some();
+        if quota_pause_active && !active {
+            let _ = start_queued_uploads_impl(&state);
+        }
+        quota_pause_active = active;
+    }
+}
+
 fn initialize_state(app: &AppHandle) -> Result<AppState, String> {
     let root = app.path().app_data_dir().map_err(user_error)?;
     let media_directory = root.join("media");
@@ -1022,32 +2566,109 @@ fn initialize_state(app: &AppHandle) -> Result<AppState, String> {
     let state = AppState {
         database_path: root.join("queue.sqlite3"),
         media_directory,
+        folder_monitor_lock: Arc::new(Mutex::new(())),
     };
     database(&state)?;
+    reconcile_queue_impl(&state)?;
     Ok(state)
+}
+
+#[tauri::command]
+fn load_folder_monitor_settings(
+    state: State<'_, AppState>,
+) -> Result<FolderMonitorSettings, String> {
+    folder_monitor_settings(&database(&state)?)
+}
+
+#[tauri::command]
+fn enable_folder_monitor(
+    path: String,
+    visibility: String,
+    state: State<'_, AppState>,
+) -> Result<FolderMonitorSettings, String> {
+    enable_folder_monitor_impl(&state, path, visibility)
+}
+
+#[tauri::command]
+fn disable_folder_monitor(state: State<'_, AppState>) -> Result<FolderMonitorSettings, String> {
+    disable_folder_monitor_impl(&state)
+}
+
+#[tauri::command]
+fn scan_folder_monitor_now(state: State<'_, AppState>) -> Result<FolderMonitorSettings, String> {
+    scan_folder_monitor_impl(&state, true)
 }
 
 #[tauri::command]
 fn dashboard_snapshot(state: State<'_, AppState>) -> Result<DashboardSnapshot, String> {
     let connection = database(&state)?;
     let mut statement = connection
-        .prepare("SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, updated_at FROM upload_items ORDER BY updated_at DESC")
+        .prepare("SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, updated_at FROM upload_items ORDER BY updated_at DESC")
         .map_err(user_error)?;
     let items = statement
         .query_map([], row_to_upload_item)
         .map_err(user_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(user_error)?;
+    let settings = connection_settings(&connection)?;
+    let mut duplicates = exact_local_duplicates(&connection)?;
+    if let Some(active_channel) = settings.active_channel.as_deref() {
+        duplicates.extend(uploaded_title_duplicates(&connection, active_channel)?);
+    }
     Ok(DashboardSnapshot {
-        active_channel: connection_settings(&connection)?.active_channel,
+        active_channel: settings.active_channel,
         items,
-        duplicates: exact_local_duplicates(&connection)?,
+        duplicates,
     })
 }
 
 #[tauri::command]
 fn load_connection_settings(state: State<'_, AppState>) -> Result<ConnectionSettings, String> {
     connection_settings(&database(&state)?)
+}
+
+fn manual_upload_defaults(connection: &Connection) -> Result<ManualUploadDefaults, String> {
+    let made_for_kids = connection
+        .query_row(
+            "SELECT manual_made_for_kids_default FROM connection_settings WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(user_error)?
+        .unwrap_or(0);
+    Ok(ManualUploadDefaults {
+        made_for_kids: made_for_kids != 0,
+    })
+}
+
+#[tauri::command]
+fn load_manual_upload_defaults(state: State<'_, AppState>) -> Result<ManualUploadDefaults, String> {
+    manual_upload_defaults(&database(&state)?)
+}
+
+#[tauri::command]
+fn save_manual_upload_defaults(
+    made_for_kids: bool,
+    state: State<'_, AppState>,
+) -> Result<ManualUploadDefaults, String> {
+    let connection = database(&state)?;
+    connection
+        .execute(
+            "INSERT INTO connection_settings (singleton, manual_made_for_kids_default, updated_at) VALUES (1, ?1, ?2) ON CONFLICT(singleton) DO UPDATE SET manual_made_for_kids_default = excluded.manual_made_for_kids_default, updated_at = excluded.updated_at",
+            params![made_for_kids as i64, now()],
+        )
+        .map_err(user_error)?;
+    audit_global(
+        &connection,
+        "manual_made_for_kids_default_set",
+        if made_for_kids {
+            "Manual Made for Kids default set to yes."
+        } else {
+            "Manual Made for Kids default set to no."
+        },
+    )?;
+    manual_upload_defaults(&connection)
 }
 
 #[tauri::command]
@@ -1059,6 +2680,7 @@ fn save_oauth_client_id(
     if !valid_google_client_id(client_id) {
         return Err("Enter a Google desktop or mobile OAuth client ID ending in .apps.googleusercontent.com.".into());
     }
+    clear_oauth_client_secret()?;
     let connection = database(&state)?;
     connection
         .execute(
@@ -1070,6 +2692,41 @@ fn save_oauth_client_id(
         &connection,
         "oauth_client_configured",
         "OAuth client identifier saved locally",
+    )?;
+    connection_settings(&connection)
+}
+
+#[tauri::command]
+fn import_desktop_oauth_client(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ConnectionSettings, String> {
+    let metadata = fs::metadata(&path)
+        .map_err(|_| "The selected OAuth JSON file could not be read.".to_string())?;
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return Err("Choose a small downloaded Google Desktop OAuth JSON file.".into());
+    }
+    let contents = fs::read_to_string(&path)
+        .map_err(|_| "The selected OAuth JSON file is not readable text.".to_string())?;
+    let (client_id, client_secret) = desktop_oauth_client_from_file(&contents)?;
+    if client_secret.is_empty() {
+        clear_oauth_client_secret()?;
+    } else {
+        oauth_client_secret_entry()?
+            .set_password(&client_secret)
+            .map_err(user_error)?;
+    }
+    let connection = database(&state)?;
+    connection
+        .execute(
+            "INSERT INTO connection_settings (singleton, oauth_client_id, active_channel, connection_detail, deletion_authorized, updated_at) VALUES (1, ?1, NULL, 'Custom Google Desktop OAuth client imported on this device.', 0, ?2) ON CONFLICT(singleton) DO UPDATE SET oauth_client_id = excluded.oauth_client_id, active_channel = NULL, connection_detail = excluded.connection_detail, deletion_authorized = 0, updated_at = excluded.updated_at",
+            params![client_id, now()],
+        )
+        .map_err(user_error)?;
+    audit_global(
+        &connection,
+        "oauth_desktop_client_imported",
+        "Desktop OAuth client JSON imported into protected local credential storage",
     )?;
     connection_settings(&connection)
 }
@@ -1172,25 +2829,7 @@ fn disconnect_youtube(state: State<'_, AppState>) -> Result<ConnectionSettings, 
 
 #[tauri::command]
 fn start_queued_uploads(state: State<'_, AppState>) -> Result<usize, String> {
-    let connection = database(&state)?;
-    let settings = connection_settings(&connection)?;
-    if !settings.connected {
-        return Err("Connect a YouTube channel before starting uploads.".into());
-    }
-    let item_ids = connection
-        .prepare("SELECT id FROM upload_items WHERE status = 'queued' ORDER BY created_at ASC")
-        .map_err(user_error)?
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(user_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(user_error)?;
-    if item_ids.is_empty() {
-        return Err("No reviewed uploads are waiting in the local queue.".into());
-    }
-    let total = item_ids.len();
-    let worker_state = state.inner().clone();
-    thread::spawn(move || run_queued_uploads(worker_state, item_ids));
-    Ok(total)
+    start_queued_uploads_impl(&state)
 }
 
 #[tauri::command]
@@ -1200,6 +2839,52 @@ fn sync_channel_inventory(state: State<'_, AppState>) -> Result<usize, String> {
         return Err("Connect a YouTube channel before syncing its library.".into());
     }
     sync_channel_inventory_worker(&state)
+}
+
+#[tauri::command]
+fn list_youtube_playlists(state: State<'_, AppState>) -> Result<Vec<YouTubePlaylist>, String> {
+    let settings = connection_settings(&database(&state)?)?;
+    if !settings.connected {
+        return Ok(Vec::new());
+    }
+    let access_token = refreshed_access_token(&state)?;
+    let mut playlists = Vec::new();
+    let mut next_page: Option<String> = None;
+    loop {
+        let mut query = vec![("part", "snippet"), ("mine", "true"), ("maxResults", "50")];
+        if let Some(page) = next_page.as_deref() {
+            query.push(("pageToken", page));
+        }
+        let response = youtube_json(&access_token, "playlists", &query)?;
+        for playlist in response
+            .get("items")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let (Some(id), Some(title)) = (
+                playlist.get("id").and_then(|value| value.as_str()),
+                playlist
+                    .pointer("/snippet/title")
+                    .and_then(|value| value.as_str()),
+            ) else {
+                continue;
+            };
+            playlists.push(YouTubePlaylist {
+                id: id.to_string(),
+                title: title.to_string(),
+            });
+        }
+        next_page = response
+            .get("nextPageToken")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        if next_page.is_none() {
+            break;
+        }
+    }
+    playlists.sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+    Ok(playlists)
 }
 
 fn row_to_remote_video(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteVideo> {
@@ -1410,12 +3095,32 @@ fn execute_deletion_request(
 }
 
 #[tauri::command]
-fn import_asset(path: String, state: State<'_, AppState>) -> Result<UploadItem, String> {
+fn import_asset(
+    path: String,
+    settings: ManualUploadSettings,
+    state: State<'_, AppState>,
+) -> Result<UploadItem, String> {
     let source = PathBuf::from(&path);
     let metadata = fs::metadata(&source).map_err(user_error)?;
     if !metadata.is_file() {
         return Err("Select a video file, not a directory.".into());
     }
+    if !is_supported_monitored_video(&source) {
+        return Err("Select a supported video file to import.".into());
+    }
+    let visibility = valid_upload_visibility(&settings.visibility)?;
+    let raw_playlist_id = settings
+        .playlist_id
+        .filter(|value| !value.trim().is_empty());
+    let raw_playlist_title = if raw_playlist_id.is_some() {
+        settings
+            .playlist_title
+            .filter(|value| !value.trim().is_empty())
+    } else {
+        None
+    };
+    let (playlist_id, playlist_title) =
+        valid_playlist_selection(raw_playlist_id, raw_playlist_title)?;
 
     let id = Uuid::new_v4().to_string();
     let file_name = source
@@ -1435,15 +3140,15 @@ fn import_asset(path: String, state: State<'_, AppState>) -> Result<UploadItem, 
 
     connection
         .execute(
-            "INSERT INTO upload_items (id, title, file_name, source_path, workspace_path, partial_path, size_bytes, status, total_bytes, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'importing', ?7, ?8, ?8, 'Importing into device-local workspace')",
-            params![id, title, file_name, path, workspace_path.to_string_lossy(), partial_path.to_string_lossy(), metadata.len() as i64, timestamp],
+            "INSERT INTO upload_items (id, title, file_name, source_path, workspace_path, partial_path, size_bytes, status, total_bytes, visibility, made_for_kids, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'importing', ?7, ?8, ?9, ?10, ?11, ?12, ?12, 'Importing into device-local workspace')",
+            params![id, title, file_name, path, workspace_path.to_string_lossy(), partial_path.to_string_lossy(), metadata.len() as i64, visibility, settings.made_for_kids as i64, playlist_id, playlist_title, timestamp],
         )
         .map_err(user_error)?;
     audit(
         &connection,
         &id,
         "asset_import_started",
-        "Copying selected media to managed local workspace",
+        "Copying selected media to managed local workspace with operator-reviewed audience, visibility, and playlist settings",
     )?;
 
     match finish_import(
@@ -1465,6 +3170,50 @@ fn import_asset(path: String, state: State<'_, AppState>) -> Result<UploadItem, 
             Err(error)
         }
     }
+}
+
+fn set_item_visibility_impl(
+    state: &AppState,
+    id: &str,
+    visibility: &str,
+) -> Result<UploadItem, String> {
+    let visibility = valid_upload_visibility(visibility)?;
+    let connection = database(state)?;
+    let channel_name: Option<String> = connection
+        .query_row(
+            "SELECT channel_name FROM upload_items WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "This upload item no longer exists.".to_string())?;
+    if channel_name.is_some() {
+        return Err("Watched-folder uploads always remain private.".into());
+    }
+    let changed = connection
+        .execute(
+            "UPDATE upload_items SET visibility = ?1, detail = 'Upload visibility saved locally.', updated_at = ?2 WHERE id = ?3 AND status IN ('draft', 'failed')",
+            params![visibility, now(), id],
+        )
+        .map_err(user_error)?;
+    if changed == 0 {
+        return Err("Choose visibility before this item is queued for upload.".into());
+    }
+    audit(
+        &connection,
+        id,
+        "upload_visibility_set",
+        &format!("Upload visibility saved locally as {visibility}."),
+    )?;
+    find_item(&connection, id)
+}
+
+#[tauri::command]
+fn set_item_visibility(
+    id: String,
+    visibility: String,
+    state: State<'_, AppState>,
+) -> Result<UploadItem, String> {
+    set_item_visibility_impl(&state, &id, &visibility)
 }
 
 #[tauri::command]
@@ -1496,11 +3245,10 @@ fn queue_item(id: String, state: State<'_, AppState>) -> Result<UploadItem, Stri
     find_item(&connection, &id)
 }
 
-#[tauri::command]
-fn reconcile_queue(state: State<'_, AppState>) -> Result<Vec<UploadItem>, String> {
-    let connection = database(&state)?;
+fn reconcile_queue_impl(state: &AppState) -> Result<Vec<UploadItem>, String> {
+    let connection = database(state)?;
     let mut statement = connection
-        .prepare("SELECT id, source_path, workspace_path, partial_path, size_bytes, status FROM upload_items WHERE status IN ('importing', 'uploading')")
+        .prepare("SELECT id, source_path, workspace_path, partial_path, size_bytes, status FROM upload_items WHERE status IN ('importing', 'dispatching', 'uploading')")
         .map_err(user_error)?;
     let interrupted = statement
         .query_map([], |row| {
@@ -1518,13 +3266,54 @@ fn reconcile_queue(state: State<'_, AppState>) -> Result<Vec<UploadItem>, String
         .map_err(user_error)?;
 
     for (id, source_path, workspace_path, partial_path, expected_bytes, status) in interrupted {
-        if status == "importing" && Path::new(&workspace_path).exists() {
-            connection.execute("UPDATE upload_items SET status = 'draft', detail = 'Recovered completed local asset after restart', updated_at = ?1 WHERE id = ?2", params![now(), id]).map_err(user_error)?;
+        if status == "dispatching" {
+            let detail = "Recovered an automatic upload before network dispatch.";
+            connection
+                .execute(
+                    "UPDATE upload_items SET status = 'queued', detail = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![detail, now(), id],
+                )
+                .map_err(user_error)?;
+            connection
+                .execute(
+                    "UPDATE folder_monitor_observations SET state = 'queued', updated_at = ?1 WHERE upload_item_id = ?2 AND state = 'dispatched'",
+                    params![now(), id],
+                )
+                .map_err(user_error)?;
+            audit(&connection, &id, "restart_reconciliation", detail)?;
+            continue;
+        }
+        if status == "importing" && Path::new(&workspace_path).is_file() {
+            let detail = match digest_file(Path::new(&workspace_path)) {
+                Ok((actual_bytes, digest)) if actual_bytes == expected_bytes => {
+                    let detail = "Recovered and verified a completed local asset after restart";
+                    connection
+                        .execute(
+                            "UPDATE upload_items SET digest = ?1, imported_bytes = ?2, status = 'draft', detail = ?3, updated_at = ?4 WHERE id = ?5",
+                            params![digest, actual_bytes as i64, detail, now(), id],
+                        )
+                        .map_err(user_error)?;
+                    audit(&connection, &id, "restart_reconciliation", detail)?;
+                    continue;
+                }
+                Ok((actual_bytes, _)) => format!(
+                    "Recovered managed asset has {actual_bytes} bytes, but {expected_bytes} were expected; repair this entry before queueing."
+                ),
+                Err(error) => format!(
+                    "Recovered managed asset could not be verified; repair this entry before queueing. {error}"
+                ),
+            };
+            connection
+                .execute(
+                    "UPDATE upload_items SET status = 'failed', detail = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![detail, now(), id],
+                )
+                .map_err(user_error)?;
             audit(
                 &connection,
                 &id,
                 "restart_reconciliation",
-                "Recovered completed local asset after restart",
+                "Recovered managed asset failed local verification",
             )?;
             continue;
         }
@@ -1577,8 +3366,18 @@ fn reconcile_queue(state: State<'_, AppState>) -> Result<Vec<UploadItem>, String
         audit(&connection, &id, "restart_reconciliation", detail)?;
     }
 
+    // Older watched-folder releases could persist the observation claim without
+    // persisting the matching item dispatch. Make those orphaned claims visible
+    // to the next local scan without initiating any network work here.
+    connection
+        .execute(
+            "UPDATE folder_monitor_observations SET state = 'queued', updated_at = ?1 WHERE state = 'dispatched' AND (upload_item_id IS NULL OR NOT EXISTS (SELECT 1 FROM upload_items WHERE upload_items.id = folder_monitor_observations.upload_item_id))",
+            params![now()],
+        )
+        .map_err(user_error)?;
+
     let mut all = connection
-        .prepare("SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, updated_at FROM upload_items ORDER BY updated_at DESC")
+        .prepare("SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, updated_at FROM upload_items ORDER BY updated_at DESC")
         .map_err(user_error)?;
     let items = all
         .query_map([], row_to_upload_item)
@@ -1588,21 +3387,35 @@ fn reconcile_queue(state: State<'_, AppState>) -> Result<Vec<UploadItem>, String
     Ok(items)
 }
 
+#[tauri::command]
+fn reconcile_queue(state: State<'_, AppState>) -> Result<Vec<UploadItem>, String> {
+    reconcile_queue_impl(&state)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            app.manage(
-                initialize_state(app.handle())
-                    .map_err(|error| Box::<dyn std::error::Error>::from(error))?,
-            );
+            let state = initialize_state(app.handle())
+                .map_err(|error| Box::<dyn std::error::Error>::from(error))?;
+            app.manage(state.clone());
+            let monitor_state = state.clone();
+            thread::spawn(move || folder_monitor_poll_loop(monitor_state));
+            thread::spawn(move || quota_resume_poll_loop(state));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             dashboard_snapshot,
+            load_folder_monitor_settings,
+            enable_folder_monitor,
+            disable_folder_monitor,
+            scan_folder_monitor_now,
             load_connection_settings,
+            load_manual_upload_defaults,
+            save_manual_upload_defaults,
             save_oauth_client_id,
+            import_desktop_oauth_client,
             begin_youtube_connection,
             disconnect_youtube,
             start_queued_uploads,
@@ -1614,6 +3427,8 @@ pub fn run() {
             begin_deletion_authorization,
             execute_deletion_request,
             import_asset,
+            list_youtube_playlists,
+            set_item_visibility,
             queue_item,
             reconcile_queue
         ])
@@ -1624,6 +3439,111 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daily_upload_limit_pause_is_persisted_and_clears_after_expiry() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let connection = database(&state).unwrap();
+        connection
+            .execute(
+                "INSERT INTO connection_settings (singleton, updated_at) VALUES (1, ?1)",
+                params![now()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, status, total_bytes, created_at, updated_at) VALUES ('limit-item', 'Limit item', 'limit-item.mp4', ?1, 1, 'dispatching', 1, ?2, ?2)",
+                params![state.media_directory.join("limit-item.media").to_string_lossy(), now()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let pause_until = record_upload_quota_pause(&state, "limit-item").unwrap();
+        assert!(
+            DateTime::parse_from_rfc3339(&pause_until)
+                .unwrap()
+                .with_timezone(&Utc)
+                > Utc::now()
+        );
+        let connection = database(&state).unwrap();
+        assert_eq!(
+            active_upload_quota_pause(&connection).unwrap(),
+            Some(pause_until)
+        );
+        assert_eq!(
+            find_item(&connection, "limit-item").unwrap().status,
+            "queued"
+        );
+        connection
+            .execute(
+                "UPDATE connection_settings SET upload_quota_pause_until = ?1 WHERE singleton = 1",
+                params![(Utc::now() - ChronoDuration::seconds(1)).to_rfc3339()],
+            )
+            .unwrap();
+        assert_eq!(active_upload_quota_pause(&connection).unwrap(), None);
+        let saved: Option<String> = connection
+            .query_row(
+                "SELECT upload_quota_pause_until FROM connection_settings WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(saved.is_none());
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manual_visibility_defaults_to_private_persists_and_keeps_watched_items_private() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let connection = database(&state).unwrap();
+        let timestamp = now();
+        for (id, channel_name) in [("manual", None), ("watched", Some("Channel A"))] {
+            connection
+                .execute(
+                    "INSERT INTO upload_items (id, title, file_name, channel_name, workspace_path, size_bytes, status, total_bytes, created_at, updated_at) VALUES (?1, ?1, ?1, ?2, ?3, 1, 'draft', 1, ?4, ?4)",
+                    params![id, channel_name, state.media_directory.join(format!("{id}.media")).to_string_lossy(), timestamp],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        assert_eq!(
+            find_item(&database(&state).unwrap(), "manual")
+                .unwrap()
+                .visibility,
+            "private"
+        );
+        let updated = set_item_visibility_impl(&state, "manual", "unlisted").unwrap();
+        assert_eq!(updated.visibility, "unlisted");
+        assert!(set_item_visibility_impl(&state, "manual", "scheduled").is_err());
+        assert!(set_item_visibility_impl(&state, "watched", "public").is_err());
+
+        let connection = database(&state).unwrap();
+        let audit_detail: String = connection
+            .query_row(
+                "SELECT detail FROM audit_events WHERE item_id = 'manual' AND kind = 'upload_visibility_set'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(audit_detail.contains("unlisted"));
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn interrupted_copy_resumes_and_keeps_the_original_digest() {
@@ -1653,6 +3573,7 @@ mod tests {
         let state = AppState {
             database_path: root.join("queue.sqlite3"),
             media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let connection = database(&state).unwrap();
@@ -1670,17 +3591,505 @@ mod tests {
         assert_eq!(candidates[0].confidence, "exact_local");
         assert_eq!(candidates[0].left_title, "First copy");
         assert_eq!(candidates[0].right_title, "Second copy");
+        assert_eq!(candidates[0].left_video_id, None);
+        assert_eq!(candidates[0].right_video_id, None);
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
+    fn uploaded_title_canonicalization_only_strips_trailing_duplicate_markers() {
+        assert_eq!(
+            normalized_uploaded_title("  Launch\tVIDEO  "),
+            "launch video"
+        );
+        assert_eq!(
+            canonical_uploaded_title("Launch Video (2)"),
+            ("launch video".into(), true)
+        );
+        assert_eq!(
+            canonical_uploaded_title("Launch Video    (27)"),
+            ("launch video".into(), true)
+        );
+        assert_eq!(
+            canonical_uploaded_title("Launch Video (1)"),
+            ("launch video (1)".into(), false)
+        );
+        assert_eq!(
+            canonical_uploaded_title("Launch Video(2)"),
+            ("launch video(2)".into(), false)
+        );
+        assert_eq!(
+            canonical_uploaded_title("Launch (2) Video"),
+            ("launch (2) video".into(), false)
+        );
+        assert!(uploaded_titles_match("Launch Video", "launch video (2)"));
+        assert!(!uploaded_titles_match("Launch Video", "Launch Videos"));
+    }
+
+    #[test]
+    fn uploaded_title_candidates_are_deterministic_and_channel_scoped() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let connection = database(&state).unwrap();
+        for (video_id, channel_name, title) in [
+            ("a-base", "Channel A", "Launch Video"),
+            ("a-exact", "Channel A", "  launch   VIDEO "),
+            ("a-high", "Channel A", "Launch Video (17)"),
+            ("a-internal", "Channel A", "Launch (2) Video"),
+            ("a-one", "Channel A", "Launch Video (1)"),
+            ("a-partial", "Channel A", "Launch Videos"),
+            ("a-suffix", "Channel A", "Launch Video (2)"),
+            ("b-exact", "Channel B", "Launch Video"),
+        ] {
+            connection.execute("INSERT INTO remote_videos (video_id, channel_name, title, updated_at) VALUES (?1, ?2, ?3, ?4)", params![video_id, channel_name, title, now()]).unwrap();
+        }
+
+        let candidates = uploaded_title_duplicates(&connection, "Channel A").unwrap();
+        let candidate_ids = candidates
+            .iter()
+            .map(|candidate| candidate.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            candidate_ids,
+            vec![
+                "remote:a-base:a-exact",
+                "remote:a-base:a-high",
+                "remote:a-base:a-suffix",
+                "remote:a-exact:a-high",
+                "remote:a-exact:a-suffix",
+                "remote:a-high:a-suffix",
+            ]
+        );
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.confidence == "metadata"));
+        assert!(candidates[0].evidence.contains("match exactly"));
+        assert!(candidates[1].evidence.contains("duplicate-copy marker"));
+        assert_eq!(candidates[0].left_video_id.as_deref(), Some("a-base"));
+        assert_eq!(candidates[0].right_video_id.as_deref(), Some("a-exact"));
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_monitor_waits_for_stability_and_reuses_the_channel_digest_record() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let watched = root.join("watched");
+        let media = root.join("media");
+        fs::create_dir_all(&watched).unwrap();
+        fs::create_dir_all(&media).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: media,
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        let connection = database(&state).unwrap();
+        connection
+            .execute(
+                "INSERT INTO connection_settings (singleton, active_channel, connection_detail, updated_at) VALUES (1, 'Channel A', 'Test connection', ?1)",
+                params![now()],
+            )
+            .unwrap();
+        let preexisting = watched.join("already-there.mp4");
+        fs::write(&preexisting, b"preexisting-video").unwrap();
+
+        let enabled = enable_folder_monitor_impl(
+            &state,
+            watched.to_string_lossy().to_string(),
+            "unlisted".into(),
+        )
+        .unwrap();
+        assert!(enabled.enabled);
+        assert_eq!(enabled.channel_name.as_deref(), Some("Channel A"));
+        assert_eq!(enabled.visibility, "unlisted");
+        scan_folder_monitor_impl(&state, false).unwrap();
+        scan_folder_monitor_impl(&state, false).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM upload_items", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT channel_name FROM audit_events WHERE kind = 'folder_monitor_enabled'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "Channel A"
+        );
+
+        let first = watched.join("first.mp4");
+        fs::write(&first, b"stable-video-payload").unwrap();
+
+        let first_scan = scan_folder_monitor_impl(&state, false).unwrap();
+        assert!(first_scan.detail.contains("another scan"));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM upload_items", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+
+        let second_scan = scan_folder_monitor_impl(&state, false).unwrap();
+        assert_eq!(second_scan.status, "watching");
+        assert!(second_scan.detail.contains("Queued 1"));
+        let (item_id, status, channel_name, digest): (String, String, String, String) = connection
+            .query_row(
+                "SELECT id, status, channel_name, digest FROM upload_items",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "queued");
+        assert_eq!(channel_name, "Channel A");
+        assert!(!digest.is_empty());
+
+        let duplicate = watched.join("second.mp4");
+        fs::write(&duplicate, b"stable-video-payload").unwrap();
+        scan_folder_monitor_impl(&state, false).unwrap();
+        scan_folder_monitor_impl(&state, false).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM upload_items", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT upload_item_id FROM folder_monitor_observations WHERE file_path = ?1",
+                    [duplicate.to_string_lossy().as_ref()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            item_id
+        );
+
+        connection
+            .execute(
+                "INSERT INTO remote_videos (video_id, channel_name, title, updated_at) VALUES ('remote-title', 'Channel A', 'Already Uploaded', ?1)",
+                params![now()],
+            )
+            .unwrap();
+        let title_duplicate = watched.join("Already Uploaded (2).mp4");
+        fs::write(&title_duplicate, b"different-video-payload").unwrap();
+        scan_folder_monitor_impl(&state, false).unwrap();
+        scan_folder_monitor_impl(&state, false).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM upload_items", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT state FROM folder_monitor_observations WHERE file_path = ?1",
+                    [title_duplicate.to_string_lossy().as_ref()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "duplicate_title"
+        );
+
+        connection
+            .execute(
+                "UPDATE connection_settings SET active_channel = 'Channel B', updated_at = ?1 WHERE singleton = 1",
+                params![now()],
+            )
+            .unwrap();
+        fs::write(watched.join("third.mp4"), b"new-video").unwrap();
+        let paused = scan_folder_monitor_impl(&state, false).unwrap();
+        assert_eq!(paused.status, "paused");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM upload_items", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        connection
+            .execute(
+                "UPDATE upload_items SET status = 'dispatching' WHERE id = ?1",
+                [&item_id],
+            )
+            .unwrap();
+        upload_item(&state, &item_id).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status FROM upload_items WHERE id = ?1",
+                    [&item_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "queued"
+        );
+
+        let disabled = disable_folder_monitor_impl(&state).unwrap();
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.status, "disabled");
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_monitor_filters_non_video_hidden_temporary_and_nested_entries() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("ready.MP4"), b"ready").unwrap();
+        fs::write(root.join(".hidden.mp4"), b"hidden").unwrap();
+        fs::write(root.join("copy.tmp.mp4"), b"temporary").unwrap();
+        fs::write(root.join("empty.mp4"), b"").unwrap();
+        fs::write(root.join("notes.txt"), b"unsupported").unwrap();
+        fs::write(nested.join("nested.mp4"), b"nested").unwrap();
+
+        let files = monitored_files(&root).unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_name, "ready.MP4");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_monitor_enable_requires_a_directory_and_connected_channel() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+
+        assert!(enable_folder_monitor_impl(
+            &state,
+            root.join("missing").to_string_lossy().into(),
+            "private".into()
+        )
+        .is_err());
+        assert!(
+            enable_folder_monitor_impl(&state, root.to_string_lossy().into(), "public".into())
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_reconciliation_recovers_queue_states_without_provider_calls() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let media = root.join("media");
+        fs::create_dir_all(&media).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: media.clone(),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        let connection = database(&state).unwrap();
+        let timestamp = now();
+        for (id, status) in [
+            ("finished-import", "importing"),
+            ("claimed-upload", "dispatching"),
+            ("active-upload", "uploading"),
+            ("waiting-upload", "queued"),
+        ] {
+            let workspace = media.join(format!("{id}.media"));
+            fs::write(&workspace, b"managed-video").unwrap();
+            connection.execute(
+                "INSERT INTO upload_items (id, title, file_name, channel_name, workspace_path, size_bytes, status, confirmed_bytes, total_bytes, resumable_session_uri, created_at, updated_at) VALUES (?1, ?1, ?1, 'Channel A', ?2, 13, ?3, 7, 13, 'stored-session-checkpoint', ?4, ?4)",
+                params![id, workspace.to_string_lossy(), status, timestamp],
+            ).unwrap();
+        }
+        connection.execute(
+            "INSERT INTO folder_monitor_observations (channel_name, file_path, size_bytes, modified_key, state, upload_item_id, first_seen_at, updated_at) VALUES ('Channel A', 'claimed.mp4', 13, 'stable', 'dispatched', 'claimed-upload', ?1, ?1)",
+            params![timestamp],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO folder_monitor_observations (channel_name, file_path, size_bytes, modified_key, state, first_seen_at, updated_at) VALUES ('Channel A', 'orphan.mp4', 13, 'stable', 'dispatched', ?1, ?1)",
+            params![timestamp],
+        ).unwrap();
+        drop(connection);
+
+        let recovered = reconcile_queue_impl(&state).unwrap();
+        let recovered_statuses = recovered
+            .iter()
+            .map(|item| (item.id.as_str(), item.status.as_str()))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(recovered_statuses["finished-import"], "draft");
+        assert_eq!(recovered_statuses["claimed-upload"], "queued");
+        assert_eq!(recovered_statuses["active-upload"], "needs_reconciliation");
+        assert_eq!(recovered_statuses["waiting-upload"], "queued");
+        assert_eq!(
+            recovered
+                .iter()
+                .find(|item| item.id == "finished-import")
+                .and_then(|item| item.digest.as_deref()),
+            Some(format!("{:x}", Sha256::digest(b"managed-video")).as_str())
+        );
+
+        let connection = database(&state).unwrap();
+        let session_uri: String = connection
+            .query_row(
+                "SELECT resumable_session_uri FROM upload_items WHERE id = 'active-upload'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_uri, "stored-session-checkpoint");
+        let observation_states = connection
+            .prepare(
+                "SELECT file_path, state FROM folder_monitor_observations ORDER BY file_path ASC",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<HashMap<_, _>, _>>()
+            .unwrap();
+        assert_eq!(observation_states["claimed.mp4"], "queued");
+        assert_eq!(observation_states["orphan.mp4"], "queued");
+        let reconciled_audits: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE kind = 'restart_reconciliation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reconciled_audits, 3);
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_reconciliation_resumes_local_copy_on_a_small_native_stack() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let media = root.join("media");
+        fs::create_dir_all(&media).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: media.clone(),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        let source = root.join("source.mp4");
+        let partial = media.join("resumable.partial");
+        let workspace = media.join("resumable.media");
+        let contents = b"device-local-video-payload";
+        fs::write(&source, contents).unwrap();
+        fs::write(&partial, &contents[..8]).unwrap();
+        let connection = database(&state).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, source_path, workspace_path, partial_path, size_bytes, status, imported_bytes, total_bytes, created_at, updated_at) VALUES ('resumable', 'Resumable', 'source.mp4', ?1, ?2, ?3, ?4, 'importing', 8, ?4, ?5, ?5)",
+            params![source.to_string_lossy(), workspace.to_string_lossy(), partial.to_string_lossy(), contents.len() as i64, now()],
+        ).unwrap();
+        drop(connection);
+
+        // Match the constrained stack shape of the packaged Windows GUI thread.
+        // Large file buffers must remain heap-backed even when release inlining
+        // pulls reconciliation helpers into the startup call tree.
+        let recovery_state = state.clone();
+        let recovered = thread::Builder::new()
+            .name("small-stack-startup-recovery".into())
+            .stack_size(512 * 1024)
+            .spawn(move || reconcile_queue_impl(&recovery_state))
+            .unwrap()
+            .join()
+            .unwrap()
+            .unwrap();
+        let item = recovered
+            .iter()
+            .find(|item| item.id == "resumable")
+            .unwrap();
+
+        assert_eq!(item.status, "draft");
+        assert_eq!(fs::read(&workspace).unwrap(), contents);
+        assert!(!partial.exists());
+        assert_eq!(
+            item.digest.as_deref(),
+            Some(format!("{:x}", Sha256::digest(contents)).as_str())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn accepts_only_google_client_identifiers() {
+        assert!(valid_google_client_id(BUILTIN_OAUTH_CLIENT_ID));
         assert!(valid_google_client_id(
             "12345-example.apps.googleusercontent.com"
         ));
         assert!(!valid_google_client_id("client-secret"));
         assert!(!valid_google_client_id("https://accounts.google.com"));
+    }
+
+    #[test]
+    fn oauth_token_errors_are_actionable_without_echoing_provider_payloads() {
+        let invalid_grant = serde_json::json!({
+            "error": "invalid_grant",
+            "error_description": "authorization code secret-code and verifier secret-verifier"
+        });
+        let message = oauth_token_error_message(&invalid_grant, false);
+        assert!(message.contains("invalid_grant"));
+        assert!(message.contains("PKCE"));
+        assert!(!message.contains("secret-code"));
+        assert!(!message.contains("secret-verifier"));
+
+        let invalid_client = serde_json::json!({
+            "error": "invalid_client",
+            "error_description": "client secret material"
+        });
+        let message = oauth_token_error_message(&invalid_client, false);
+        assert!(message.contains("invalid_client"));
+        assert!(message.contains("client ID"));
+        assert!(!message.contains("secret material"));
+
+        let unknown = serde_json::json!({
+            "error": "provider_private_detail",
+            "error_description": "raw provider payload"
+        });
+        let message = oauth_token_error_message(&unknown, false);
+        assert!(message.contains("unrecognized OAuth error"));
+        assert!(!message.contains("provider_private_detail"));
+        assert!(!message.contains("raw provider payload"));
+    }
+
+    #[test]
+    fn desktop_oauth_json_accepts_only_installed_google_clients() {
+        let parsed = desktop_oauth_client_from_file(
+            r#"{"installed":{"client_id":"12345-example.apps.googleusercontent.com","client_secret":"desktop-secret"}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.0, "12345-example.apps.googleusercontent.com");
+        assert_eq!(parsed.1, "desktop-secret");
+        assert!(desktop_oauth_client_from_file(
+            r#"{"web":{"client_id":"12345-example.apps.googleusercontent.com"}}"#
+        )
+        .is_err());
+        assert!(
+            desktop_oauth_client_from_file(r#"{"installed":{"client_id":"not-a-client"}}"#)
+                .is_err()
+        );
     }
 
     #[test]

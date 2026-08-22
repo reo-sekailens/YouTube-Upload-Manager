@@ -3,6 +3,7 @@ import type { UploadStatus } from "../lib/types";
 const labels: Record<UploadStatus, string> = {
   draft: "Ready to queue",
   queued: "Queued",
+  dispatching: "Starting upload",
   importing: "Importing",
   uploading: "Uploading",
   needs_reconciliation: "Needs review",

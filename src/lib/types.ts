@@ -2,11 +2,35 @@ export type UploadStatus =
   | "draft"
   | "queued"
   | "importing"
+  | "dispatching"
   | "uploading"
   | "needs_reconciliation"
   | "uploaded"
   | "failed"
   | "cancelled";
+
+/** YouTube publishing visibility selected by the operator for one manual upload. */
+export type UploadVisibility = "private" | "unlisted" | "public";
+export type FolderMonitorVisibility = "private" | "unlisted";
+
+/** Required operator declaration collected before manual intake. */
+export type ManualUploadSettings = {
+  madeForKids: boolean;
+  visibility: UploadVisibility;
+  playlistId?: string;
+  playlistTitle?: string;
+};
+
+/** Device-wide default used to prefill, never hide, the manual intake declaration. */
+export type ManualUploadDefaults = {
+  madeForKids: boolean;
+};
+
+/** Safe playlist metadata retrieved from the owner-authorized channel. */
+export type YouTubePlaylist = {
+  id: string;
+  title: string;
+};
 
 export type UploadItem = {
   id: string;
@@ -17,6 +41,15 @@ export type UploadItem = {
   status: UploadStatus;
   confirmedBytes: number;
   totalBytes: number;
+  /** Explicit operator choice for this item. Manual uploads start private. */
+  visibility: UploadVisibility;
+  madeForKids: boolean;
+  playlistId?: string;
+  playlistTitle?: string;
+  /** When this native upload attempt began; reset for each new attempt. */
+  uploadStartedAt?: string;
+  /** Native, acknowledged transfer rate. Absent until enough upload progress is measured. */
+  transferBytesPerSecond?: number;
   videoId?: string;
   detail?: string;
   updatedAt: string;
@@ -27,6 +60,8 @@ export type DuplicateCandidate = {
   confidence: "exact_local" | "strong_remote" | "metadata";
   leftTitle: string;
   rightTitle: string;
+  leftVideoId?: string;
+  rightVideoId?: string;
   evidence: string;
   decision?: "keep" | "dismiss" | "delete_requested";
 };
@@ -35,6 +70,18 @@ export type DashboardSnapshot = {
   activeChannel?: string;
   items: UploadItem[];
   duplicates: DuplicateCandidate[];
+};
+
+/** Safe, device-local status for the operator-approved watched folder. */
+export type FolderMonitorSettings = {
+  enabled: boolean;
+  folderPath?: string;
+  channelName?: string;
+  visibility: FolderMonitorVisibility;
+  status: string;
+  detail: string;
+  lastScanAt?: string;
+  lastFileName?: string;
 };
 
 /** Safe-to-render metadata. OAuth tokens never enter the webview. */

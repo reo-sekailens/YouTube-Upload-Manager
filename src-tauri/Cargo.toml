@@ -1,8 +1,8 @@
 [package]
-name = "youtube-mass-uploader"
-version = "0.1.0"
+name = "youtube-upload-manager"
+version = "0.1.8"
 description = "Local-first YouTube upload workspace"
-authors = ["YouTube Mass Uploader"]
+authors = ["YouTube Upload Manager"]
 edition = "2021"
 
 [lib]

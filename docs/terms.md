@@ -1,11 +1,11 @@
 ---
 title: Terms of Service
-description: Terms for the local-first YouTube Mass Uploader application.
+description: Terms for the local-first YouTube Upload Manager application.
 ---
 
 Last updated: 22 August 2026
 
-These Terms of Service govern your use of **YouTube Mass Uploader** (the
+These Terms of Service govern your use of **YouTube Upload Manager** (the
 “App”). By installing or using the App, you agree to these terms. If you do
 not agree, do not use the App.
 
@@ -15,7 +15,9 @@ The App is a local-first tool that runs on your device. It helps you prepare
 uploads, connect an authorized YouTube channel, upload videos directly to
 YouTube, review channel-library data, and review potential duplicates. The App
 is not provided by, endorsed by, sponsored by, or affiliated with YouTube or
-Google.
+Google. Google and YouTube are trademarks of Google LLC. All other product
+names, logos, and trademarks are the property of their respective owners. Use
+of these names in the App is solely to identify compatible services.
 
 Use of YouTube through the App is also subject to the applicable Google and
 YouTube terms, policies, and rules, including the

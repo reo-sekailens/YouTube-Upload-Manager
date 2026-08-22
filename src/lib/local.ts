@@ -1,19 +1,40 @@
-import { invoke } from "@tauri-apps/api/core";
-import type { ConnectionSettings, DashboardSnapshot, DeletionRequest, RemoteVideo, UploadItem, YouTubeConnectionStart } from "./types";
+import { invoke, isTauri as detectTauri } from "@tauri-apps/api/core";
+import type { ConnectionSettings, DashboardSnapshot, DeletionRequest, FolderMonitorSettings, FolderMonitorVisibility, ManualUploadDefaults, ManualUploadSettings, RemoteVideo, UploadItem, UploadVisibility, YouTubeConnectionStart, YouTubePlaylist } from "./types";
 
-export const isTauri = "__TAURI_INTERNALS__" in window;
+// Use Tauri's public runtime detector. Internal bridge properties are not an
+// application capability contract and can leave interactive controls disabled.
+export const isTauri = detectTauri();
 
 export async function loadSnapshot(): Promise<DashboardSnapshot> {
   if (!isTauri) return { items: [], duplicates: [] };
   return invoke<DashboardSnapshot>("dashboard_snapshot");
 }
 
-export async function importAsset(path: string): Promise<UploadItem> {
-  return invoke<UploadItem>("import_asset", { path });
+export async function importAsset(path: string, settings: ManualUploadSettings): Promise<UploadItem> {
+  return invoke<UploadItem>("import_asset", { path, settings });
+}
+
+export async function listYouTubePlaylists(): Promise<YouTubePlaylist[]> {
+  if (!isTauri) return [];
+  return invoke<YouTubePlaylist[]>("list_youtube_playlists");
+}
+
+export async function loadManualUploadDefaults(): Promise<ManualUploadDefaults> {
+  if (!isTauri) return { madeForKids: false };
+  return invoke<ManualUploadDefaults>("load_manual_upload_defaults");
+}
+
+export async function saveManualUploadDefaults(madeForKids: boolean): Promise<ManualUploadDefaults> {
+  return invoke<ManualUploadDefaults>("save_manual_upload_defaults", { madeForKids });
 }
 
 export async function queueItem(id: string): Promise<UploadItem> {
   return invoke<UploadItem>("queue_item", { id });
+}
+
+/** Saves the operator-selected visibility on one manual upload before it is queued. */
+export async function setItemVisibility(id: string, visibility: UploadVisibility): Promise<UploadItem> {
+  return invoke<UploadItem>("set_item_visibility", { id, visibility });
 }
 
 export async function reconcileQueue(): Promise<UploadItem[]> {
@@ -28,6 +49,30 @@ export async function syncChannelInventory(): Promise<number> {
   return invoke<number>("sync_channel_inventory");
 }
 
+export async function loadFolderMonitorSettings(): Promise<FolderMonitorSettings> {
+  if (!isTauri) {
+    return {
+      enabled: false,
+      visibility: "private",
+      status: "disabled",
+      detail: "Folder monitoring is available only in the signed desktop app.",
+    };
+  }
+  return invoke<FolderMonitorSettings>("load_folder_monitor_settings");
+}
+
+export async function enableFolderMonitor(path: string, visibility: FolderMonitorVisibility): Promise<FolderMonitorSettings> {
+  return invoke<FolderMonitorSettings>("enable_folder_monitor", { path, visibility });
+}
+
+export async function disableFolderMonitor(): Promise<FolderMonitorSettings> {
+  return invoke<FolderMonitorSettings>("disable_folder_monitor");
+}
+
+export async function scanFolderMonitorNow(): Promise<FolderMonitorSettings> {
+  return invoke<FolderMonitorSettings>("scan_folder_monitor_now");
+}
+
 export async function loadConnectionSettings(): Promise<ConnectionSettings> {
   if (!isTauri) return { connected: false };
   return invoke<ConnectionSettings>("load_connection_settings");
@@ -35,6 +80,11 @@ export async function loadConnectionSettings(): Promise<ConnectionSettings> {
 
 export async function saveOAuthClientId(clientId: string): Promise<ConnectionSettings> {
   return invoke<ConnectionSettings>("save_oauth_client_id", { oauthClientId: clientId });
+}
+
+/** Parses a downloaded Google Desktop OAuth JSON file only in Rust; its secret stays in OS-protected storage. */
+export async function importDesktopOAuthClient(path: string): Promise<ConnectionSettings> {
+  return invoke<ConnectionSettings>("import_desktop_oauth_client", { path });
 }
 
 export async function beginYoutubeConnection(): Promise<YouTubeConnectionStart> {

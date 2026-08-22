@@ -1,4 +1,4 @@
-# YouTube Mass Uploader
+# YouTube Upload Manager
 
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://v2.tauri.app/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=111827)](https://react.dev/)
@@ -35,9 +35,9 @@ authorize and start.
    npm run tauri -- dev
    ```
 
-4. Before connecting, configure your own Google OAuth client ID in the app and
-   use a YouTube channel you are authorized to manage. Begin with a test
-   channel.
+4. This personal build already includes its public desktop OAuth client ID.
+   Add your Google account as a test user in its Google Cloud project, then
+   connect a YouTube channel you are authorized to manage.
 
 Useful local checks:
 
@@ -60,7 +60,7 @@ npm run build
 The local app, persistent queue, native OAuth path, resumable-upload workflow,
 inventory sync, and deletion-request review are implemented and locally tested.
 Live YouTube verification is intentionally separate: it requires an operator's
-configured OAuth client and authorized test channel.
+authorized test channel.
 
 ## Safety and security
 
@@ -72,6 +72,13 @@ ownership check before a YouTube delete operation can occur.
 
 This project uses official Google OAuth and YouTube APIs only. It does not
 bypass account restrictions, quotas, copyright rules, or YouTube policies.
+
+## Independent project and trademarks
+
+YouTube Upload Manager is an independent project. It is not affiliated with,
+endorsed by, sponsored by, or provided by Google or YouTube. Google and YouTube
+are trademarks of Google LLC. All other product names, logos, and trademarks
+are the property of their respective owners.
 
 ## Maintainers
 

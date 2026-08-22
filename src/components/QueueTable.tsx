@@ -1,10 +1,11 @@
-import type { UploadItem } from "../lib/types";
+import type { UploadItem, UploadVisibility } from "../lib/types";
 import { StatusPill } from "./StatusPill";
 
 interface QueueTableProps {
   items: UploadItem[];
   busy: boolean;
   onQueue: (item: UploadItem) => void;
+  onVisibilityChange: (item: UploadItem, visibility: UploadVisibility) => void;
 }
 
 function formatSize(bytes: number) {
@@ -12,7 +13,15 @@ function formatSize(bytes: number) {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 * 1024 ? 0 : 1)} GB`;
 }
 
-export function QueueTable({ items, busy, onQueue }: QueueTableProps) {
+function formatEta(item: UploadItem) {
+  if (!item.transferBytesPerSecond || item.transferBytesPerSecond <= 0) return "ETA calculating";
+  const seconds = Math.ceil(Math.max(0, item.totalBytes - item.confirmedBytes) / item.transferBytesPerSecond);
+  if (seconds >= 3600) return `ETA ${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  if (seconds >= 60) return `ETA ${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `ETA ${seconds}s`;
+}
+
+export function QueueTable({ items, busy, onQueue, onVisibilityChange }: QueueTableProps) {
   if (items.length === 0) {
     return <p className="queue-table__empty queue-table__empty--state">Your upload queue is empty.</p>;
   }
@@ -23,6 +32,7 @@ export function QueueTable({ items, busy, onQueue }: QueueTableProps) {
         <thead>
           <tr>
             <th scope="col">Video</th>
+            <th scope="col">Visibility</th>
             <th scope="col">Local identity</th>
             <th scope="col">Transfer</th>
             <th scope="col">Status</th>
@@ -47,6 +57,18 @@ export function QueueTable({ items, busy, onQueue }: QueueTableProps) {
                   <span className="queue-table__digest-label">SHA-256</span>
                   <code className="queue-table__digest">{item.digest ? `${item.digest.slice(0, 12)}…` : "Calculating…"}</code>
                 </td>
+                <td className="queue-table__visibility" data-label="Visibility">
+                  <label className="visibility-select">
+                    <span className="sr-only">Visibility for {item.title}</span>
+                    <select disabled={busy || !["draft", "failed"].includes(item.status)} onChange={(event) => onVisibilityChange(item, event.target.value as UploadVisibility)} value={item.visibility}>
+                      <option value="private">Private</option>
+                      <option value="unlisted">Unlisted</option>
+                      <option value="public">Public</option>
+                    </select>
+                  </label>
+                  <span className="queue-table__visibility-note">{item.status === "draft" || item.status === "failed" ? "Set before queueing" : "Locked for this upload"}</span>
+                  <span className="queue-table__visibility-note">{item.madeForKids ? "Made for kids" : "Not made for kids"}{item.playlistTitle ? ` · ${item.playlistTitle}` : " · No playlist"}</span>
+                </td>
                 <td className="queue-table__transfer" data-label="Transfer">
                   <div className="queue-progress">
                     <div
@@ -61,6 +83,7 @@ export function QueueTable({ items, busy, onQueue }: QueueTableProps) {
                     </div>
                     <span>{progress}%</span>
                   </div>
+                  {item.status === "uploading" ? <span className="queue-table__eta">{formatEta(item)}</span> : null}
                   {item.detail ? <span className="queue-table__detail">{item.detail}</span> : null}
                 </td>
                 <td className="queue-table__status" data-label="Status">

@@ -5549,8 +5549,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "youtube-mass-uploader"
-version = "0.1.0"
+name = "youtube-upload-manager"
+version = "0.1.8"
 dependencies = [
  "base64 0.22.1",
  "chrono",

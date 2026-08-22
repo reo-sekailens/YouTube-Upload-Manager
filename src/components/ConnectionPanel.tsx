@@ -1,6 +1,7 @@
-import { FormEvent, useEffect, useId, useState } from "react";
+import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { beginYoutubeConnection, disconnectYoutube, isTauri, loadConnectionSettings, saveOAuthClientId } from "../lib/local";
+import { beginYoutubeConnection, disconnectYoutube, importDesktopOAuthClient, isTauri, loadConnectionSettings } from "../lib/local";
 import type { ConnectionSettings } from "../lib/types";
 
 const disconnected: ConnectionSettings = { connected: false };
@@ -10,11 +11,8 @@ type ConnectionPanelProps = {
 };
 
 export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
-  const clientIdId = useId();
   const [settings, setSettings] = useState<ConnectionSettings>(disconnected);
-  const [clientId, setClientId] = useState("");
   const [notice, setNotice] = useState("");
-  const [saving, setSaving] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
 
@@ -24,7 +22,6 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
       .then((loaded) => {
         if (!active) return;
         setSettings(loaded);
-        setClientId(loaded.clientId ?? "");
         onConnectionChange?.(loaded);
       })
       .catch(() => {
@@ -33,35 +30,28 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
     return () => { active = false; };
   }, [onConnectionChange]);
 
-  const save = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const normalizedClientId = clientId.trim();
-    if (!normalizedClientId) {
-      setNotice("Enter the Google OAuth client ID before saving.");
-      return;
-    }
-    if (!normalizedClientId.endsWith(".apps.googleusercontent.com")) {
-      setNotice("Enter a Google installed-app OAuth client ID ending in .apps.googleusercontent.com.");
-      return;
-    }
-    if (!isTauri) {
-      setNotice("Browser preview cannot save local connection settings. Open the signed Tauri app.");
-      return;
-    }
-
-    setSaving(true);
-    try {
-      const saved = await saveOAuthClientId(normalizedClientId);
-      setSettings(saved);
-      setClientId(saved.clientId ?? normalizedClientId);
-      onConnectionChange?.(saved);
-      setNotice("Google OAuth client ID saved on this device. Connect YouTube when authorization is available.");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "The local OAuth client setting could not be saved.");
-    } finally {
-      setSaving(false);
-    }
-  };
+  useEffect(() => {
+    if (!connecting) return;
+    let active = true;
+    const refreshConnection = async () => {
+      try {
+        const loaded = await loadConnectionSettings();
+        if (!active || loaded.detail === "Waiting for Google authorization in your browser.") return;
+        setSettings(loaded);
+        onConnectionChange?.(loaded);
+        setNotice(loaded.detail ?? "Google authorization finished.");
+        setConnecting(false);
+      } catch {
+        // The initial connection action remains the operator-visible status if a poll fails.
+      }
+    };
+    void refreshConnection();
+    const interval = window.setInterval(() => void refreshConnection(), 1000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [connecting, onConnectionChange]);
 
   const connect = async () => {
     if (!isTauri || !settings.clientId) return;
@@ -70,10 +60,33 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
       const { authorizationUrl } = await beginYoutubeConnection();
       const url = new URL(authorizationUrl);
       if (url.protocol !== "https:") throw new Error("The authorization request must use HTTPS.");
-      await openUrl(url.toString());
+      void openUrl(url.toString()).catch((error: unknown) => {
+        setConnecting(false);
+        setNotice(error instanceof Error ? error.message : "Google authorization could not be opened.");
+      });
       setNotice("Google authorization was opened in your browser. Return to this app when consent is complete.");
     } catch (error) {
+      setConnecting(false);
       setNotice(error instanceof Error ? error.message : "YouTube authorization could not be started.");
+    }
+  };
+
+  const importDesktopClient = async () => {
+    if (!isTauri) return;
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Google Desktop OAuth JSON", extensions: ["json"] }],
+    });
+    if (typeof selected !== "string") return;
+    setConnecting(true);
+    try {
+      const saved = await importDesktopOAuthClient(selected);
+      setSettings(saved);
+      onConnectionChange?.(saved);
+      setNotice("Desktop OAuth JSON imported. Its client secret is held in OS-protected storage; connect YouTube when ready.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The Desktop OAuth JSON could not be imported.");
     } finally {
       setConnecting(false);
     }
@@ -85,7 +98,6 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
     try {
       const saved = await disconnectYoutube();
       setSettings(saved);
-      setClientId(saved.clientId ?? "");
       onConnectionChange?.(saved);
       setNotice("YouTube was disconnected on this device. Locally protected authorization credentials were removed; no YouTube videos changed.");
     } catch (error) {
@@ -115,7 +127,7 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
       <div className="connection-panel__summary">
         {settings.connected && settings.activeChannel ? (
           <p className="connection-panel__channel">
-            Active channel
+            <span>Active channel</span>
             <strong>{settings.activeChannel}</strong>
           </p>
         ) : settings.connected ? (
@@ -125,48 +137,34 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
           </p>
         ) : (
           <p className="connection-panel__description">
-            Configure this device before authorizing a YouTube channel. No
-            account is connected yet.
+            Connect your Google account when ready. No account is connected
+            yet.
           </p>
         )}
       </div>
 
-      <form className="connection-form" onSubmit={(event) => void save(event)}>
-        <div className="connection-form__field">
-          <label htmlFor={clientIdId}>Google OAuth client ID</label>
-          <div className="connection-form__controls">
-            <input
-              id={clientIdId}
-              autoCapitalize="none"
-              autoComplete="off"
-              inputMode="text"
-              onChange={(event) => setClientId(event.target.value)}
-              placeholder="1234567890-abc.apps.googleusercontent.com"
-              spellCheck={false}
-              value={clientId}
-            />
-            <button className="secondary" disabled={saving} type="submit">
-              {saving ? "Saving…" : "Save locally"}
-            </button>
-          </div>
-        </div>
+      <p className="connection-form__help">
+        This personal build includes its public desktop OAuth client ID. Your
+        OAuth access and refresh tokens remain in OS-protected storage and
+        never reach this screen.
+      </p>
+      {!settings.connected && (
         <p className="connection-form__help">
-          This public client ID stays in this app’s local settings. OAuth access
-          and refresh tokens remain in OS-protected storage and never reach this
-          screen.
+          If Google rejects the built-in client, import your downloaded Desktop OAuth JSON. The file is parsed locally and its client secret is stored only in the operating system credential store.
         </p>
-        {notice && <p className="connection-form__notice" role="status">{notice}</p>}
-      </form>
+      )}
+      {notice && <p className="connection-form__notice" role="status">{notice}</p>}
       <footer className="connection-panel__actions">
-        {!settings.connected && <button disabled={!isTauri || !settings.clientId || saving || connecting} onClick={() => void connect()} type="button">
+        {!settings.connected && <button disabled={!isTauri || connecting} onClick={() => void connect()} type="button">
           {connecting ? "Opening Google…" : "Connect YouTube"}
         </button>}
+        {!settings.connected && <button className="secondary-button" disabled={!isTauri || connecting} onClick={() => void importDesktopClient()} type="button">Import Desktop OAuth JSON</button>}
         {settings.connected && (
           <button className="danger-button" disabled={!isTauri || disconnecting || connecting} onClick={() => void disconnect()} type="button">
             {disconnecting ? "Disconnecting…" : "Disconnect YouTube"}
           </button>
         )}
-        {!settings.clientId && <p>Save a client ID on this device before starting authorization.</p>}
+        {!isTauri && <p>Open the signed desktop app to connect YouTube.</p>}
         {settings.connected && <p>Disconnecting removes this device’s local authorization only. It never deletes a YouTube video.</p>}
       </footer>
     </section>

@@ -1,6 +1,6 @@
-# YouTube Mass Uploader
+# YouTube Upload Manager
 
-YouTube Mass Uploader is a local-first application for preparing, reviewing,
+YouTube Upload Manager is a local-first application for preparing, reviewing,
 and running controlled YouTube upload batches from your own device.
 
 ## Your device stays in control
@@ -27,11 +27,18 @@ and running controlled YouTube upload batches from your own device.
 
 ## Google and YouTube account requirement
 
-You need a Google OAuth client configured for this application and a YouTube
-channel you are authorized to manage. The application uses official Google
-OAuth and YouTube Data API operations; it does not bypass YouTube policy,
-quota, ownership, copyright, or account restrictions. Start with a
+This personal build already includes its public desktop OAuth client ID. Add
+your Google account as a test user in its Google Cloud project and use a
+YouTube channel you are authorized to manage. The application uses official
+Google OAuth and YouTube Data API operations; it does not bypass YouTube
+policy, quota, ownership, copyright, or account restrictions. Start with a
 non-production test channel before relying on uploads or deletion workflows.
+
+## Independent project and trademarks
+
+YouTube Upload Manager is not affiliated with, endorsed by, sponsored by, or
+provided by Google or YouTube. Google and YouTube are trademarks of Google LLC.
+All other names, logos, and trademarks belong to their respective owners.
 
 ## Learn more
 
