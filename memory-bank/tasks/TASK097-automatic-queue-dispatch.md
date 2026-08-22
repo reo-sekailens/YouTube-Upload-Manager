@@ -28,3 +28,12 @@ the queue the final operator action before native automatic dispatch.
 - The existing capacity scheduler limits automatic work safely and is also
   invoked from startup, watched-folder scanning, quota resume, and worker
   completion.
+- Recovered items that were queued while disconnected are re-kicked after a
+  successful OAuth connection and after a successful manual library refresh.
+  This closes the gap where startup had already run before the user connected.
+- The recovery-dispatch repair was packaged as unsigned x64 installers on
+  2026-08-23:
+  - NSIS `YouTube Upload Manager_0.1.9_x64-setup.exe` — 26,481,246 bytes;
+    SHA-256 `3051B3A2E7A580908B5D49C14E16DAF1A0BFB37116342C3A5E06A116B480C1E4`.
+  - MSI `YouTube Upload Manager_0.1.9_x64_en-US.msi` — 36,327,424 bytes;
+    SHA-256 `AAD39651352E57028A452B7C54DC4E6A01CCDF45EB48544638036C6373BC4287`.

@@ -21,6 +21,7 @@ import {
   queueItem,
   reAuditIgnoredDuplicateCandidates,
   resolveUploadTitleDuplicates,
+  resumeQueuedUploads,
   setItemDeleteSourceAfterUpload,
   setItemVisibility,
   syncChannelInventory,
@@ -688,11 +689,12 @@ export default function App() {
     setNotice(`Refreshing ${channel}'s YouTube library…`);
     try {
       const synced = await syncChannelInventory();
+      const started = await resumeQueuedUploads();
       await refresh();
       updateConnection(await loadConnectionSettings());
       setLibraryRefreshVersion((version) => version + 1);
       setNotice(
-        `Library refreshed: ${synced} YouTube video${synced === 1 ? "" : "s"} saved locally for ${channel}.`,
+        `Library refreshed: ${synced} YouTube video${synced === 1 ? "" : "s"} saved locally for ${channel}.${started > 0 ? ` ${started} queued upload${started === 1 ? "" : "s"} started.` : " Automatic upload dispatch was checked."}`,
       );
     } catch (error) {
       setNotice(

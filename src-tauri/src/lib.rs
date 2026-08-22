@@ -21,6 +21,8 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_fs::{FilePath, FsExt, OpenOptions as FsOpenOptions};
 use uuid::Uuid;
 
+mod performance;
+
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as UnixOpenOptionsExt;
 #[cfg(windows)]
@@ -436,12 +438,26 @@ fn user_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+fn spawn_worker<F, T>(worker: F) -> thread::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    performance::record_worker_thread();
+    thread::spawn(worker)
+}
+
 fn database(state: &AppState) -> Result<Connection, String> {
-    let connection = Connection::open(&state.database_path).map_err(user_error)?;
+    #[allow(unused_mut)]
+    let mut connection = Connection::open(&state.database_path).map_err(user_error)?;
+    performance::record_database_open();
+    #[cfg(feature = "performance-harness")]
+    connection.trace(Some(performance::record_database_statement));
     // The dashboard and folder monitor use short-lived connections concurrently.
     // WAL lets their reads coexist with the atomic library replacement, while the
     // bounded busy timeout handles the rare competing writer without dropping a
     // fully fetched YouTube inventory.
+    performance::record_database_schema_batch();
     connection
         .busy_timeout(DATABASE_BUSY_TIMEOUT)
         .map_err(user_error)?;
@@ -1398,7 +1414,10 @@ fn secure_store_available() -> bool {
     CredentialEntry::store_status().is_ok()
 }
 
+#[cfg(not(feature = "performance-harness"))]
 const SECURE_STORE_SERVICE: &str = "com.sekailens.youtube-upload-manager";
+#[cfg(feature = "performance-harness")]
+const SECURE_STORE_SERVICE: &str = "com.sekailens.youtube-upload-manager.performance-harness";
 const UPLOAD_REFRESH_TOKEN_KEY: &str = "youtube-refresh-token";
 const DELETION_REFRESH_TOKEN_KEY: &str = "youtube-deletion-refresh-token";
 
@@ -3527,7 +3546,7 @@ fn run_preflight_scan_job(state: &AppState, app: &AppHandle, job_id: &str) -> Re
 /// container metadata is collected once on a native worker and retained with
 /// the resumable local job for later UI reads.
 fn queue_preflight_metadata_collection(state: AppState, job_id: String) {
-    thread::spawn(move || {
+    spawn_worker(move || {
         let _ = run_preflight_metadata_collection(&state, &job_id);
     });
 }
@@ -3776,7 +3795,7 @@ fn resume_preflight_scan_jobs(state: AppState, app: AppHandle) {
     }).unwrap_or_default();
     if !jobs.is_empty() {
         let worker_state = state.clone();
-        thread::spawn(move || {
+        spawn_worker(move || {
             for job_id in jobs {
                 let _ = run_preflight_scan_job(&worker_state, &app, &job_id);
             }
@@ -4367,9 +4386,10 @@ fn ffprobe_metadata(
             .stderr(Stdio::null())
             .spawn()
             .ok()?;
+        performance::record_ffprobe_process();
         let mut stdout = child.stdout.take()?;
         let (output_sender, output_receiver) = mpsc::sync_channel(1);
-        thread::spawn(move || {
+        spawn_worker(move || {
             let output = read_bounded_output(&mut stdout, FFPROBE_STDOUT_MAX_BYTES)
                 .ok()
                 .flatten();
@@ -5172,7 +5192,7 @@ fn ingest_stable_monitored_file(
 /// and can stop an unfinished upload if it finds a confirmed local duplicate.
 /// Its durable `pending` / `running` state is recovered on the next launch.
 fn schedule_watched_hash_verification(state: AppState, item_id: String) {
-    thread::spawn(move || {
+    spawn_worker(move || {
         let _ = verify_watched_hash_in_background(&state, &item_id);
     });
 }
@@ -5787,7 +5807,7 @@ fn request_folder_monitor_scan_impl(state: &AppState) -> Result<FolderMonitorSet
     )?;
     drop(connection);
     let worker_state = state.clone();
-    thread::spawn(move || {
+    spawn_worker(move || {
         if scan_folder_monitor_impl(&worker_state, true).is_err() {
             record_folder_monitor_scan_failure(&worker_state);
         }
@@ -6013,7 +6033,7 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
         return Err("Queued uploads were already claimed by another local worker.".into());
     }
     let worker_state = state.clone();
-    thread::spawn(move || run_queued_uploads(worker_state, claimed_item_ids));
+    spawn_worker(move || run_queued_uploads(worker_state, claimed_item_ids));
     Ok(total)
 }
 
@@ -6021,7 +6041,7 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
 /// eligible for dispatch again. Keep this asynchronous so OAuth's loopback
 /// confirmation never waits for disk sampling or upload preparation.
 fn kick_automatic_upload_dispatch(state: AppState) {
-    thread::spawn(move || {
+    spawn_worker(move || {
         let _ = start_queued_uploads_impl(&state);
     });
 }
@@ -6076,7 +6096,9 @@ fn quota_resume_poll_loop(state: AppState) {
 }
 
 fn initialize_state(app: &AppHandle) -> Result<AppState, String> {
-    let root = app.path().app_data_dir().map_err(user_error)?;
+    performance::mark_initialization_started();
+    let default_root = app.path().app_data_dir().map_err(user_error)?;
+    let root = performance::isolated_profile_root(default_root)?;
     let media_directory = root.join("media");
     fs::create_dir_all(&media_directory).map_err(user_error)?;
     let state = AppState {
@@ -6088,8 +6110,10 @@ fn initialize_state(app: &AppHandle) -> Result<AppState, String> {
     database(&state)?;
     reconcile_queue_impl(&state)?;
     reconcile_interrupted_deletions(&state)?;
+    performance::mark_recovery_classified();
     resume_watched_hash_verifications(state.clone());
     resume_preflight_scan_jobs(state.clone(), app.clone());
+    performance::mark_native_ready();
     Ok(state)
 }
 
@@ -6202,6 +6226,11 @@ fn load_connection_settings(state: State<'_, AppState>) -> Result<ConnectionSett
 #[tauri::command]
 fn github_issue_diagnostic_report(state: State<'_, AppState>) -> Result<String, String> {
     diagnostic_report_impl(&state)
+}
+
+#[tauri::command]
+fn native_performance_report() -> performance::NativePerformanceReport {
+    performance::report()
 }
 
 #[tauri::command]
@@ -6373,7 +6402,7 @@ fn begin_oauth_connection(
     set_connection_failure_detail(&state, "Waiting for Google authorization in your browser.")?;
     let callback_state = state.inner().clone();
     let callback_state_token = state_token.clone();
-    thread::spawn(move || {
+    spawn_worker(move || {
         await_oauth_callback(
             callback_state,
             listener,
@@ -6569,7 +6598,7 @@ async fn start_preflight_duplicate_files(
     let worker_state = state.clone();
     let worker_app = app.clone();
     let worker_job_id = job_id.clone();
-    thread::spawn(move || {
+    spawn_worker(move || {
         let _ = run_preflight_scan_job(&worker_state, &worker_app, &worker_job_id);
     });
     load_preflight_scan(&state, &job_id)
@@ -7553,6 +7582,7 @@ fn exit_application(app: AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    performance::mark_process_start();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -7563,63 +7593,68 @@ pub fn run() {
             install_panic_marker(state.database_path.with_file_name(PANIC_MARKER_FILE));
             app.manage(state.clone());
             let monitor_state = state.clone();
-            thread::spawn(move || folder_monitor_poll_loop(monitor_state));
-            thread::spawn(move || quota_resume_poll_loop(state));
+            spawn_worker(move || folder_monitor_poll_loop(monitor_state));
+            spawn_worker(move || quota_resume_poll_loop(state));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            dashboard_snapshot,
-            github_issue_diagnostic_report,
-            app_release_identity,
-            load_crash_recovery_status,
-            record_webview_error,
-            acknowledge_crash_recovery,
-            load_folder_monitor_settings,
-            load_folder_monitor_overview,
-            enable_folder_monitor,
-            disable_folder_monitor,
-            scan_folder_monitor_now,
-            process_existing_folder_files,
-            load_connection_settings,
-            load_manual_upload_defaults,
-            save_manual_upload_defaults,
-            import_desktop_oauth_client,
-            export_portable_archive,
-            import_portable_archive,
-            begin_youtube_connection,
-            cancel_youtube_connection,
+        .invoke_handler(|invoke: tauri::ipc::Invoke<tauri::Wry>| {
+            performance::record_native_invoke();
+            tauri::generate_handler![
+                dashboard_snapshot,
+                github_issue_diagnostic_report,
+                native_performance_report,
+                app_release_identity,
+                load_crash_recovery_status,
+                record_webview_error,
+                acknowledge_crash_recovery,
+                load_folder_monitor_settings,
+                load_folder_monitor_overview,
+                enable_folder_monitor,
+                disable_folder_monitor,
+                scan_folder_monitor_now,
+                process_existing_folder_files,
+                load_connection_settings,
+                load_manual_upload_defaults,
+                save_manual_upload_defaults,
+                import_desktop_oauth_client,
+                export_portable_archive,
+                import_portable_archive,
+                begin_youtube_connection,
+                cancel_youtube_connection,
             disconnect_youtube,
             sync_channel_inventory,
+            resume_queued_uploads,
             check_upload_title_duplicates,
-            ignore_duplicate_candidate,
-            re_audit_ignored_duplicate_candidates,
-            start_preflight_duplicate_files,
-            load_preflight_duplicate_scan,
-            cancel_preflight_duplicate_scan,
-            prepare_preflight_local_delete_file,
-            delete_preflight_duplicate_file,
-            resolve_upload_title_duplicates,
-            list_remote_videos,
-            list_deletion_requests,
-            request_video_deletion,
-            cancel_deletion_request,
-            clear_deletion_requests,
-            begin_deletion_authorization,
-            enable_deletion_sudo_mode,
-            disable_deletion_sudo_mode,
-            execute_deletion_request,
-            import_asset,
-            list_youtube_playlists,
-            create_youtube_playlist,
-            set_item_visibility,
-            set_item_delete_source_after_upload,
-            delete_uploaded_source,
-            queue_item,
-            clear_upload_queue,
-            cancel_upload_item,
-            reconcile_queue,
-            exit_application
-        ])
+                ignore_duplicate_candidate,
+                re_audit_ignored_duplicate_candidates,
+                start_preflight_duplicate_files,
+                load_preflight_duplicate_scan,
+                cancel_preflight_duplicate_scan,
+                prepare_preflight_local_delete_file,
+                delete_preflight_duplicate_file,
+                resolve_upload_title_duplicates,
+                list_remote_videos,
+                list_deletion_requests,
+                request_video_deletion,
+                cancel_deletion_request,
+                clear_deletion_requests,
+                begin_deletion_authorization,
+                enable_deletion_sudo_mode,
+                disable_deletion_sudo_mode,
+                execute_deletion_request,
+                import_asset,
+                list_youtube_playlists,
+                create_youtube_playlist,
+                set_item_visibility,
+                set_item_delete_source_after_upload,
+                delete_uploaded_source,
+                queue_item,
+                clear_upload_queue,
+                cancel_upload_item,
+                reconcile_queue,
+                exit_application
+            ](invoke)
+        })
         .run(tauri::generate_context!())
         .expect("error while running local application");
 }

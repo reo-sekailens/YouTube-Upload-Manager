@@ -9,6 +9,8 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "test": "vitest run",
+    "performance:frontend": "npm run build && node scripts/performance/frontend-baseline.mjs",
+    "performance:frontend:check": "npm run build && node scripts/performance/frontend-baseline.mjs --check",
     "prepare:ffprobe": "node scripts/prepare-ffprobe.mjs",
     "tauri": "tauri"
   },

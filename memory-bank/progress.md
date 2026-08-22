@@ -271,3 +271,23 @@ Execute [TASK001](tasks/TASK001-cross-platform-foundation.md), beginning with th
   Windows Rust target is available. Together with the missing approved
   non-production YouTube account/OAuth client, these are verified external
   gates rather than local implementation failures.
+
+# 2026-08-23 — Whole-app performance optimization planned
+
+- Completed a source and build-output audit of the frontend, native runtime,
+  persistence, recovery, provider transport, uploads, inventory/dedupe,
+  preflight, watched folders, media probing, build preparation, packaging, and
+  current performance tests. The ranked findings and provisional budgets are in
+  `memory-bank/performance-audit-2026-08-23.md`.
+- The primary speed limits are repeated schema work on ordinary database opens,
+  unbounded large-file recovery before first render, eager mounting of all
+  workspaces, full polling snapshots with quadratic duplicate reconstruction,
+  per-chunk HTTP client/allocation churn, and claimed uploads that execute
+  serially.
+- Created TASK102 through TASK112 as a dependency-ordered optimization program.
+  TASK103 establishes local packaged p50/p95 baselines before speed claims;
+  TASK104, TASK106, and TASK110 are the first independent implementation wave.
+- `npm run build` passed on the current working tree. The main frontend bundle
+  measured 334,910 bytes raw / 96,394 bytes gzip and the main CSS measured
+  60,454 bytes raw / 10,689 bytes gzip. No application code was changed by this
+  planning audit, and no packaged runtime or live-provider timing was claimed.

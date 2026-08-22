@@ -332,6 +332,11 @@ export async function syncChannelInventory(): Promise<number> {
   return invoke<number>("sync_channel_inventory");
 }
 
+/** Claims an idle persisted queue after a successful native library refresh. */
+export async function resumeQueuedUploads(): Promise<number> {
+  return invoke<number>("resume_queued_uploads");
+}
+
 export async function loadFolderMonitorSettings(): Promise<FolderMonitorSettings> {
   if (!isTauri) {
     return {

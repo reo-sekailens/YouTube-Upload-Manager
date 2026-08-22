@@ -9,6 +9,13 @@ edition = "2021"
 name = "youtube_mass_uploader_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+default = []
+# Enables statement tracing and an explicitly isolated synthetic profile for
+# local packaged performance runs. Regular production builds ignore the
+# harness profile environment variable entirely.
+performance-harness = ["rusqlite/trace"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
