@@ -40,10 +40,22 @@ struct AppState {
     oauth_attempts: Arc<Mutex<HashMap<String, OAuthAttemptKind>>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OAuthAttemptKind {
     Connection,
     Deletion,
+}
+
+fn cancel_connection_attempt(
+    attempts: &mut HashMap<String, OAuthAttemptKind>,
+    attempt_id: &str,
+) -> bool {
+    if attempts.get(attempt_id) == Some(&OAuthAttemptKind::Connection) {
+        attempts.remove(attempt_id);
+        true
+    } else {
+        false
+    }
 }
 
 #[derive(Clone)]
@@ -4208,12 +4220,7 @@ fn cancel_youtube_connection(
 ) -> Result<ConnectionSettings, String> {
     let cancelled = {
         let mut attempts = state.oauth_attempts.lock().map_err(user_error)?;
-        if attempts.get(&attempt_id) == Some(&OAuthAttemptKind::Connection) {
-            attempts.remove(&attempt_id);
-            true
-        } else {
-            false
-        }
+        cancel_connection_attempt(&mut attempts, &attempt_id)
     };
     if !cancelled {
         return Err("This Google connection attempt is no longer active.".into());
@@ -5384,6 +5391,18 @@ mod tests {
             "/oauth2/callback?state=expected-state&code=code",
             expected_state
         ));
+    }
+
+    #[test]
+    fn cancelling_a_connection_attempt_preserves_deletion_authorization() {
+        let mut attempts = HashMap::from([
+            ("connection".to_string(), OAuthAttemptKind::Connection),
+            ("deletion".to_string(), OAuthAttemptKind::Deletion),
+        ]);
+
+        assert!(cancel_connection_attempt(&mut attempts, "connection"));
+        assert!(!cancel_connection_attempt(&mut attempts, "deletion"));
+        assert_eq!(attempts.get("deletion"), Some(&OAuthAttemptKind::Deletion));
     }
 
     #[test]

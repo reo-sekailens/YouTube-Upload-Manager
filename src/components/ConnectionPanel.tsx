@@ -64,7 +64,9 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
       const url = new URL(authorizationUrl);
       if (url.protocol !== "https:") throw new Error("The authorization request must use HTTPS.");
       void openUrl(url.toString()).catch((error: unknown) => {
+        void cancelYoutubeConnection(attemptId).catch(() => undefined);
         setConnecting(false);
+        setConnectionAttemptId(undefined);
         setNotice(error instanceof Error ? error.message : "Google authorization could not be opened.");
       });
       setNotice("Google authorization was opened in your browser. Return to this app when consent is complete.");

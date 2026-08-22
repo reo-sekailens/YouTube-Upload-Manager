@@ -38,6 +38,11 @@ Make failed Google OAuth token exchanges actionable without exposing authorizati
 - Token errors map known OAuth categories without preserving provider descriptions or credential material; focused Rust tests prove redaction.
 - Version `0.1.1` passed 13 Rust tests, TypeScript checking, 9 web tests, and an x64 NSIS production build. Installer SHA-256 `9B402B9B1C9DE4FB3DDA2D202A321BB7F9F6F330440F518F66CDC8EC76691A4B`; the installed executable reports File/Product version `0.1.1` and starts successfully.
 - Browser visual QA captured the connection panel's **Import Desktop OAuth JSON** action. A live user-account authorization remains pending user selection/consent.
+- A pending ordinary Google connection can now be cancelled from the connection
+  panel. Cancellation clears the local PKCE verifier, stops the callback from
+  exchanging a late browser response, leaves any existing connection untouched,
+  and returns the operator to the rest of the app. Deletion authorization is
+  intentionally excluded from this cancellation path.
 - A dedicated Desktop OAuth client was created in `youtube-mass-uploader-506218`, restricted to existing test users. Its JSON was saved outside the repository under the operator's Downloads directory; its secret was not logged or copied into project files.
 - Native SQLite confirmed the completed authorization for `SekaiLens`; version 0.1.2 removes the premature `connecting` reset that had stopped the callback poll before the native receipt arrived. It passed 13 Rust tests, TypeScript checking, 9 web tests, and a fresh NSIS build/install. Installer SHA-256 `E0AC72DFC62831AF1755D422BFEA7BEE237C75530548F0AEA5333ED3D0572135`.
 - The distributed client ID and manual ID-only configuration command were removed. The connection panel and public docs now direct every operator to create their own Google Cloud project, enable the YouTube Data API, configure consent, create a Desktop OAuth client, and import its downloaded JSON. Local source scans and focused tests provide implementation evidence; a live authorization with an operator-created project remains pending.
