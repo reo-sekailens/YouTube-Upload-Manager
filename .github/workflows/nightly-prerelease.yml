@@ -68,6 +68,20 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - uses: actions/cache@v4
+        name: Restore Android NDK
+        with:
+          path: /usr/local/lib/android/sdk/ndk/27.0.12077973
+          key: ${{ runner.os }}-android-ndk-27.0.12077973
+      - uses: actions/cache@v4
+        name: Restore Gradle dependencies
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('package-lock.json', 'src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
