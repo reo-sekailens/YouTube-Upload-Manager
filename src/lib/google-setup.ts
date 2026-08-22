@@ -27,7 +27,7 @@ export const googleSetupSteps: GoogleSetupStep[] = [
   },
   {
     title: "Import the downloaded JSON",
-    detail: "Choose the JSON file below. It is parsed by the native app; its optional client secret is stored only in OS-protected storage.",
+    detail: "Open Connected account to select the downloaded JSON. It is parsed by the native app; its optional client secret is stored only in OS-protected storage.",
   },
 ];
 

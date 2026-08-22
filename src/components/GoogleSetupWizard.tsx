@@ -1,15 +1,13 @@
 import { useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { googleSetupSteps, setupStepProgress } from "../lib/google-setup";
-import { importDesktopOAuthClient, isTauri, openGoogleSetupBrowser } from "../lib/local";
-import type { ConnectionSettings } from "../lib/types";
+import { isTauri, openGoogleSetupBrowser } from "../lib/local";
 
 type GoogleSetupWizardProps = {
-  onConfigured: (settings: ConnectionSettings) => void;
+  onOpenConnectedAccount: () => void;
   onDismiss: () => void;
 };
 
-export function GoogleSetupWizard({ onConfigured, onDismiss }: GoogleSetupWizardProps) {
+export function GoogleSetupWizard({ onOpenConnectedAccount, onDismiss }: GoogleSetupWizardProps) {
   const [step, setStep] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -23,25 +21,6 @@ export function GoogleSetupWizard({ onConfigured, onDismiss }: GoogleSetupWizard
       await openGoogleSetupBrowser(destination);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Google setup could not be opened.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const importClient = async () => {
-    if (!isTauri) return;
-    setError("");
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "Google Desktop OAuth JSON", extensions: ["json"] }],
-    });
-    if (typeof selected !== "string") return;
-    setBusy(true);
-    try {
-      onConfigured(await importDesktopOAuthClient(selected));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The Desktop OAuth JSON could not be imported.");
     } finally {
       setBusy(false);
     }
@@ -67,8 +46,8 @@ export function GoogleSetupWizard({ onConfigured, onDismiss }: GoogleSetupWizard
         {step === 0 && <button disabled={!isTauri || busy} onClick={() => void openSetupPage("account")} type="button">Open Google account</button>}
         {step > 0 && step < 5 && <button disabled={!isTauri || busy} onClick={() => void openSetupPage("cloud")} type="button">Open Google Cloud Console</button>}
         {step === 3 && <p className="google-setup__scope-note">Add `youtube.upload`, `youtube.readonly`, and `youtube.force-ssl` under Data Access. The management scope is used for operator-created private playlists and explicit video deletion.</p>}
-        {importing && <button disabled={!isTauri || busy} onClick={() => void importClient()} type="button">{busy ? "Importing…" : "Choose Desktop OAuth JSON"}</button>}
-        {!isTauri && <p className="google-setup__preview-note">Open the signed desktop app to launch Google setup and import the JSON.</p>}
+        {importing && <button disabled={busy} onClick={onOpenConnectedAccount} type="button">Open Connected account</button>}
+        {!isTauri && <p className="google-setup__preview-note">Open Connected account in the signed desktop app to import the JSON.</p>}
         {error && <p className="google-setup__error" role="alert">{error}</p>}
       </section>
       <footer className="google-setup__actions">

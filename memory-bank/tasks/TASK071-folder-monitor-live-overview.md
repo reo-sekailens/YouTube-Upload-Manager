@@ -67,3 +67,7 @@ native and retaining a manual refresh scan action.
   TypeScript check, and whitespace diff check passed. Visual browser preview
   remains limited to its safe disabled-mode state; a signed desktop session is
   required to exercise populated activity rows.
+- Automatic folder dispatch now claims only the files for which the scheduler
+  has capacity. Remaining observations stay honestly queued rather than being
+  prematurely marked `dispatching`; each worker completion or reconciliation
+  immediately schedules the next eligible item.

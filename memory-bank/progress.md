@@ -226,3 +226,48 @@ Execute [TASK001](tasks/TASK001-cross-platform-foundation.md), beginning with th
   the normal device-local application profile, so this is a packaged runtime
   smoke check only; it does not certify a clean profile, signing, or provider
   operations.
+
+# 2026-08-23 — Current security certification rescan
+
+- Sealed current-worktree security scan `1430aa6e-45ef-4912-b47f-ae09cf440a0f`
+  reported two native-file safety findings: link/reparse-point following in
+  local destructive flows (TASK093) and a mutable-path race before watched
+  source upload (TASK094). Production certification remains blocked until both
+  tasks are remediated and independently rescanned.
+
+# 2026-08-23 — Native-file finding remediation
+
+- TASK093 now rejects symlinks and Windows reparse points at destructive local
+  boundaries; a Windows regression proves linked cleanup retains the link and
+  target. TASK094 snapshots each stable watched source from a no-follow file
+  handle into verified managed storage before any dispatch, with regressions
+  for source replacement and link swap. `cargo test` passed 71 native tests;
+  a fresh formal post-remediation security scan remains required.
+
+# 2026-08-23 — Duplicate deletion content binding
+
+- The post-remediation security review identified a size/timestamp-preserving
+  replacement gap in duplicate deletion. TASK096 records a BLAKE3 content
+  binding in the short-lived review token and verifies the staged bytes before
+  removal. Focused regression passes; formal scan validation remains active.
+
+# 2026-08-23 — Final local security and installer evidence
+
+- Final standard security scan `4b8fa995-b7f4-45b6-a378-729c7467fc88` sealed
+  with zero findings after TASK093, TASK094, and TASK096. The complete native
+  suite passed 73 tests; frontend suite passed 35 tests and the production
+  web build passed.
+- Fresh Windows x64 NSIS package is 26,486,490 bytes with SHA-256
+  `68FDE33B61BB68E6852BE614F7D623607730C68EEE63CB5AF5775DB6BA60059A`.
+  It silently installed to a scoped temporary location with executable,
+  uninstaller, and FFprobe present. It is unsigned; a process environment
+  override did not isolate Tauri's app-data directory, so clean-profile signed
+  runtime proof remains outstanding.
+
+# 2026-08-23 — External production-certification availability check
+
+- Current-user certificate-store inspection found no code-signing certificate.
+  No Android device is attached, no macOS toolchain is installed, and only the
+  Windows Rust target is available. Together with the missing approved
+  non-production YouTube account/OAuth client, these are verified external
+  gates rather than local implementation failures.

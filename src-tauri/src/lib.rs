@@ -21,6 +21,8 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_fs::{FilePath, FsExt, OpenOptions as FsOpenOptions};
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt as UnixOpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 #[cfg(windows)]
@@ -84,6 +86,7 @@ struct PreflightLocalDeleteTarget {
     path: PathBuf,
     file_name: String,
     signature: (u64, String),
+    digest: String,
     created_at: Instant,
 }
 
@@ -245,7 +248,7 @@ fn unavailable_preflight_local_metadata(file_type: Option<String>) -> PreIngestL
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PreIngestLocalMatch {
     title: String,
@@ -253,7 +256,7 @@ struct PreIngestLocalMatch {
     status: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PreIngestUploadedTitleMatch {
     title: String,
@@ -891,7 +894,12 @@ fn source_volume_concurrency_limit(
     let limit = network_rate
         .filter(|rate| *rate > 0.0)
         .map(|rate| {
-            ((rate / disk_rate).ceil() as usize).clamp(1, MAX_CONCURRENT_UPLOADS_PER_VOLUME)
+            // A measured YouTube stream represents the connection throughput
+            // that one worker can sustain. A volume that can read several
+            // such streams concurrently may receive more than one worker.
+            // Keep an explicit ceiling so a stale optimistic sample cannot
+            // turn a large folder intake into an unbounded fan-out.
+            ((disk_rate / rate).floor() as usize).clamp(1, MAX_CONCURRENT_UPLOADS_PER_VOLUME)
         })
         .unwrap_or(1);
     Ok((volume_id, limit))
@@ -1800,10 +1808,41 @@ fn record_source_delete_outcome(
     audit(connection, item_id, audit_kind, audit_detail)
 }
 
+/// Reject local links at destructive boundaries. Canonicalizing a link first
+/// would turn an operator-reviewed directory entry into its target and make a
+/// later cleanup capable of deleting that target instead.
+fn is_link_or_reparse_point(path: &Path) -> Result<bool, String> {
+    let metadata = fs::symlink_metadata(path).map_err(user_error)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(true);
+    }
+    #[cfg(windows)]
+    {
+        return Ok(metadata.file_attributes() & 0x400 != 0);
+    }
+    #[cfg(not(windows))]
+    Ok(false)
+}
+
+/// The reviewed name can also traverse a linked parent directory. Check every
+/// existing path component before canonicalization so a junction or symlink is
+/// never silently converted into an external deletion target.
+fn has_link_or_reparse_component(path: &Path) -> Result<bool, String> {
+    for component in path.ancestors() {
+        if is_link_or_reparse_point(component)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Move a reviewed external file to a unique sibling name before final
 /// validation and deletion. This prevents a replacement at the reviewed path
 /// from being removed by a later path-based delete.
 fn stage_file_for_deletion(path: &Path) -> Result<PathBuf, String> {
+    if has_link_or_reparse_component(path)? {
+        return Err("A linked local file cannot be deleted from this application.".into());
+    }
     let parent = path
         .parent()
         .ok_or_else(|| "The reviewed local file has no parent folder.".to_string())?;
@@ -1856,6 +1895,15 @@ fn finalize_confirmed_source_cleanup(state: &AppState, item_id: &str) -> Result<
             "Original source was retained because the verified source path or digest is unavailable.",
         );
     };
+    if has_link_or_reparse_component(Path::new(&source_path)).unwrap_or(true) {
+        return record_source_delete_outcome(
+            &connection,
+            item_id,
+            "retained",
+            "source_cleanup_retained",
+            "Original source was retained because a linked path cannot be cleaned up automatically.",
+        );
+    }
     let managed_directory = match state.media_directory.canonicalize() {
         Ok(path) => path,
         Err(_) => return Ok(()),
@@ -2803,7 +2851,13 @@ fn await_oauth_callback(
                     .lock()
                     .map(|mut attempts| attempts.remove(&expected_state));
                 match result {
-                    Ok(_) => respond_to_callback(&mut stream, "YouTube is connected."),
+                    Ok(_) => {
+                        // Startup may have recovered queued items before a
+                        // channel was connected. A completed connection must
+                        // retry those items without a separate Start action.
+                        kick_automatic_upload_dispatch(state.clone());
+                        respond_to_callback(&mut stream, "YouTube is connected.")
+                    }
                     Err(error) => {
                         let _ = set_connection_failure_detail(&state, &error);
                         if let Ok(connection) = database(&state) {
@@ -3172,32 +3226,6 @@ fn light_dedupe_title_match(
     remote_titles.sort();
     remote_titles.dedup();
     Ok(Some((remote_titles, scope)))
-}
-
-fn matching_uploaded_title_details(
-    connection: &Connection,
-    channel_id: &str,
-    title: &str,
-) -> Result<Vec<PreIngestUploadedTitleMatch>, String> {
-    let mut statement = connection
-        .prepare("SELECT title, duration, privacy_status, updated_at FROM remote_videos WHERE channel_id = ?1 AND upload_status = 'processed' ORDER BY video_id ASC")
-        .map_err(user_error)?;
-    let matches = statement
-        .query_map([channel_id], |row| {
-            Ok(PreIngestUploadedTitleMatch {
-                title: row.get(0)?,
-                duration: row.get(1)?,
-                privacy_status: row.get(2)?,
-                updated_at: row.get(3)?,
-            })
-        })
-        .map_err(user_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(user_error)?;
-    Ok(matches
-        .into_iter()
-        .filter(|candidate| uploaded_titles_match(title, &candidate.title))
-        .collect())
 }
 
 fn pending_upload_title_duplicates(
@@ -3579,6 +3607,77 @@ fn load_preflight_scan(state: &AppState, job_id: &str) -> Result<PreIngestDuplic
     let activity_log = connection.prepare("SELECT file_name, message, created_at FROM preflight_scan_events WHERE job_id = ?1 ORDER BY id ASC LIMIT 512").map_err(user_error)?
         .query_map([job_id], |row| Ok(PreIngestActivityLogEntry { file_name: row.get(0)?, message: row.get(1)?, created_at: row.get(2)? })).map_err(user_error)?
         .collect::<Result<Vec<_>, _>>().map_err(user_error)?;
+    // A poll must be a bounded SQLite read. Preload the relevant local and
+    // remote evidence once instead of issuing one database query per selected
+    // file every 450ms.
+    let saved_upload_rows = connection
+        .prepare(
+            "SELECT title, file_name, status, digest FROM upload_items WHERE status = 'uploaded'",
+        )
+        .map_err(user_error)?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?;
+    let mut local_matches_by_key = HashMap::<String, Vec<PreIngestLocalMatch>>::new();
+    for (title, file_name, status, digest) in saved_upload_rows {
+        let key = if mode == "deep" {
+            digest.map(|value| format!("digest:{value}"))
+        } else {
+            Some(format!("name:{}", file_name.to_ascii_lowercase()))
+        };
+        if let Some(key) = key {
+            local_matches_by_key
+                .entry(key)
+                .or_default()
+                .push(PreIngestLocalMatch {
+                    title,
+                    file_name,
+                    status,
+                });
+        }
+    }
+    let uploaded_videos = channel_id
+        .as_deref()
+        .map(|channel| {
+            connection
+                .prepare("SELECT title, duration, privacy_status, updated_at FROM remote_videos WHERE channel_id = ?1 AND upload_status = 'processed' ORDER BY video_id ASC")
+                .map_err(user_error)?
+                .query_map([channel], |row| {
+                    Ok(PreIngestUploadedTitleMatch {
+                        title: row.get(0)?,
+                        duration: row.get(1)?,
+                        privacy_status: row.get(2)?,
+                        updated_at: row.get(3)?,
+                    })
+                })
+                .map_err(user_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(user_error)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut dropped_names_by_key = HashMap::<String, Vec<(i64, String)>>::new();
+    for (ordinal, _, file_name, _, digest, _, _, _) in &rows {
+        let key = if mode == "deep" {
+            digest.as_ref().map(|value| format!("digest:{value}"))
+        } else {
+            Some(format!("name:{}", file_name.to_ascii_lowercase()))
+        };
+        if let Some(key) = key {
+            dropped_names_by_key
+                .entry(key)
+                .or_default()
+                .push((*ordinal, file_name.clone()));
+        }
+    }
     let mut files = Vec::new();
     for (ordinal, locator, file_name, size_bytes, digest, _file_status, error, metadata_json) in
         &rows
@@ -3590,57 +3689,53 @@ fn load_preflight_scan(state: &AppState, job_id: &str) -> Result<PreIngestDuplic
         let local_metadata = metadata_json
             .as_deref()
             .and_then(|value| serde_json::from_str::<PreIngestLocalMetadata>(value).ok())
-            .or_else(|| {
-                serde_json::from_str::<FilePath>(locator)
-                    .ok()
-                    .map(|path| preflight_local_metadata(&path, file_name, false))
-            })
-            .unwrap_or_else(|| unavailable_preflight_local_metadata(None));
-        let local_matches = if mode == "deep" {
-            digest.as_deref().map(|digest| {
-                connection.prepare("SELECT title, file_name, status FROM upload_items WHERE digest = ?1 AND status = 'uploaded' ORDER BY created_at ASC").map_err(user_error)?
-                    .query_map([digest], |row| Ok(PreIngestLocalMatch { title: row.get(0)?, file_name: row.get(1)?, status: row.get(2)? })).map_err(user_error)?
-                    .collect::<Result<Vec<_>, _>>().map_err(user_error)
-            }).transpose()?.unwrap_or_default()
+            // Metadata probing can involve a large ISO-BMFF traversal. It is
+            // deliberately performed by the separate metadata worker, never
+            // by this frequently-polled UI snapshot command.
+            .unwrap_or_else(|| {
+                unavailable_preflight_local_metadata(
+                    Path::new(file_name)
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .map(|extension| extension.to_ascii_uppercase()),
+                )
+            });
+        let match_key = if mode == "deep" {
+            digest.as_ref().map(|value| format!("digest:{value}"))
         } else {
-            connection.prepare("SELECT title, file_name, status FROM upload_items WHERE lower(file_name) = lower(?1) AND status = 'uploaded' ORDER BY created_at ASC").map_err(user_error)?
-                .query_map([file_name], |row| Ok(PreIngestLocalMatch { title: row.get(0)?, file_name: row.get(1)?, status: row.get(2)? })).map_err(user_error)?
-                .collect::<Result<Vec<_>, _>>().map_err(user_error)?
+            Some(format!("name:{}", file_name.to_ascii_lowercase()))
         };
-        let dropped_duplicate_file_names = rows
-            .iter()
-            .filter_map(|(other_ordinal, _, other_name, _, other_digest, _, _, _)| {
-                (*other_ordinal != *ordinal
-                    && if mode == "deep" {
-                        digest.is_some() && digest == other_digest
-                    } else {
-                        file_name.eq_ignore_ascii_case(other_name)
-                    })
-                .then(|| other_name.clone())
-            })
-            .collect();
-        let uploaded_title_matches = channel_id
-            .as_deref()
-            .map(|channel| matching_uploaded_title_details(&connection, channel, title))
-            .transpose()?
+        let local_matches = match_key
+            .as_ref()
+            .and_then(|key| local_matches_by_key.get(key))
+            .cloned()
             .unwrap_or_default();
+        let dropped_duplicate_file_names = match_key
+            .as_ref()
+            .and_then(|key| dropped_names_by_key.get(key))
+            .map(|candidates| {
+                candidates
+                    .iter()
+                    .filter(|(other_ordinal, _)| other_ordinal != ordinal)
+                    .map(|(_, other_name)| other_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let uploaded_title_matches: Vec<PreIngestUploadedTitleMatch> = uploaded_videos
+            .iter()
+            .filter(|candidate| uploaded_titles_match(title, &candidate.title))
+            .cloned()
+            .collect();
         let source_is_desktop_path = serde_json::from_str::<FilePath>(locator)
             .ok()
             .and_then(|value| value.as_path().map(Path::to_path_buf));
-        let local_delete_token = if mode == "deep" && !local_matches.is_empty() && digest.is_some()
-        {
-            register_preflight_local_delete_target(
-                &state.media_directory,
-                source_is_desktop_path.as_deref(),
-                file_name,
-            )
-        } else {
-            None
-        };
         let can_delete_local_duplicate = source_is_desktop_path.is_some()
             && (!local_matches.is_empty() || !uploaded_title_matches.is_empty());
         files.push(PreIngestDuplicateFile {
-            local_delete_token,
+            // Creating a deletion token hashes the whole source so the later
+            // destructive action has a fresh content binding. Do that only
+            // after the operator explicitly chooses Delete local file.
+            local_delete_token: None,
             can_delete_local_duplicate,
             ordinal: *ordinal as u64,
             file_name: file_name.clone(),
@@ -3725,12 +3820,17 @@ fn register_preflight_local_delete_target(
     source_path: Option<&Path>,
     file_name: &str,
 ) -> Option<String> {
-    let source_path = source_path?.canonicalize().ok()?;
+    let source_path = source_path?;
+    if has_link_or_reparse_component(source_path).ok()? {
+        return None;
+    }
+    let source_path = source_path.canonicalize().ok()?;
     let managed_directory = media_directory.canonicalize().ok()?;
     if source_path.starts_with(&managed_directory) {
         return None;
     }
     let signature = monitored_file_signature(&fs::metadata(&source_path).ok()?).ok()?;
+    let (_, digest) = digest_file(&source_path).ok()?;
     let token = Uuid::new_v4().to_string();
     preflight_local_delete_targets().lock().ok()?.insert(
         token.clone(),
@@ -3738,6 +3838,7 @@ fn register_preflight_local_delete_target(
             path: source_path,
             file_name: file_name.to_string(),
             signature,
+            digest,
             created_at: Instant::now(),
         },
     );
@@ -3745,7 +3846,8 @@ fn register_preflight_local_delete_target(
 }
 
 /// Creates a short-lived deletion target after re-reading the persisted opt-in
-/// duplicate review. Deletion never restarts SHA-256 work.
+/// duplicate review. The token records a fresh local content binding before
+/// any later permanent deletion.
 fn prepare_preflight_local_delete_target(
     state: &AppState,
     job_id: &str,
@@ -3847,6 +3949,9 @@ fn delete_preflight_duplicate_file_impl(
         );
     }
     let managed_directory = state.media_directory.canonicalize().map_err(user_error)?;
+    if has_link_or_reparse_component(&target.path).unwrap_or(true) {
+        return Err("The selected local file is linked or unavailable; it was not deleted.".into());
+    }
     let current_path = target.path.canonicalize().map_err(|_| {
         "The selected local file is no longer available; it was not deleted.".to_string()
     })?;
@@ -3872,6 +3977,20 @@ fn delete_preflight_duplicate_file_impl(
     if staged_signature != target.signature {
         restore_staged_file(&staged, &current_path);
         return Err("The selected local file changed while deletion was being prepared; it was not deleted.".into());
+    }
+    let staged_digest = match digest_file(&staged) {
+        Ok((_, digest)) => digest,
+        Err(error) => {
+            restore_staged_file(&staged, &current_path);
+            return Err(error);
+        }
+    };
+    if staged_digest != target.digest {
+        restore_staged_file(&staged, &current_path);
+        return Err(
+            "The selected local file no longer matches the reviewed content; it was not deleted."
+                .into(),
+        );
     }
     fs::remove_file(&staged).map_err(user_error)?;
     preflight_local_delete_targets()
@@ -4716,6 +4835,93 @@ fn monitored_files(folder: &Path) -> Result<Vec<MonitoredFile>, String> {
     Ok(files)
 }
 
+/// Open a watched source without following a link and atomically snapshot the
+/// resulting handle into managed storage. The handle, rather than a path that
+/// can be replaced between polling and dispatch, is the source of the bytes
+/// later sent to YouTube.
+fn snapshot_watched_source(
+    state: &AppState,
+    item_id: &str,
+    source_path: &Path,
+    expected_signature: &(u64, String),
+) -> Result<(PathBuf, (u64, String), String), String> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    options.custom_flags(0x0020_0000 | 0x0800_0000); // OPEN_REPARSE_POINT + SEQUENTIAL_SCAN
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    let mut source = options.open(source_path).map_err(|_| {
+        "The watched source could not be opened safely; it was not queued for upload.".to_string()
+    })?;
+    let source_metadata = source.metadata().map_err(user_error)?;
+    #[cfg(windows)]
+    if source_metadata.file_attributes() & 0x400 != 0 {
+        return Err("A linked watched source cannot be queued for upload.".into());
+    }
+    let source_signature = monitored_file_signature(&source_metadata)?;
+    if &source_signature != expected_signature {
+        return Err(
+            "The watched source changed after its stability check; it was not queued for upload."
+                .into(),
+        );
+    }
+
+    let workspace_path = state.media_directory.join(format!("{item_id}.media"));
+    let partial_path = state
+        .media_directory
+        .join(format!("{item_id}.watched.partial"));
+    let copy_result = (|| {
+        let mut destination = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial_path)
+            .map_err(user_error)?;
+        let mut hasher = blake3::Hasher::new();
+        let mut copied = 0_u64;
+        let mut buffer = vec![0_u8; HASH_READ_BUFFER_BYTES];
+        loop {
+            let bytes = source.read(&mut buffer).map_err(user_error)?;
+            if bytes == 0 {
+                break;
+            }
+            copied = copied.saturating_add(bytes as u64);
+            if copied > expected_signature.0 {
+                return Err(
+                    "The watched source changed while its managed snapshot was being created."
+                        .into(),
+                );
+            }
+            destination
+                .write_all(&buffer[..bytes])
+                .map_err(user_error)?;
+            hasher.update(&buffer[..bytes]);
+        }
+        if copied != expected_signature.0 {
+            return Err(
+                "The watched source changed while its managed snapshot was being created.".into(),
+            );
+        }
+        destination.sync_all().map_err(user_error)?;
+        Ok((copied, hasher.finalize().to_hex().to_string()))
+    })();
+    let (copied, digest) = match copy_result {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = fs::remove_file(&partial_path);
+            return Err(error);
+        }
+    };
+    fs::rename(&partial_path, &workspace_path).map_err(user_error)?;
+    let workspace_signature =
+        monitored_file_signature(&fs::metadata(&workspace_path).map_err(user_error)?)?;
+    if copied != workspace_signature.0 {
+        let _ = fs::remove_file(&workspace_path);
+        return Err("The managed watched-source snapshot could not be verified.".into());
+    }
+    Ok((workspace_path, workspace_signature, digest))
+}
+
 fn monitor_authorized(
     connection: &Connection,
     folder_path: &str,
@@ -4841,7 +5047,6 @@ fn ingest_stable_monitored_file(
     file: &MonitoredFile,
     start_deep_verification: bool,
 ) -> Result<MonitorFileOutcome, String> {
-    validate_youtube_upload_limits(&file.path, file.size_bytes)?;
     let title = file
         .path
         .file_stem()
@@ -4868,8 +5073,43 @@ fn ingest_stable_monitored_file(
             dispatch_item_id: None,
         });
     }
-    let channel_id = monitored_channel_id(connection, folder_path, channel_name)?;
     let item_id = Uuid::new_v4().to_string();
+    let expected_signature = (file.size_bytes, file.modified_key.clone());
+    let (workspace_path, workspace_signature, digest) =
+        snapshot_watched_source(state, &item_id, &file.path, &expected_signature)?;
+    if let Err(error) = validate_youtube_upload_limits(&workspace_path, file.size_bytes) {
+        let _ = fs::remove_file(&workspace_path);
+        return Err(error);
+    }
+    let exact_duplicate: Option<String> = connection
+        .query_row(
+            "SELECT id FROM upload_items WHERE digest = ?1 AND status = 'uploaded' AND (channel_id = ?2 OR channel_id IS NULL) ORDER BY created_at ASC LIMIT 1",
+            params![digest, channel_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(user_error)?;
+    if let Some(existing_id) = exact_duplicate {
+        let _ = fs::remove_file(&workspace_path);
+        set_observation_state(
+            connection,
+            file,
+            channel_name,
+            "duplicate",
+            Some(&digest),
+            None,
+        )?;
+        audit_global_scoped(
+            connection,
+            channel_name,
+            "folder_monitor_snapshot_duplicate_stopped",
+            &format!("Managed watched-source snapshot matched completed local upload {existing_id}; no provider dispatch was created"),
+        )?;
+        return Ok(MonitorFileOutcome {
+            disposition: MonitorDisposition::Skipped,
+            dispatch_item_id: None,
+        });
+    }
     set_observation_state(
         connection,
         file,
@@ -4881,7 +5121,7 @@ fn ingest_stable_monitored_file(
     let timestamp = now();
     connection
         .execute(
-            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, source_path, workspace_path, size_bytes, background_hash_status, source_modified_key, imported_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, 'pending', ?8, ?7, 'draft', ?7, ?9, ?10, ?11, ?12, ?13, ?14, ?14, 'Watched source passed light duplicate checks and is ready for upload; deep BLAKE3 verification continues in the background')",
+            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, source_path, workspace_path, size_bytes, digest, background_hash_status, source_modified_key, imported_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'complete', ?10, ?8, 'draft', ?8, ?11, ?12, ?13, ?14, ?15, ?16, ?16, 'Stable watched source was snapshotted into managed storage with a completed BLAKE3 verification')",
             params![
                 item_id,
                 title,
@@ -4889,8 +5129,10 @@ fn ingest_stable_monitored_file(
                 channel_name,
                 channel_id,
                 file.path.to_string_lossy(),
+                workspace_path.to_string_lossy(),
                 file.size_bytes as i64,
-                file.modified_key,
+                digest,
+                workspace_signature.1,
                 visibility,
                 made_for_kids as i64,
                 delete_source_after_upload as i64,
@@ -4904,7 +5146,7 @@ fn ingest_stable_monitored_file(
         connection,
         &item_id,
         "folder_monitor_source_referenced",
-        "Stable watched file was verified in place without creating a managed-media copy",
+        "Stable watched file was snapshotted into managed media before upload dispatch",
     )?;
     let outcome =
         queue_monitored_item(connection, &item_id, folder_path, channel_name, visibility)?;
@@ -4921,9 +5163,7 @@ fn ingest_stable_monitored_file(
         None,
         Some(&item_id),
     )?;
-    if start_deep_verification {
-        schedule_watched_hash_verification(state.clone(), item_id.clone());
-    }
+    let _ = start_deep_verification;
     Ok(outcome)
 }
 
@@ -5727,6 +5967,7 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(user_error)?;
     let mut active_by_volume = HashMap::<String, usize>::new();
+    let mut active_total = active_paths.len();
     for path in active_paths {
         *active_by_volume
             .entry(source_volume_id(Path::new(&path)))
@@ -5739,8 +5980,14 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
         .map_err(user_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(user_error)?;
+    if queued_items.is_empty() {
+        return Err("No reviewed uploads are waiting in the local queue.".into());
+    }
     let mut item_ids = Vec::new();
     for (item_id, workspace_path) in queued_items {
+        if active_total >= MAX_CONCURRENT_UPLOADS_PER_VOLUME {
+            break;
+        }
         let path = Path::new(&workspace_path);
         if !path.is_file() {
             continue;
@@ -5751,10 +5998,14 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
             continue;
         }
         *active += 1;
+        active_total += 1;
         item_ids.push(item_id);
     }
     if item_ids.is_empty() {
-        return Err("No reviewed uploads are waiting in the local queue.".into());
+        // The queue is real, but every eligible source volume is already at its
+        // cached safe concurrency. The running workers will invoke this
+        // scheduler again as soon as they finish or enter reconciliation.
+        return Ok(0);
     }
     let claimed_item_ids = claim_queued_upload_items(&connection, item_ids)?;
     let total = claimed_item_ids.len();
@@ -5764,6 +6015,15 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
     let worker_state = state.clone();
     thread::spawn(move || run_queued_uploads(worker_state, claimed_item_ids));
     Ok(total)
+}
+
+/// A successful connection or library refresh makes recovered queue entries
+/// eligible for dispatch again. Keep this asynchronous so OAuth's loopback
+/// confirmation never waits for disk sampling or upload preparation.
+fn kick_automatic_upload_dispatch(state: AppState) {
+    thread::spawn(move || {
+        let _ = start_queued_uploads_impl(&state);
+    });
 }
 
 fn claim_queued_upload_items(
@@ -6230,11 +6490,6 @@ fn disconnect_youtube(state: State<'_, AppState>) -> Result<ConnectionSettings, 
 }
 
 #[tauri::command]
-fn start_queued_uploads(state: State<'_, AppState>) -> Result<usize, String> {
-    start_queued_uploads_impl(&state)
-}
-
-#[tauri::command]
 async fn sync_channel_inventory(state: State<'_, AppState>) -> Result<usize, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -6243,7 +6498,12 @@ async fn sync_channel_inventory(state: State<'_, AppState>) -> Result<usize, Str
             return Err("Connect a YouTube channel before syncing its library.".into());
         }
         match sync_channel_inventory_worker(&state) {
-            Ok(count) => Ok(count),
+            Ok(count) => {
+                // A successful explicit refresh proves that the recovered
+                // queue can safely retry its native pre-dispatch checks.
+                kick_automatic_upload_dispatch(state.clone());
+                Ok(count)
+            }
             Err(error) => {
                 if let Ok(connection) = database(&state) {
                     let _ = audit_global(
@@ -7038,7 +7298,12 @@ fn queue_item_impl(state: &AppState, id: &str) -> Result<UploadItem, String> {
 
 #[tauri::command]
 fn queue_item(id: String, state: State<'_, AppState>) -> Result<UploadItem, String> {
-    queue_item_impl(&state, &id)
+    let item = queue_item_impl(&state, &id)?;
+    // Queueing is the operator's final upload decision. Dispatch is automatic
+    // and uses the same capacity-aware scheduler as watched folders and
+    // startup recovery; the webview never needs a global start control.
+    let _ = start_queued_uploads_impl(&state);
+    Ok(item)
 }
 
 #[tauri::command]
@@ -7324,7 +7589,6 @@ pub fn run() {
             begin_youtube_connection,
             cancel_youtube_connection,
             disconnect_youtube,
-            start_queued_uploads,
             sync_channel_inventory,
             check_upload_title_duplicates,
             ignore_duplicate_candidate,
@@ -7403,6 +7667,8 @@ mod tests {
             oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         let connection = database(&state).unwrap();
+        fs::write(state.media_directory.join("active.media"), b"active").unwrap();
+        fs::write(state.media_directory.join("waiting.media"), b"waiting").unwrap();
         connection
             .execute(
                 "INSERT INTO remote_video_sync_staging (sync_id, video_id, channel_name, channel_id, title, updated_at) VALUES ('interrupted', 'video-a', 'Channel A', 'channel-a-id', 'Old row', ?1)",
@@ -7947,6 +8213,68 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn confirmed_source_cleanup_retains_a_linked_source_and_its_target() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let target = root.join("outside-target.mp4");
+        let linked_source = root.join("reviewed-alias.mp4");
+        let contents = b"linked-source-target";
+        fs::write(&target, contents).unwrap();
+        std::os::windows::fs::symlink_file(&target, &linked_source).unwrap();
+        let managed = state.media_directory.join("uploaded.media");
+        fs::write(&managed, contents).unwrap();
+        let digest = blake3::hash(contents).to_hex().to_string();
+        let connection = database(&state).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, source_path, workspace_path, size_bytes, digest, status, total_bytes, delete_source_after_upload, source_delete_status, created_at, updated_at) VALUES ('linked', 'Linked', 'reviewed-alias.mp4', ?1, ?2, ?3, ?4, 'uploaded', ?3, 1, 'pending', ?5, ?5)",
+            params![linked_source.to_string_lossy(), managed.to_string_lossy(), contents.len() as i64, digest, now()],
+        ).unwrap();
+        drop(connection);
+
+        finalize_confirmed_source_cleanup(&state, "linked").unwrap();
+
+        assert!(linked_source.exists());
+        assert!(target.exists());
+        let connection = database(&state).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT source_delete_status FROM upload_items WHERE id = 'linked'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "retained"
+        );
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn destructive_target_rejects_a_linked_parent_directory() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let target_directory = root.join("target-directory");
+        let linked_directory = root.join("reviewed-directory");
+        fs::create_dir_all(&target_directory).unwrap();
+        let target_file = target_directory.join("target.mp4");
+        fs::write(&target_file, b"target").unwrap();
+        std::os::windows::fs::symlink_dir(&target_directory, &linked_directory).unwrap();
+
+        assert!(has_link_or_reparse_component(&linked_directory.join("target.mp4")).unwrap());
+        assert!(target_file.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn only_one_worker_can_claim_a_queued_upload() {
         let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
@@ -8012,6 +8340,9 @@ mod tests {
                 .unwrap();
         }
         drop(connection);
+
+        fs::write(state.media_directory.join("active.media"), b"active").unwrap();
+        fs::write(state.media_directory.join("waiting.media"), b"waiting").unwrap();
 
         assert_eq!(start_queued_uploads_impl(&state).unwrap(), 0);
         let connection = database(&state).unwrap();
@@ -8443,6 +8774,43 @@ mod tests {
     }
 
     #[test]
+    fn loading_a_preflight_result_defers_deletion_hashing_until_requested() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let source = root.join("camera-original.insv");
+        fs::write(&source, b"deep-match-source").unwrap();
+        let digest = blake3::hash(b"deep-match-source").to_hex().to_string();
+        let locator = serde_json::to_string(&FilePath::Path(source.clone())).unwrap();
+        let timestamp = now();
+        let connection = database(&state).unwrap();
+        connection.execute(
+            "INSERT INTO preflight_scan_jobs (id, mode, status, total_files, completed_files, inventory_status, created_at, updated_at) VALUES ('deep-job', 'deep', 'complete', 1, 1, 'not_requested', ?1, ?1)",
+            [timestamp.clone()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO preflight_scan_files (job_id, ordinal, source_locator, file_name, size_bytes, digest, status) VALUES ('deep-job', 0, ?1, 'camera-original.insv', 17, ?2, 'complete')",
+            params![locator, digest],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES ('saved', 'Camera original', 'camera-original.insv', 'saved.media', 17, ?1, 'uploaded', 17, ?2, ?2)",
+            params![digest, timestamp],
+        ).unwrap();
+        drop(connection);
+
+        let scan = load_preflight_scan(&state, "deep-job").unwrap();
+        assert!(scan.files[0].can_delete_local_duplicate);
+        assert!(scan.files[0].local_delete_token.is_none());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn uploaded_title_match_can_prepare_the_guarded_local_delete_target() {
         let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
         let state = AppState {
@@ -8558,7 +8926,7 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_preflight_duplicate_deletion_reuses_the_opt_in_review_without_rehashing() {
+    fn confirmed_preflight_duplicate_deletion_reuses_the_opt_in_review_with_content_binding() {
         let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
         let media = root.join("media");
         fs::create_dir_all(&media).unwrap();
@@ -8584,6 +8952,36 @@ mod tests {
         assert!(delete_preflight_duplicate_file_impl(&state, &token, "duplicate.insv").is_err());
         assert!(source.exists());
         assert!(media.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_deletion_rejects_replaced_content_even_with_a_matching_signature() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let media = root.join("media");
+        fs::create_dir_all(&media).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: media.clone(),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        database(&state).unwrap();
+        let source = root.join("duplicate.insv");
+        fs::write(&source, b"reviewed-content").unwrap();
+        let token = register_preflight_local_delete_target(&media, Some(&source), "duplicate.insv")
+            .unwrap();
+        fs::write(&source, b"replaced-content").unwrap();
+        let forged_signature = monitored_file_signature(&fs::metadata(&source).unwrap()).unwrap();
+        preflight_local_delete_targets()
+            .lock()
+            .unwrap()
+            .get_mut(&token)
+            .unwrap()
+            .signature = forged_signature;
+
+        assert!(delete_preflight_duplicate_file_impl(&state, &token, "duplicate.insv").is_err());
+        assert!(source.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -8993,7 +9391,8 @@ mod tests {
             source_path,
             watched.join("already-there.mp4").to_string_lossy()
         );
-        assert_eq!(workspace_path, source_path);
+        assert_ne!(workspace_path, source_path);
+        assert!(Path::new(&workspace_path).is_file());
         assert!(partial_path.is_none());
         assert_eq!(
             connection
@@ -9008,8 +9407,62 @@ mod tests {
         assert!(fs::read_dir(&state.media_directory)
             .unwrap()
             .next()
-            .is_none());
+            .is_some());
         drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn watched_source_snapshot_keeps_verified_bytes_after_source_replacement() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let source = root.join("watched.mp4");
+        let verified = b"verified-watched-source";
+        fs::write(&source, verified).unwrap();
+        let signature = monitored_file_signature(&fs::metadata(&source).unwrap()).unwrap();
+
+        let (workspace, _, digest) =
+            snapshot_watched_source(&state, "watched-snapshot", &source, &signature).unwrap();
+        fs::write(&source, b"replacement-watched-source").unwrap();
+
+        assert_eq!(fs::read(&workspace).unwrap(), verified);
+        assert_eq!(digest, blake3::hash(verified).to_hex().to_string());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn watched_source_snapshot_rejects_a_link_swap_before_opening() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let source = root.join("watched.mp4");
+        fs::write(&source, b"stable-source").unwrap();
+        let signature = monitored_file_signature(&fs::metadata(&source).unwrap()).unwrap();
+        let target = root.join("replacement-target.mp4");
+        fs::write(&target, b"replacement-target").unwrap();
+        fs::remove_file(&source).unwrap();
+        std::os::windows::fs::symlink_file(&target, &source).unwrap();
+
+        assert!(snapshot_watched_source(&state, "link-swap", &source, &signature).is_err());
+        assert!(target.exists());
+        assert!(fs::read_dir(&state.media_directory)
+            .unwrap()
+            .next()
+            .is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -9330,8 +9783,7 @@ mod tests {
         assert_eq!(status, "queued");
         assert_eq!(channel_name, "Channel A");
         assert_eq!(channel_id, "channel-a-id");
-        assert!(digest.is_none());
-        verify_watched_hash_in_background(&state, &item_id).unwrap();
+        assert!(digest.is_some());
         let digest: String = connection
             .query_row(
                 "SELECT digest FROM upload_items WHERE id = ?1",
@@ -9357,26 +9809,17 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap(),
-            3
+            2
         );
-        let duplicate_item_id: String = connection
-            .query_row(
-                "SELECT upload_item_id FROM folder_monitor_observations WHERE file_path = ?1",
-                [duplicate.to_string_lossy().as_ref()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_ne!(duplicate_item_id, item_id);
-        verify_watched_hash_in_background(&state, &duplicate_item_id).unwrap();
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT status FROM upload_items WHERE id = ?1",
-                    [&duplicate_item_id],
+                    "SELECT state FROM folder_monitor_observations WHERE file_path = ?1",
+                    [duplicate.to_string_lossy().as_ref()],
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "cancelled"
+            "duplicate"
         );
 
         connection
@@ -9395,7 +9838,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap(),
-            3
+            2
         );
         assert_eq!(
             connection
@@ -9433,7 +9876,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap(),
-            3
+            2
         );
         connection
             .execute(

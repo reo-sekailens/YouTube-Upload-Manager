@@ -84,13 +84,16 @@ surfaces and workflows:
 - The initial matrix is in
   `memory-bank/certification/feature-surface-matrix.md`.
 - Security findings and their individual remediation tasks are in
-  `memory-bank/certification/TASK085-security-findings.md` and TASK086–TASK091.
+  `memory-bank/certification/TASK085-security-findings.md` and TASK086–TASK096.
 - The historical static scan was sealed with six findings against its original
   2026-08-22 snapshot; those findings map to the completed TASK086–TASK091
-  remediations. A fresh current-worktree rescan is running as
-  `1430aa6e-45ef-4912-b47f-ae09cf440a0f` and must be sealed separately.
-- Local frontend, native, and rendered Browser checks passed at their stated
-  scope; 65 Rust tests, 35 frontend tests, and the production frontend build
-  pass after the current remediation changes. The matrix records the remaining
-  provider, device, package, and formal security-rescan gaps without treating
+  remediations. The current-worktree rescan
+  `1430aa6e-45ef-4912-b47f-ae09cf440a0f` reported two native-file findings;
+  TASK093 and TASK094 remediate them. A subsequent review identified TASK096,
+  which now cryptographically binds duplicate-delete review content. The final
+  post-remediation scan `4b8fa995-b7f4-45b6-a378-729c7467fc88` is sealed with
+  zero findings.
+- Local frontend, native, and rendered Browser checks pass at their stated
+  scope: 35 frontend tests and 73 native tests. The matrix records remaining
+  provider, device, signed-package, and clean-profile gates without treating
   them as certified.

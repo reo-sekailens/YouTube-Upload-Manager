@@ -200,8 +200,46 @@ jobs:
           SHA: ${{ github.sha }}
           TAG: ${{ needs.prepare_nightly.outputs.tag }}
         run: |
+          set -euo pipefail
           declare -a assets=()
           declare -A labels=()
+
+          release_label() {
+            local relative="$1"
+            case "$relative" in
+              *YouTube-Upload-Manager-windows-x64-portable.zip)
+                printf '%s' 'Windows x64 portable ZIP (extract and run)'
+                ;;
+              */bundle/nsis/*.exe)
+                printf '%s' 'Windows x64 installer (recommended)'
+                ;;
+              *YouTube-Upload-Manager-linux-x64-portable.AppImage)
+                printf '%s' 'Linux x64 portable AppImage (run directly)'
+                ;;
+              */bundle/deb/*.deb)
+                printf '%s' 'Linux x64 Debian package (install with your package manager)'
+                ;;
+              *Apple-Silicon*portable.zip|*apple-silicon*portable.zip)
+                printf '%s' 'macOS Apple Silicon portable app ZIP (extract and open)'
+                ;;
+              *macOS-Intel*portable.zip|*macos-intel*portable.zip)
+                printf '%s' 'macOS Intel portable app ZIP (extract and open)'
+                ;;
+              *macOS*Apple*Silicon*/bundle/macos/*.dmg)
+                printf '%s' 'macOS Apple Silicon disk image (install)'
+                ;;
+              *macOS*Intel*/bundle/macos/*.dmg)
+                printf '%s' 'macOS Intel disk image (install)'
+                ;;
+              *.apk)
+                printf '%s' 'Android universal debug APK (install on Android)'
+                ;;
+              *)
+                printf '%s' "$(basename "$relative")"
+                ;;
+            esac
+          }
+
           while IFS= read -r -d '' asset; do
             case "$asset" in
               *.apk|*.AppImage|*.deb|*.dmg|*.exe|*.msi|*.zip) ;;
@@ -210,20 +248,53 @@ jobs:
 
             relative="${asset#release-assets/}"
             artifact="${relative%%/*}"
-            label="${artifact// /-}-$(basename "$asset")"
+            label="$(release_label "$relative")"
             index=2
             while [[ -n "${labels[$label]:-}" ]]; do
-              label="${artifact// /-}-${index}-$(basename "$asset")"
+              label="$(release_label "$relative") (${index})"
               ((index += 1))
             done
             labels["$label"]=1
             assets+=("$asset#$label")
           done < <(find release-assets -type f -print0)
           test "${#assets[@]}" -gt 0
+
+          notes_file="$(mktemp)"
+          cat > "$notes_file" <<EOF
+          ## Which download should I use?
+
+          ### Windows
+
+          - **Windows x64 installer (recommended):** Run this on a normal 64-bit Windows PC to install the app and add standard Start-menu integration.
+          - **Windows x64 portable ZIP:** Extract it anywhere you can write, then run **YouTube-Upload-Manager.exe**. No installer or administrator access is required. Windows WebView2 is still required.
+
+          ### Linux
+
+          - **Linux x64 portable AppImage:** Mark it executable, then run it directly. Use this when you do not want to install a package.
+          - **Linux x64 Debian package:** Use this on Debian, Ubuntu, or a compatible distribution when you prefer package-manager installation.
+
+          ### macOS
+
+          - Choose **Apple Silicon** for M-series Macs (M1, M2, M3, M4) and **Intel** only for older Intel Macs.
+          - **Disk image:** Open it and install the app normally.
+          - **Portable app ZIP:** Extract it, then open the contained `.app` bundle without an installer.
+
+          ### Android
+
+          - **Android universal debug APK:** Install it directly on an Android device. It is a debug build, not a Play Store release.
+
+          ## Important
+
+          These nightly artifacts are unsigned and may show your operating system's normal first-run security warning. Download only the artifact for your operating system and processor. Existing queues and OAuth credentials remain device-local and are never included in a release artifact.
+
+          ---
+
+          Automated pre-release from commit ${SHA}.
+          EOF
           gh release create "$TAG" "${assets[@]}" \
             --target "$SHA" \
             --title "Nightly build ${TAG#*-nightly.}" \
-            --notes "Automated pre-release from commit $SHA." \
+            --notes-file "$notes_file" \
             --prerelease
 
 # The Android test APK is debug-signed by the Android build tooling so devices

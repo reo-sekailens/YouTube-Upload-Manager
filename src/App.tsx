@@ -23,7 +23,6 @@ import {
   resolveUploadTitleDuplicates,
   setItemDeleteSourceAfterUpload,
   setItemVisibility,
-  startQueuedUploads,
   syncChannelInventory,
   recordWebviewError,
 } from "./lib/local";
@@ -418,21 +417,6 @@ export default function App() {
             );
           }
         }
-        let startNotice = "";
-        if (
-          queueFailures.length === 0 &&
-          importedItems.length > duplicateIds.size
-        ) {
-          try {
-            const started = await startQueuedUploads();
-            startNotice = `${started} queued upload${started === 1 ? "" : "s"} started.`;
-          } catch (error) {
-            startNotice =
-              error instanceof Error
-                ? error.message
-                : "The saved uploads could not be started.";
-          }
-        }
         await refresh();
         const importNotice =
           duplicateIds.size > 0
@@ -442,7 +426,9 @@ export default function App() {
           failures.length > 0 || queueFailures.length > 0
             ? ` ${failures.length + queueFailures.length} item${failures.length + queueFailures.length === 1 ? "" : "s"} need attention.${failures[0] ? ` ${failures[0]}` : ""}`
             : "";
-        setNotice(`${importNotice} ${startNotice}${failuresNotice}`.trim());
+        setNotice(
+          `${importNotice} Uploads start automatically when capacity is available.${failuresNotice}`.trim(),
+        );
       } finally {
         setBusy(false);
       }
@@ -564,7 +550,9 @@ export default function App() {
           candidate.id === updated.id ? updated : candidate,
         ),
       }));
-      setNotice(`${updated.fileName} is saved in the local upload queue.`);
+      setNotice(
+        `${updated.fileName} is queued and will start automatically when capacity is available.`,
+      );
     } finally {
       setBusy(false);
     }
@@ -593,7 +581,6 @@ export default function App() {
       const resolved = await resolveUploadTitleDuplicates(itemIds, action);
       const ignored = resolved.filter((item) => item.status !== "cancelled");
       for (const item of ignored) await queueItem(item.id);
-      if (ignored.length > 0) await startQueuedUploads();
       await refresh();
       setNotice(
         action === "ignore"
@@ -685,26 +672,6 @@ export default function App() {
         error instanceof Error
           ? error.message
           : "The original source could not be deleted.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const startUploads = async () => {
-    if (!snapshot.activeChannel) return;
-    setBusy(true);
-    try {
-      const started = await startQueuedUploads();
-      await refresh();
-      setNotice(
-        `${started} queued upload${started === 1 ? "" : "s"} started for ${snapshot.activeChannel}.`,
-      );
-    } catch (error) {
-      setNotice(
-        error instanceof Error
-          ? error.message
-          : "Queued uploads could not be started.",
       );
     } finally {
       setBusy(false);
@@ -873,12 +840,6 @@ export default function App() {
             Refresh library
           </button>
           <button
-            disabled={!snapshot.activeChannel || busy}
-            onClick={() => void startUploads()}
-          >
-            Start uploads
-          </button>
-          <button
             className="import-button"
             disabled={busy}
             onClick={() => void addVideo()}
@@ -898,12 +859,11 @@ export default function App() {
           <>
             <div aria-hidden="true" className="google-setup-backdrop" />
             <GoogleSetupWizard
-              onConfigured={(settings) => {
-                updateConnection(settings);
+              onOpenConnectedAccount={() => {
                 setSetupDismissed(true);
                 setActiveTab("account");
                 setNotice(
-                  "Desktop OAuth JSON imported. Connect YouTube when you are ready.",
+                  "Import your Desktop OAuth JSON from Connected account, then connect YouTube when you are ready.",
                 );
               }}
               onDismiss={() => setSetupDismissed(true)}

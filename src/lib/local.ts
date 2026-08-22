@@ -328,10 +328,6 @@ export async function reconcileQueue(): Promise<UploadItem[]> {
   return invoke<UploadItem[]>("reconcile_queue");
 }
 
-export async function startQueuedUploads(): Promise<number> {
-  return invoke<number>("start_queued_uploads");
-}
-
 export async function syncChannelInventory(): Promise<number> {
   return invoke<number>("sync_channel_inventory");
 }

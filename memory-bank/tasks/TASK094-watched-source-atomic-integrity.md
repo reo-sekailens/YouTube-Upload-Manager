@@ -2,7 +2,7 @@
 
 ## Status
 
-in-progress
+completed
 
 ## Objective
 
@@ -17,7 +17,12 @@ folder path cannot be replaced after its stability check and before upload.
   verified managed copy is used.
 - Replacement and link-swap regressions prove provider dispatch is withheld.
 
-## Follow-up
+## Evidence
 
-- Preserve resumable-upload recovery and the device-local reference-in-place
-  workflow while introducing the identity-safe handoff.
+- A stable watched source is opened with no-follow semantics and snapshotted
+  from that handle into the managed local workspace. The upload reads the
+  completed BLAKE3-verified snapshot rather than a mutable watched pathname.
+- Windows regressions prove a link swap is rejected before opening and a later
+  source replacement cannot alter the managed bytes queued for upload.
+- Exact completed local duplicates are withheld during snapshot intake without
+  creating a provider dispatch record.
