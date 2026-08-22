@@ -4,6 +4,7 @@ import type {
   DashboardSnapshot,
   DeletionRequest,
   FolderMonitorSettings,
+  FolderMonitorOverview,
   FolderMonitorVisibility,
   ManualUploadDefaults,
   ManualUploadSettings,
@@ -106,7 +107,11 @@ export async function loadDiagnosticReport(): Promise<string> {
 
 export type ReleaseIdentity = {
   version: string;
-  channel: "regular" | "nightly";
+  channel:
+    | "regular"
+    | "nightly"
+    | `nightly-${string}`
+    | `v${string}-nightly.${string}`;
   buildProfile: string;
 };
 
@@ -325,6 +330,17 @@ export async function loadFolderMonitorSettings(): Promise<FolderMonitorSettings
   return invoke<FolderMonitorSettings>("load_folder_monitor_settings");
 }
 
+export async function loadFolderMonitorOverview(): Promise<FolderMonitorOverview> {
+  if (!isTauri) {
+    return {
+      settings: await loadFolderMonitorSettings(),
+      files: [],
+      logs: [],
+    };
+  }
+  return invoke<FolderMonitorOverview>("load_folder_monitor_overview");
+}
+
 export async function enableFolderMonitor(
   path: string,
   visibility: FolderMonitorVisibility,
@@ -349,6 +365,11 @@ export async function disableFolderMonitor(): Promise<FolderMonitorSettings> {
 
 export async function scanFolderMonitorNow(): Promise<FolderMonitorSettings> {
   return invoke<FolderMonitorSettings>("scan_folder_monitor_now");
+}
+
+/** Explicitly moves the current monitored-folder baseline through normal safe intake. */
+export async function processExistingFolderFiles(): Promise<FolderMonitorSettings> {
+  return invoke<FolderMonitorSettings>("process_existing_folder_files");
 }
 
 export async function loadConnectionSettings(): Promise<ConnectionSettings> {

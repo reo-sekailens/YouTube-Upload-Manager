@@ -39,8 +39,9 @@ export function DiagnosticsPanel() {
     void loadReleaseIdentity().then(setRelease).catch(() => undefined);
   }, []);
 
+  const nightlySuffix = release?.channel.match(/(?:^nightly-|\-nightly\.)([a-z]+)$/)?.[1];
   const releaseLabel = release
-    ? `${release.version === "browser preview" ? "Browser preview" : `v${release.version}`} · ${release.channel === "nightly" ? "Nightly build" : "Regular release"}`
+    ? `${release.version === "browser preview" ? "Browser preview" : `v${release.version}`} · ${nightlySuffix ? `Nightly build ${nightlySuffix}` : release.channel === "nightly" ? "Nightly build" : "Regular release"}`
     : "Release information loading…";
 
   const copyIssueReport = useCallback(async () => {

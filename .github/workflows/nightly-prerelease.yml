@@ -15,11 +15,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  prepare_nightly:
+    name: Allocate nightly release letter
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          alphabet=abcdefghijklmnopqrstuvwxyz
+          app_version="$(awk -F '"' '/^\[package\]/{in_package=1; next} in_package && /^version = / {print $2; exit}' src-tauri/Cargo.toml)"
+          test -n "$app_version"
+          prefix="v${app_version}-nightly."
+          highest=0
+          tags="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.prerelease) | .tag_name')"
+          while IFS= read -r tag; do
+            [[ "$tag" == "$prefix"* ]] || continue
+            suffix="${tag#"$prefix"}"
+            [[ "$suffix" =~ ^[a-z]+$ ]] || continue
+            value=0
+            for ((position = 0; position < ${#suffix}; position += 1)); do
+              character="${suffix:position:1}"
+              printf -v code '%d' "'$character"
+              value=$((value * 26 + code - 96))
+            done
+            if ((value > highest)); then
+              highest=$value
+            fi
+          done <<< "$tags"
+
+          next=$((highest + 1))
+          suffix=""
+          while ((next > 0)); do
+            next=$((next - 1))
+            suffix="${alphabet:next % 26:1}$suffix"
+            next=$((next / 26))
+          done
+          echo "tag=${prefix}${suffix}" >> "$GITHUB_OUTPUT"
+
   build:
     name: ${{ matrix.name }}
+    needs: prepare_nightly
     runs-on: ${{ matrix.runner }}
     env:
-      APP_RELEASE_CHANNEL: nightly
+      APP_RELEASE_CHANNEL: ${{ needs.prepare_nightly.outputs.tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -90,9 +134,10 @@ jobs:
 
   android:
     name: Android universal debug APK
+    needs: prepare_nightly
     runs-on: ubuntu-22.04
     env:
-      APP_RELEASE_CHANNEL: nightly
+      APP_RELEASE_CHANNEL: ${{ needs.prepare_nightly.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -140,26 +185,43 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish nightly pre-release
-    needs: [build, android]
+    name: Publish next nightly pre-release
+    needs: [prepare_nightly, build, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v7
         with:
           path: release-assets
-          merge-multiple: true
-      - name: Replace nightly release assets
+      - name: Publish nightly release assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
+          TAG: ${{ needs.prepare_nightly.outputs.tag }}
         run: |
-          gh release delete nightly --yes --cleanup-tag || true
-          mapfile -d '' assets < <(find release-assets -type f -print0)
+          declare -a assets=()
+          declare -A labels=()
+          while IFS= read -r -d '' asset; do
+            case "$asset" in
+              *.apk|*.AppImage|*.deb|*.dmg|*.exe|*.msi|*.zip) ;;
+              *) continue ;;
+            esac
+
+            relative="${asset#release-assets/}"
+            artifact="${relative%%/*}"
+            label="${artifact// /-}-$(basename "$asset")"
+            index=2
+            while [[ -n "${labels[$label]:-}" ]]; do
+              label="${artifact// /-}-${index}-$(basename "$asset")"
+              ((index += 1))
+            done
+            labels["$label"]=1
+            assets+=("$asset#$label")
+          done < <(find release-assets -type f -print0)
           test "${#assets[@]}" -gt 0
-          gh release create nightly "${assets[@]}" \
+          gh release create "$TAG" "${assets[@]}" \
             --target "$SHA" \
-            --title "Nightly build" \
+            --title "Nightly build ${TAG#*-nightly.}" \
             --notes "Automated pre-release from commit $SHA." \
             --prerelease
 

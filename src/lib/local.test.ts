@@ -43,13 +43,15 @@ describe("folder monitor commands", () => {
   });
 
   it("uses narrow native commands for disable and operator-requested scans", async () => {
-    const { disableFolderMonitor, scanFolderMonitorNow } = await import("./local");
+    const { disableFolderMonitor, processExistingFolderFiles, scanFolderMonitorNow } = await import("./local");
 
     await disableFolderMonitor();
     await scanFolderMonitorNow();
+    await processExistingFolderFiles();
 
     expect(invoke).toHaveBeenNthCalledWith(1, "disable_folder_monitor");
     expect(invoke).toHaveBeenNthCalledWith(2, "scan_folder_monitor_now");
+    expect(invoke).toHaveBeenNthCalledWith(3, "process_existing_folder_files");
   });
 
   it("returns a safe disabled state in browser preview mode", async () => {
@@ -60,6 +62,16 @@ describe("folder monitor commands", () => {
       status: "disabled",
     });
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("loads the live folder overview through one native command", async () => {
+    isTauri.mockReturnValue(true);
+    vi.resetModules();
+    const { loadFolderMonitorOverview } = await import("./local");
+
+    await loadFolderMonitorOverview();
+
+    expect(invoke).toHaveBeenCalledWith("load_folder_monitor_overview");
   });
 });
 

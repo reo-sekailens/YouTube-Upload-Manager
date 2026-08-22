@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   createYouTubePlaylist,
@@ -6,11 +6,14 @@ import {
   enableFolderMonitor,
   isTauri,
   listYouTubePlaylists,
-  loadFolderMonitorSettings,
+  loadFolderMonitorOverview,
+  processExistingFolderFiles,
   scanFolderMonitorNow,
 } from "../lib/local";
 import type {
   FolderMonitorSettings,
+  FolderMonitorFileActivity,
+  FolderMonitorLogEntry,
   FolderMonitorVisibility,
   YouTubePlaylist,
 } from "../lib/types";
@@ -46,12 +49,27 @@ function formatScanTime(value?: string) {
   return date.toLocaleString();
 }
 
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MB`;
+  return `${(value / 1024 ** 3).toFixed(1)} GB`;
+}
+
+function fileProgress(file: FolderMonitorFileActivity) {
+  if (!file.totalBytes || file.totalBytes <= 0 || file.confirmedBytes === undefined)
+    return undefined;
+  return Math.min(100, Math.round((file.confirmedBytes / file.totalBytes) * 100));
+}
+
 export function FolderMonitorPanel({
   activeChannel,
   onNotice,
   onQueueRefresh,
 }: FolderMonitorPanelProps) {
   const [settings, setSettings] = useState<FolderMonitorSettings>(unavailable);
+  const [files, setFiles] = useState<FolderMonitorFileActivity[]>([]);
+  const [logs, setLogs] = useState<FolderMonitorLogEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [visibility, setVisibility] =
@@ -71,16 +89,23 @@ export function FolderMonitorPanel({
       if (loading) return;
       loading = true;
       try {
-        const loaded = await loadFolderMonitorSettings();
+        const loaded = await loadFolderMonitorOverview();
         if (!active) return;
-        setSettings(loaded);
+        setSettings(loaded.settings);
+        setFiles(loaded.files);
+        setLogs(loaded.logs);
         setLoadError("");
         if (
-          loaded.lastScanAt &&
-          loaded.lastScanAt !== lastQueueRefreshAt.current
+          loaded.settings.lastScanAt &&
+          loaded.settings.lastScanAt !== lastQueueRefreshAt.current
         ) {
-          lastQueueRefreshAt.current = loaded.lastScanAt;
-          await onQueueRefresh();
+          lastQueueRefreshAt.current = loaded.settings.lastScanAt;
+          void onQueueRefresh().catch(() => {
+            if (active)
+              setLoadError(
+                "The upload queue could not be refreshed after the folder scan.",
+              );
+          });
         }
       } catch {
         if (active)
@@ -174,13 +199,37 @@ export function FolderMonitorPanel({
       const updated = await scanFolderMonitorNow();
       setSettings(updated);
       lastQueueRefreshAt.current = updated.lastScanAt;
-      await onQueueRefresh();
+      void onQueueRefresh().catch(() =>
+        setLoadError("The upload queue could not be refreshed after the folder scan."),
+      );
       onNotice(updated.detail);
     } catch (error) {
       onNotice(
         error instanceof Error
           ? error.message
           : "The watched folder could not be scanned.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const processExisting = async () => {
+    if (!isTauri || !settings.enabled) return;
+    setBusy(true);
+    try {
+      const updated = await processExistingFolderFiles();
+      setSettings(updated);
+      lastQueueRefreshAt.current = updated.lastScanAt;
+      void onQueueRefresh().catch(() =>
+        setLoadError("The upload queue could not be refreshed after processing existing files."),
+      );
+      onNotice(updated.detail);
+    } catch (error) {
+      onNotice(
+        error instanceof Error
+          ? error.message
+          : "Existing watched-folder files could not be processed.",
       );
     } finally {
       setBusy(false);
@@ -208,6 +257,15 @@ export function FolderMonitorPanel({
   };
 
   const activeStatus = settings.enabled && settings.status === "watching";
+  const uploadingFiles = useMemo(
+    () => files.filter((file) => ["importing", "dispatching", "uploading"].includes(file.uploadStatus ?? file.observationState)),
+    [files],
+  );
+  const queuedFiles = useMemo(
+    () => files.filter((file) => ["draft", "queued", "needs_reconciliation"].includes(file.uploadStatus ?? file.observationState)),
+    [files],
+  );
+  const recentFiles = useMemo(() => files.slice(0, 24), [files]);
 
   return (
     <section
@@ -239,9 +297,9 @@ export function FolderMonitorPanel({
         <span>
           Enabling this is recurring approval to copy supported files added
           after enabling into the app’s managed workspace and upload them to the
-          bound YouTube channel. Existing files are used as the starting
-          baseline. Original files remain unless source cleanup is explicitly
-          enabled below.
+          bound YouTube channel. Existing files stay in the starting baseline
+          until you explicitly choose to process them. Original files remain
+          unless source cleanup is explicitly enabled below.
         </span>
       </div>
 
@@ -292,13 +350,103 @@ export function FolderMonitorPanel({
           <p className="folder-monitor__detail" role="status">
             {settings.detail}
           </p>
+          <p className="folder-monitor__automatic">
+            Automatic scanning is active every 5 seconds while this app is running.
+          </p>
+          <section className="folder-monitor__live" aria-labelledby="folder-monitor-live-heading">
+            <div className="folder-monitor__live-heading">
+              <div>
+                <p className="eyebrow">THIS FOLDER</p>
+                <h3 id="folder-monitor-live-heading">Live folder activity</h3>
+              </div>
+              <span>{uploadingFiles.length} uploading · {queuedFiles.length} queued</span>
+            </div>
+            <div className="folder-monitor__activity-grid">
+              <div className="folder-monitor__activity-column">
+                <h4>Uploading now</h4>
+                {uploadingFiles.length === 0 ? (
+                  <p className="folder-monitor__activity-empty">No files are currently being copied or uploaded.</p>
+                ) : (
+                  <ul className="folder-monitor__activity-list">
+                    {uploadingFiles.map((file) => {
+                      const progress = fileProgress(file);
+                      return (
+                        <li className="folder-monitor__activity-item" key={`${file.fileName}-${file.updatedAt}`}>
+                          <div className="folder-monitor__activity-row">
+                            <strong title={file.fileName}>{file.fileName}</strong>
+                            <span>{file.uploadStatus ?? file.observationState}</span>
+                          </div>
+                          <p>{formatBytes(file.sizeBytes)}{progress === undefined ? "" : ` · ${progress}% uploaded`}</p>
+                          {progress !== undefined && <progress aria-label={`${file.fileName} upload progress`} max={100} value={progress} />}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+              <div className="folder-monitor__activity-column">
+                <h4>Waiting in this folder’s queue</h4>
+                {queuedFiles.length === 0 ? (
+                  <p className="folder-monitor__activity-empty">No watched-folder files are awaiting upload.</p>
+                ) : (
+                  <ul className="folder-monitor__activity-list">
+                    {queuedFiles.map((file) => (
+                      <li className="folder-monitor__activity-item" key={`${file.fileName}-${file.updatedAt}`}>
+                        <div className="folder-monitor__activity-row">
+                          <strong title={file.fileName}>{file.fileName}</strong>
+                          <span>{file.uploadStatus ?? file.observationState}</span>
+                        </div>
+                        <p>{formatBytes(file.sizeBytes)} · updated {formatScanTime(file.updatedAt)}</p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+            <details className="folder-monitor__activity-log">
+              <summary>Folder scan log ({logs.length})</summary>
+              {logs.length === 0 ? (
+                <p className="folder-monitor__activity-empty">No scan events have been recorded for this folder yet.</p>
+              ) : (
+                <ul className="folder-monitor__log-list">
+                  {logs.map((log) => (
+                    <li key={`${log.createdAt}-${log.kind}`}>
+                      <strong>{log.kind.replaceAll("_", " ")}</strong>
+                      <span>{formatScanTime(log.createdAt)}</span>
+                      <p>{log.detail ?? "No further detail recorded."}</p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </details>
+            <details className="folder-monitor__activity-log">
+              <summary>Recently observed files ({files.length})</summary>
+              <ul className="folder-monitor__log-list">
+                {recentFiles.map((file) => (
+                  <li key={`${file.fileName}-${file.updatedAt}`}>
+                    <strong>{file.fileName}</strong>
+                    <span>{formatScanTime(file.updatedAt)}</span>
+                    <p>{file.uploadTitle ? `Queued as ${file.uploadTitle}` : `${formatBytes(file.sizeBytes)} · ${file.observationState}`}</p>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          </section>
           <div className="folder-monitor__actions">
             <button
               disabled={busy}
               onClick={() => void scanNow()}
               type="button"
             >
-              {busy ? "Working…" : "Scan now"}
+              {busy ? "Working…" : "Refresh scan"}
+            </button>
+            <button
+              className="secondary-action"
+              disabled={busy}
+              onClick={() => void processExisting()}
+              type="button"
+            >
+              {busy ? "Working…" : "Process existing files"}
             </button>
             <button
               className="danger-button"
@@ -413,11 +561,12 @@ export function FolderMonitorPanel({
         </p>
       )}
       <p className="folder-monitor__footnote">
-        The monitor scans direct child files only. A file must stop changing
-        before it is accepted; a matching local SHA-256 record or title in the
-        last synced YouTube library is not uploaded automatically. Source
-        cleanup re-hashes the original after a confirmed upload and never
-        deletes the managed app copy.
+        The monitor scans direct child files only. Existing files remain a safe
+        baseline until you select Process existing files. Every selected file
+        must still stop changing before it is accepted; a matching local SHA-256
+        record or title in the last synced YouTube library is not uploaded
+        automatically. Source cleanup re-hashes the original after a confirmed
+        upload and never deletes the managed app copy.
       </p>
     </section>
   );

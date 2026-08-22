@@ -372,6 +372,36 @@ struct FolderMonitorSettings {
     last_file_name: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderMonitorFileActivity {
+    file_name: String,
+    observation_state: String,
+    size_bytes: u64,
+    updated_at: String,
+    upload_title: Option<String>,
+    upload_status: Option<String>,
+    confirmed_bytes: Option<u64>,
+    total_bytes: Option<u64>,
+    detail: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderMonitorLogEntry {
+    kind: String,
+    detail: Option<String>,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderMonitorOverview {
+    settings: FolderMonitorSettings,
+    files: Vec<FolderMonitorFileActivity>,
+    logs: Vec<FolderMonitorLogEntry>,
+}
+
 fn user_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -1324,7 +1354,11 @@ fn complete_oauth_connection(
     if let Some(secret) = client_secret.as_deref() {
         token_form.push(("client_secret", secret));
     }
-    let token_response = reqwest::blocking::Client::new()
+    let token_response = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|_| "Google token refresh could not be prepared.")?
         .post("https://oauth2.googleapis.com/token")
         .form(&token_form)
         .send()
@@ -3841,6 +3875,60 @@ fn folder_monitor_settings(connection: &Connection) -> Result<FolderMonitorSetti
         .map_err(user_error)
 }
 
+fn folder_monitor_overview(connection: &Connection) -> Result<FolderMonitorOverview, String> {
+    let settings = folder_monitor_settings(connection)?;
+    let Some(channel_name) = settings.channel_name.as_deref() else {
+        return Ok(FolderMonitorOverview {
+            settings,
+            files: Vec::new(),
+            logs: Vec::new(),
+        });
+    };
+    let files = connection
+        .prepare("SELECT observations.file_path, observations.state, observations.size_bytes, observations.updated_at, uploads.title, uploads.status, uploads.confirmed_bytes, uploads.total_bytes, uploads.detail FROM folder_monitor_observations AS observations LEFT JOIN upload_items AS uploads ON uploads.id = observations.upload_item_id WHERE observations.channel_name = ?1 ORDER BY observations.updated_at DESC LIMIT 200")
+        .map_err(user_error)?
+        .query_map([channel_name], |row| {
+            let file_path = row.get::<_, String>(0)?;
+            Ok(FolderMonitorFileActivity {
+                file_name: Path::new(&file_path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("Unnamed file")
+                    .to_string(),
+                observation_state: row.get(1)?,
+                size_bytes: row.get::<_, i64>(2)? as u64,
+                updated_at: row.get(3)?,
+                upload_title: row.get(4)?,
+                upload_status: row.get(5)?,
+                confirmed_bytes: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
+                total_bytes: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
+                detail: row.get(8)?,
+            })
+        })
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?;
+    let logs = connection
+        .prepare("SELECT kind, detail, created_at FROM audit_events WHERE channel_name = ?1 AND kind LIKE 'folder_monitor_%' ORDER BY created_at DESC LIMIT 200")
+        .map_err(user_error)?
+        .query_map([channel_name], |row| {
+            Ok(FolderMonitorLogEntry {
+                kind: row.get(0)?,
+                detail: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?;
+    Ok(FolderMonitorOverview {
+        settings,
+        files,
+        logs,
+    })
+}
+
 fn monitored_file_signature(metadata: &fs::Metadata) -> Result<(u64, String), String> {
     let modified = metadata.modified().map_err(user_error)?;
     let duration = modified
@@ -4379,10 +4467,12 @@ fn scan_folder_monitor_locked(
     let mut waiting = 0_usize;
     let mut queued = 0_usize;
     let mut skipped = 0_usize;
+    let mut baseline = 0_usize;
     let mut paused = false;
     let mut failures = Vec::new();
     let mut dispatch_ids = Vec::new();
     let mut last_file_name = None;
+    let mut inventory_synced = false;
 
     for file in files {
         last_file_name = Some(file.file_name.clone());
@@ -4433,8 +4523,9 @@ fn scan_folder_monitor_locked(
                 }
                 // Do the provider inventory read only when this scan may dispatch a
                 // newly stable file. Baseline and test scans remain local-only.
-                if dispatch_uploads {
+                if dispatch_uploads && !inventory_synced {
                     sync_channel_inventory_worker(state)?;
+                    inventory_synced = true;
                 }
                 let _ = item_id;
                 ingest_stable_monitored_file(
@@ -4493,6 +4584,10 @@ fn scan_folder_monitor_locked(
                     &file,
                     item_id,
                 )
+            }
+            Some((_, _, state_name, _)) if state_name == "baseline" => {
+                baseline += 1;
+                continue;
             }
             Some(_) => continue,
         };
@@ -4573,6 +4668,11 @@ fn scan_folder_monitor_locked(
             "watching",
             format!("Skipped {skipped} video(s) already represented by a local digest or synced YouTube title."),
         )
+    } else if baseline > 0 {
+        (
+            "watching",
+            format!("Found {baseline} existing eligible video(s) in the starting baseline. Select Process existing files to intake them safely."),
+        )
     } else {
         (
             "watching",
@@ -4597,6 +4697,104 @@ fn scan_folder_monitor_impl(
         .lock()
         .map_err(|_| "The folder monitor lock is unavailable.".to_string())?;
     scan_folder_monitor_locked(state, dispatch_uploads)
+}
+
+fn record_folder_monitor_scan_failure(state: &AppState) {
+    let Ok(connection) = database(state) else {
+        return;
+    };
+    let _ = update_monitor_result(
+        &connection,
+        "error",
+        "The background folder scan stopped before completing. Your existing queue remains unchanged; use Refresh scan to retry safely.",
+        None,
+    );
+}
+
+/// Starts a manual scan without holding the webview's request open while
+/// filesystem, OAuth, inventory, or upload work is pending.
+fn request_folder_monitor_scan_impl(state: &AppState) -> Result<FolderMonitorSettings, String> {
+    let connection = database(state)?;
+    let settings = folder_monitor_settings(&connection)?;
+    if !settings.enabled {
+        return Ok(settings);
+    }
+    let result = update_monitor_result(
+        &connection,
+        "scanning",
+        "Folder scan is running in the background. You can keep using the app.",
+        None,
+    )?;
+    drop(connection);
+    let worker_state = state.clone();
+    thread::spawn(move || {
+        if scan_folder_monitor_impl(&worker_state, true).is_err() {
+            record_folder_monitor_scan_failure(&worker_state);
+        }
+    });
+    Ok(result)
+}
+
+/// Promote only the operator-visible starting baseline into the ordinary
+/// watched-file intake state. The next locked scan still verifies the bound
+/// channel, refreshes inventory, copies each stable source into managed
+/// storage, and uses the regular duplicate and resumable-upload flow.
+fn process_existing_folder_files_impl(
+    state: &AppState,
+    dispatch_uploads: bool,
+) -> Result<FolderMonitorSettings, String> {
+    let _guard = state
+        .folder_monitor_lock
+        .lock()
+        .map_err(|_| "The folder monitor lock is unavailable.".to_string())?;
+    let connection = database(state)?;
+    let settings = folder_monitor_settings(&connection)?;
+    if !settings.enabled {
+        return Err("Enable a watched folder before processing its existing files.".into());
+    }
+    let folder_path = settings
+        .folder_path
+        .as_deref()
+        .ok_or_else(|| "The enabled folder monitor has no folder path.".to_string())?;
+    let channel_name = settings
+        .channel_name
+        .as_deref()
+        .ok_or_else(|| "The enabled folder monitor has no channel binding.".to_string())?;
+    if !monitor_authorized(&connection, folder_path, channel_name)? {
+        return Err("The watched-folder channel is no longer active. Reconnect it before processing existing files.".into());
+    }
+    let baseline_count = connection
+        .execute(
+            "UPDATE folder_monitor_observations SET state = 'observed', digest = NULL, upload_item_id = NULL, updated_at = ?1 WHERE channel_name = ?2 AND state = 'baseline'",
+            params![now(), channel_name],
+        )
+        .map_err(user_error)?;
+    if baseline_count == 0 {
+        return update_monitor_result(
+            &connection,
+            "watching",
+            "No existing baseline videos are waiting. New direct-child video files are scanned normally.",
+            None,
+        );
+    }
+    audit_global_scoped(
+        &connection,
+        channel_name,
+        "folder_monitor_existing_files_requested",
+        &format!("Operator requested safe intake for {baseline_count} existing watched-folder baseline video(s)"),
+    )?;
+    drop(connection);
+    let scanned = scan_folder_monitor_locked(state, dispatch_uploads)?;
+    let connection = database(state)?;
+    update_monitor_result(
+        &connection,
+        &scanned.status,
+        &format!(
+            "Processing {baseline_count} existing baseline video(s). {}",
+            scanned.detail
+        ),
+        scanned.last_file_name.as_deref(),
+    )
 }
 
 fn enable_folder_monitor_impl(
@@ -4690,7 +4888,9 @@ fn disable_folder_monitor_impl(state: &AppState) -> Result<FolderMonitorSettings
 
 fn folder_monitor_poll_loop(state: AppState) {
     loop {
-        let _ = scan_folder_monitor_impl(&state, true);
+        if scan_folder_monitor_impl(&state, true).is_err() {
+            record_folder_monitor_scan_failure(&state);
+        }
         thread::sleep(FOLDER_MONITOR_POLL_INTERVAL);
     }
 }
@@ -4794,6 +4994,16 @@ fn load_folder_monitor_settings(
 }
 
 #[tauri::command]
+async fn load_folder_monitor_overview(
+    state: State<'_, AppState>,
+) -> Result<FolderMonitorOverview, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || folder_monitor_overview(&database(&state)?))
+        .await
+        .map_err(|_| "Folder monitor activity loading stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
 fn enable_folder_monitor(
     path: String,
     visibility: String,
@@ -4824,9 +5034,19 @@ async fn scan_folder_monitor_now(
     state: State<'_, AppState>,
 ) -> Result<FolderMonitorSettings, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || scan_folder_monitor_impl(&state, true))
+    tauri::async_runtime::spawn_blocking(move || request_folder_monitor_scan_impl(&state))
         .await
         .map_err(|_| "Folder monitoring stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+async fn process_existing_folder_files(
+    state: State<'_, AppState>,
+) -> Result<FolderMonitorSettings, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || process_existing_folder_files_impl(&state, true))
+        .await
+        .map_err(|_| "Existing watched-folder processing stopped unexpectedly.".to_string())?
 }
 
 #[tauri::command]
@@ -6131,9 +6351,11 @@ pub fn run() {
             record_webview_error,
             acknowledge_crash_recovery,
             load_folder_monitor_settings,
+            load_folder_monitor_overview,
             enable_folder_monitor,
             disable_folder_monitor,
             scan_folder_monitor_now,
+            process_existing_folder_files,
             load_connection_settings,
             load_manual_upload_defaults,
             save_manual_upload_defaults,
@@ -6261,7 +6483,11 @@ mod tests {
         let identity = release_identity();
 
         assert_eq!(identity.version, env!("CARGO_PKG_VERSION"));
-        assert!(matches!(identity.channel.as_str(), "regular" | "nightly"));
+        assert!(
+            identity.channel == "regular"
+                || identity.channel.starts_with("nightly-")
+                || identity.channel.starts_with('v')
+        );
         assert!(matches!(
             identity.build_profile.as_str(),
             "debug" | "release"
@@ -7180,6 +7406,157 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].id, "remote:camera-file:camera-import");
         assert!(candidates[0].evidence.contains("number sequence"));
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_monitor_processes_existing_baseline_only_on_operator_request() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let watched = root.join("watched");
+        let media = root.join("media");
+        fs::create_dir_all(&watched).unwrap();
+        fs::create_dir_all(&media).unwrap();
+        fs::write(watched.join("already-there.mp4"), b"baseline-video").unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: media,
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let connection = database(&state).unwrap();
+        connection
+            .execute(
+                "INSERT INTO connection_settings (singleton, active_channel, active_channel_id, connection_detail, updated_at) VALUES (1, 'Channel A', 'channel-a-id', 'Test connection', ?1)",
+                params![now()],
+            )
+            .unwrap();
+        enable_folder_monitor_impl(
+            &state,
+            watched.to_string_lossy().to_string(),
+            "unlisted".into(),
+            false,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        let baseline = scan_folder_monitor_impl(&state, false).unwrap();
+        assert!(baseline.detail.contains("Found 1 existing eligible video"));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM upload_items", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+
+        let processed = process_existing_folder_files_impl(&state, false).unwrap();
+        assert!(processed
+            .detail
+            .contains("Processing 1 existing baseline video"));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM upload_items", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT status FROM upload_items", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "queued"
+        );
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manual_folder_scan_returns_a_background_receipt_without_waiting_for_the_worker() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let watched = root.join("watched");
+        let media = root.join("media");
+        fs::create_dir_all(&watched).unwrap();
+        fs::create_dir_all(&media).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: media,
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let connection = database(&state).unwrap();
+        connection
+            .execute(
+                "INSERT INTO connection_settings (singleton, active_channel, active_channel_id, connection_detail, updated_at) VALUES (1, 'Channel A', 'channel-a-id', 'Test connection', ?1)",
+                params![now()],
+            )
+            .unwrap();
+        enable_folder_monitor_impl(
+            &state,
+            watched.to_string_lossy().to_string(),
+            "unlisted".into(),
+            false,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        let worker_gate = state.folder_monitor_lock.lock().unwrap();
+        let receipt = request_folder_monitor_scan_impl(&state).unwrap();
+        assert_eq!(receipt.status, "scanning");
+        assert!(receipt.detail.contains("background"));
+        drop(worker_gate);
+        drop(connection);
+        thread::sleep(Duration::from_millis(25));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_monitor_overview_is_channel_scoped_bounded_and_hides_source_paths() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let connection = database(&state).unwrap();
+        let timestamp = now();
+        connection.execute(
+            "INSERT INTO folder_monitor_settings (singleton, enabled, folder_path, channel_name, channel_id, visibility, status, detail, updated_at) VALUES (1, 1, ?1, 'Channel A', 'channel-a', 'unlisted', 'watching', 'Watching', ?2)",
+            params![root.join("private-source").to_string_lossy(), timestamp],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, status, confirmed_bytes, total_bytes, detail, created_at, updated_at) VALUES ('folder-item', 'Queued clip', 'clip.mp4', 'managed.media', 128, 'uploading', 64, 128, 'Uploading', ?1, ?1)",
+            [now()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO folder_monitor_observations (channel_name, file_path, size_bytes, modified_key, state, upload_item_id, first_seen_at, updated_at) VALUES ('Channel A', ?1, 128, 'stable', 'dispatched', 'folder-item', ?2, ?2)",
+            params![root.join("private-source").join("clip.mp4").to_string_lossy(), now()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO folder_monitor_observations (channel_name, file_path, size_bytes, modified_key, state, first_seen_at, updated_at) VALUES ('Channel B', 'other.mp4', 16, 'stable', 'queued', ?1, ?1)",
+            [now()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO audit_events (id, channel_name, kind, detail, created_at) VALUES ('folder-log', 'Channel A', 'folder_monitor_queued', 'Queued safely', ?1)",
+            [now()],
+        ).unwrap();
+
+        let overview = folder_monitor_overview(&connection).unwrap();
+        let rendered = serde_json::to_string(&overview).unwrap();
+        assert_eq!(overview.files.len(), 1);
+        assert_eq!(overview.files[0].file_name, "clip.mp4");
+        assert_eq!(
+            overview.files[0].upload_status.as_deref(),
+            Some("uploading")
+        );
+        assert_eq!(overview.logs.len(), 1);
+        assert!(!rendered.contains("private-source\\\\clip.mp4"));
+        assert!(!rendered.contains("other.mp4"));
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }

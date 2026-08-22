@@ -154,6 +154,32 @@ export type FolderMonitorSettings = {
   lastFileName?: string;
 };
 
+/** Safe, folder-scoped activity projection. Source paths never enter the webview. */
+export type FolderMonitorFileActivity = {
+  fileName: string;
+  observationState: string;
+  sizeBytes: number;
+  updatedAt: string;
+  uploadTitle?: string;
+  uploadStatus?: string;
+  confirmedBytes?: number;
+  totalBytes?: number;
+  detail?: string;
+};
+
+/** Safe, bounded audit history for the currently monitored folder/channel. */
+export type FolderMonitorLogEntry = {
+  kind: string;
+  detail?: string;
+  createdAt: string;
+};
+
+export type FolderMonitorOverview = {
+  settings: FolderMonitorSettings;
+  files: FolderMonitorFileActivity[];
+  logs: FolderMonitorLogEntry[];
+};
+
 /** Safe-to-render metadata. OAuth tokens never enter the webview. */
 export type ConnectionSettings = {
   /** The native layer has an operator-imported Desktop OAuth client; its ID is not exposed to the webview. */
