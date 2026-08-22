@@ -105,7 +105,7 @@ to use the App. Your only remedy is to stop using the App.
 ## Contact
 
 For questions about these Terms, contact
-**[CONTACT EMAIL TO BE ADDED BEFORE PUBLIC RELEASE]**. Do not send account
+[`opensourcedev@sekailens.com`](mailto:opensourcedev@sekailens.com). Do not send account
 credentials, OAuth tokens, private video links, or other sensitive information
 to this address.
 

@@ -7,6 +7,7 @@ interface QueueTableProps {
   busy: boolean;
   onQueue: (item: UploadItem) => void;
   onVisibilityChange: (item: UploadItem, visibility: UploadVisibility) => void;
+  onDeleteSourceAfterUploadChange: (item: UploadItem, enabled: boolean) => void;
 }
 
 function formatSize(bytes: number) {
@@ -15,23 +16,40 @@ function formatSize(bytes: number) {
 }
 
 function formatEta(item: UploadItem) {
-  if (!item.transferBytesPerSecond || item.transferBytesPerSecond <= 0) return "ETA calculating";
-  const seconds = Math.ceil(Math.max(0, item.totalBytes - item.confirmedBytes) / item.transferBytesPerSecond);
-  if (seconds >= 3600) return `ETA ${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  if (!item.transferBytesPerSecond || item.transferBytesPerSecond <= 0)
+    return "ETA calculating";
+  const seconds = Math.ceil(
+    Math.max(0, item.totalBytes - item.confirmedBytes) /
+      item.transferBytesPerSecond,
+  );
+  if (seconds >= 3600)
+    return `ETA ${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
   if (seconds >= 60) return `ETA ${Math.floor(seconds / 60)}m ${seconds % 60}s`;
   return `ETA ${seconds}s`;
 }
 
-export function QueueTable({ items, busy, onQueue, onVisibilityChange }: QueueTableProps) {
+export function QueueTable({
+  items,
+  busy,
+  onQueue,
+  onVisibilityChange,
+  onDeleteSourceAfterUploadChange,
+}: QueueTableProps) {
   const [titleQuery, setTitleQuery] = useState("");
 
   if (items.length === 0) {
-    return <p className="queue-table__empty queue-table__empty--state">Your upload queue is empty.</p>;
+    return (
+      <p className="queue-table__empty queue-table__empty--state">
+        Your upload queue is empty.
+      </p>
+    );
   }
 
   const normalizedQuery = titleQuery.trim().toLocaleLowerCase();
   const matchingItems = normalizedQuery
-    ? items.filter((item) => item.title.toLocaleLowerCase().includes(normalizedQuery))
+    ? items.filter((item) =>
+        item.title.toLocaleLowerCase().includes(normalizedQuery),
+      )
     : items;
 
   return (
@@ -47,7 +65,11 @@ export function QueueTable({ items, busy, onQueue, onVisibilityChange }: QueueTa
             value={titleQuery}
           />
           {titleQuery ? (
-            <button className="queue-button" onClick={() => setTitleQuery("")} type="button">
+            <button
+              className="queue-button"
+              onClick={() => setTitleQuery("")}
+              type="button"
+            >
               Clear search
             </button>
           ) : null}
@@ -61,13 +83,21 @@ export function QueueTable({ items, busy, onQueue, onVisibilityChange }: QueueTa
             <th scope="col">Local identity</th>
             <th scope="col">Transfer</th>
             <th scope="col">Status</th>
-            <th scope="col"><span className="sr-only">Action</span></th>
+            <th scope="col">
+              <span className="sr-only">Action</span>
+            </th>
           </tr>
         </thead>
         <tbody className="queue-table__body">
           {matchingItems.map((item) => {
             const progress = item.totalBytes
-              ? Math.min(100, Math.max(0, Math.round((item.confirmedBytes / item.totalBytes) * 100)))
+              ? Math.min(
+                  100,
+                  Math.max(
+                    0,
+                    Math.round((item.confirmedBytes / item.totalBytes) * 100),
+                  ),
+                )
               : 0;
 
             return (
@@ -75,24 +105,71 @@ export function QueueTable({ items, busy, onQueue, onVisibilityChange }: QueueTa
                 <td className="queue-table__video" data-label="Video">
                   <div className="queue-table__video-copy">
                     <strong>{item.title}</strong>
-                    <span>{item.fileName} · {formatSize(item.sizeBytes)}</span>
+                    <span>
+                      {item.fileName} · {formatSize(item.sizeBytes)}
+                    </span>
                   </div>
                 </td>
-                <td className="queue-table__identity" data-label="Local identity">
+                <td
+                  className="queue-table__identity"
+                  data-label="Local identity"
+                >
                   <span className="queue-table__digest-label">SHA-256</span>
-                  <code className="queue-table__digest">{item.digest ? `${item.digest.slice(0, 12)}…` : "Calculating…"}</code>
+                  <code className="queue-table__digest">
+                    {item.digest
+                      ? `${item.digest.slice(0, 12)}…`
+                      : "Calculating…"}
+                  </code>
                 </td>
                 <td className="queue-table__visibility" data-label="Visibility">
                   <label className="visibility-select">
                     <span className="sr-only">Visibility for {item.title}</span>
-                    <select disabled={busy || !["draft", "failed"].includes(item.status)} onChange={(event) => onVisibilityChange(item, event.target.value as UploadVisibility)} value={item.visibility}>
+                    <select
+                      disabled={
+                        busy || !["draft", "failed"].includes(item.status)
+                      }
+                      onChange={(event) =>
+                        onVisibilityChange(
+                          item,
+                          event.target.value as UploadVisibility,
+                        )
+                      }
+                      value={item.visibility}
+                    >
                       <option value="private">Private</option>
                       <option value="unlisted">Unlisted</option>
                       <option value="public">Public</option>
                     </select>
                   </label>
-                  <span className="queue-table__visibility-note">{item.status === "draft" || item.status === "failed" ? "Set before queueing" : "Locked for this upload"}</span>
-                  <span className="queue-table__visibility-note">{item.madeForKids ? "Made for kids" : "Not made for kids"}{item.playlistTitle ? ` · ${item.playlistTitle}` : " · No playlist"}</span>
+                  <span className="queue-table__visibility-note">
+                    {item.status === "draft" || item.status === "failed"
+                      ? "Set before queueing"
+                      : "Locked for this upload"}
+                  </span>
+                  <span className="queue-table__visibility-note">
+                    {item.madeForKids ? "Made for kids" : "Not made for kids"}
+                    {item.playlistTitle
+                      ? ` · ${item.playlistTitle}`
+                      : " · No playlist"}
+                  </span>
+                  <label className="queue-table__source-cleanup">
+                    <input
+                      checked={item.deleteSourceAfterUpload}
+                      disabled={
+                        busy || !["draft", "failed"].includes(item.status)
+                      }
+                      onChange={(event) =>
+                        onDeleteSourceAfterUploadChange(item, event.target.checked)
+                      }
+                      type="checkbox"
+                    />{" "}
+                    Delete original after confirmed upload
+                  </label>
+                  {item.sourceDeleteStatus ? (
+                    <span className="queue-table__visibility-note">
+                      Original source: {item.sourceDeleteStatus}
+                    </span>
+                  ) : null}
                 </td>
                 <td className="queue-table__transfer" data-label="Transfer">
                   <div className="queue-progress">
@@ -104,12 +181,19 @@ export function QueueTable({ items, busy, onQueue, onVisibilityChange }: QueueTa
                       className="queue-progress__track"
                       role="progressbar"
                     >
-                      <div className="queue-progress__value" style={{ width: `${progress}%` }} />
+                      <div
+                        className="queue-progress__value"
+                        style={{ width: `${progress}%` }}
+                      />
                     </div>
                     <span>{progress}%</span>
                   </div>
-                  {item.status === "uploading" ? <span className="queue-table__eta">{formatEta(item)}</span> : null}
-                  {item.detail ? <span className="queue-table__detail">{item.detail}</span> : null}
+                  {item.status === "uploading" ? (
+                    <span className="queue-table__eta">{formatEta(item)}</span>
+                  ) : null}
+                  {item.detail ? (
+                    <span className="queue-table__detail">{item.detail}</span>
+                  ) : null}
                 </td>
                 <td className="queue-table__status" data-label="Status">
                   <StatusPill status={item.status} />
@@ -117,7 +201,14 @@ export function QueueTable({ items, busy, onQueue, onVisibilityChange }: QueueTa
                 <td className="queue-table__action" data-label="Action">
                   <div className="queue-table__actions">
                     {item.status === "draft" ? (
-                      <button className="queue-button" disabled={busy} onClick={() => onQueue(item)} type="button">Add to queue</button>
+                      <button
+                        className="queue-button"
+                        disabled={busy}
+                        onClick={() => onQueue(item)}
+                        type="button"
+                      >
+                        Add to queue
+                      </button>
                     ) : (
                       <span className="queue-table__saved">Saved locally</span>
                     )}

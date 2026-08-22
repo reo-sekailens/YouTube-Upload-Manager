@@ -37,9 +37,9 @@ describe("folder monitor commands", () => {
     const { enableFolderMonitor } = await import("./local");
     const path = "C:\\Media\\Ready";
 
-    await enableFolderMonitor(path, "unlisted", true, "playlist-1", "Episodes");
+    await enableFolderMonitor(path, "unlisted", true, false, "playlist-1", "Episodes");
 
-    expect(invoke).toHaveBeenCalledWith("enable_folder_monitor", { path, visibility: "unlisted", madeForKids: true, playlistId: "playlist-1", playlistTitle: "Episodes" });
+    expect(invoke).toHaveBeenCalledWith("enable_folder_monitor", { path, visibility: "unlisted", madeForKids: true, deleteSourceAfterUpload: false, playlistId: "playlist-1", playlistTitle: "Episodes" });
   });
 
   it("uses narrow native commands for disable and operator-requested scans", async () => {
@@ -83,6 +83,16 @@ describe("duplicate scan command", () => {
     expect(invoke).toHaveBeenCalledWith("sync_channel_inventory");
   });
 
+  it("keeps ignored-match decisions and re-audit requests in the native layer", async () => {
+    const { ignoreDuplicateCandidate, reAuditIgnoredDuplicateCandidates } = await import("./local");
+
+    await ignoreDuplicateCandidate("remote:video-a:video-b");
+    await reAuditIgnoredDuplicateCandidates();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "ignore_duplicate_candidate", { candidateId: "remote:video-a:video-b" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "re_audit_ignored_duplicate_candidates");
+  });
+
   it("keeps arbitrary pre-ingest file paths at the native duplicate-check boundary", async () => {
     isTauri.mockReturnValue(true);
     vi.resetModules();
@@ -114,6 +124,19 @@ describe("duplicate scan command", () => {
     expect(invoke).toHaveBeenCalledWith("delete_preflight_duplicate_file", {
       token: "opaque-review-token",
       confirmation: "duplicate.insv",
+    });
+  });
+
+  it("revalidates a light or deep local match natively before showing deletion confirmation", async () => {
+    isTauri.mockReturnValue(true);
+    vi.resetModules();
+    const { preparePreflightLocalDeleteFile } = await import("./local");
+
+    await preparePreflightLocalDeleteFile("scan-1", 2);
+
+    expect(invoke).toHaveBeenCalledWith("prepare_preflight_local_delete_file", {
+      jobId: "scan-1",
+      ordinal: 2,
     });
   });
 });
@@ -163,6 +186,23 @@ describe("manual upload visibility command", () => {
   });
 });
 
+describe("manual upload source cleanup command", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+  });
+
+  it("keeps the per-upload cleanup choice in the native boundary", async () => {
+    const { setItemDeleteSourceAfterUpload } = await import("./local");
+
+    await setItemDeleteSourceAfterUpload("item-1", true);
+
+    expect(invoke).toHaveBeenCalledWith("set_item_delete_source_after_upload", {
+      id: "item-1",
+      deleteSourceAfterUpload: true,
+    });
+  });
+});
+
 describe("manual upload intake settings", () => {
   beforeEach(() => {
     invoke.mockReset();
@@ -170,7 +210,7 @@ describe("manual upload intake settings", () => {
 
   it("keeps required audience, visibility, and selected-playlist metadata on the native import boundary", async () => {
     const { importAsset } = await import("./local");
-    const settings = { madeForKids: false, visibility: "unlisted" as const, playlistId: "playlist-1", playlistTitle: "Review queue" };
+    const settings = { madeForKids: false, visibility: "unlisted" as const, playlistId: "playlist-1", playlistTitle: "Review queue", deleteSourceAfterUpload: false };
 
     await importAsset("C:\\Media\\review.mp4", settings);
 

@@ -16,7 +16,8 @@ existing separately confirmed deletion workflow.
 - Compare only locally synchronized inventory records for the active channel.
 - Treat case and repeated whitespace as insignificant for exact title matching.
 - Strip only explicit trailing duplicate markers: `(2)` and higher, including
-  whitespace before the marker. Do not use fuzzy or substring matching.
+  whitespace before the marker. This original no-fuzzy boundary is superseded
+  by TASK041's conservative, review-only capture-sequence matching.
 - Keep title matches at metadata confidence; they are not proof of identical
   media and must never trigger automatic deletion.
 - Preserve device-local storage and the existing YouTube deletion safeguards.

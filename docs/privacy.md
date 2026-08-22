@@ -88,8 +88,5 @@ revised effective date.
 
 ## Contact
 
-**Contact placeholder — replace before public release:**
-`privacy-contact@example.com`
-
-Use this contact for privacy questions, requests, or concerns. The placeholder
-is not an active support address.
+For privacy questions, requests, or concerns, contact
+[`opensourcedev@sekailens.com`](mailto:opensourcedev@sekailens.com).

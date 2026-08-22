@@ -8,12 +8,17 @@ import {
   loadFolderMonitorSettings,
   scanFolderMonitorNow,
 } from "../lib/local";
-import type { FolderMonitorSettings, FolderMonitorVisibility, YouTubePlaylist } from "../lib/types";
+import type {
+  FolderMonitorSettings,
+  FolderMonitorVisibility,
+  YouTubePlaylist,
+} from "../lib/types";
 
 const unavailable: FolderMonitorSettings = {
   enabled: false,
   visibility: "private",
   madeForKids: false,
+  deleteSourceAfterUpload: false,
   status: "disabled",
   detail: "Folder monitoring is off.",
 };
@@ -40,12 +45,18 @@ function formatScanTime(value?: string) {
   return date.toLocaleString();
 }
 
-export function FolderMonitorPanel({ activeChannel, onNotice, onQueueRefresh }: FolderMonitorPanelProps) {
+export function FolderMonitorPanel({
+  activeChannel,
+  onNotice,
+  onQueueRefresh,
+}: FolderMonitorPanelProps) {
   const [settings, setSettings] = useState<FolderMonitorSettings>(unavailable);
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [visibility, setVisibility] = useState<FolderMonitorVisibility>("private");
+  const [visibility, setVisibility] =
+    useState<FolderMonitorVisibility>("private");
   const [madeForKids, setMadeForKids] = useState(false);
+  const [deleteSourceAfterUpload, setDeleteSourceAfterUpload] = useState(false);
   const [playlists, setPlaylists] = useState<YouTubePlaylist[]>([]);
   const [playlistId, setPlaylistId] = useState("");
   const lastQueueRefreshAt = useRef<string | undefined>(undefined);
@@ -61,19 +72,27 @@ export function FolderMonitorPanel({ activeChannel, onNotice, onQueueRefresh }: 
         if (!active) return;
         setSettings(loaded);
         setLoadError("");
-        if (loaded.lastScanAt && loaded.lastScanAt !== lastQueueRefreshAt.current) {
+        if (
+          loaded.lastScanAt &&
+          loaded.lastScanAt !== lastQueueRefreshAt.current
+        ) {
           lastQueueRefreshAt.current = loaded.lastScanAt;
           await onQueueRefresh();
         }
       } catch {
-        if (active) setLoadError("Folder monitoring status could not be loaded from this device.");
+        if (active)
+          setLoadError(
+            "Folder monitoring status could not be loaded from this device.",
+          );
       } finally {
         loading = false;
       }
     };
 
     void load();
-    const timer = isTauri ? window.setInterval(() => void load(), 5000) : undefined;
+    const timer = isTauri
+      ? window.setInterval(() => void load(), 5000)
+      : undefined;
     return () => {
       active = false;
       if (timer !== undefined) window.clearInterval(timer);
@@ -81,8 +100,13 @@ export function FolderMonitorPanel({ activeChannel, onNotice, onQueueRefresh }: 
   }, [activeChannel, onQueueRefresh]);
 
   useEffect(() => {
-    if (!isTauri || !activeChannel) { setPlaylists([]); return; }
-    void listYouTubePlaylists().then(setPlaylists).catch(() => setPlaylists([]));
+    if (!isTauri || !activeChannel) {
+      setPlaylists([]);
+      return;
+    }
+    void listYouTubePlaylists()
+      .then(setPlaylists)
+      .catch(() => setPlaylists([]));
   }, [activeChannel]);
 
   const chooseAndEnable = async () => {
@@ -91,13 +115,28 @@ export function FolderMonitorPanel({ activeChannel, onNotice, onQueueRefresh }: 
     try {
       const selected = await open({ directory: true, multiple: false });
       if (typeof selected !== "string") return;
-      const playlist = playlists.find((candidate) => candidate.id === playlistId);
-      const updated = await enableFolderMonitor(selected, visibility, madeForKids, playlist?.id, playlist?.title);
+      const playlist = playlists.find(
+        (candidate) => candidate.id === playlistId,
+      );
+      const updated = await enableFolderMonitor(
+        selected,
+        visibility,
+        madeForKids,
+        deleteSourceAfterUpload,
+        playlist?.id,
+        playlist?.title,
+      );
       setSettings(updated);
       setLoadError("");
-      onNotice(`Folder monitoring is enabled for ${updated.channelName ?? activeChannel}. New completed videos will be copied locally, queued, and start uploading as ${updated.visibility} once stable.`);
+      onNotice(
+        `Folder monitoring is enabled for ${updated.channelName ?? activeChannel}. New completed videos will be copied locally, queued, and start uploading as ${updated.visibility} once stable.`,
+      );
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : "Folder monitoring could not be enabled.");
+      onNotice(
+        error instanceof Error
+          ? error.message
+          : "Folder monitoring could not be enabled.",
+      );
     } finally {
       setBusy(false);
     }
@@ -113,7 +152,11 @@ export function FolderMonitorPanel({ activeChannel, onNotice, onQueueRefresh }: 
       await onQueueRefresh();
       onNotice(updated.detail);
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : "The watched folder could not be scanned.");
+      onNotice(
+        error instanceof Error
+          ? error.message
+          : "The watched folder could not be scanned.",
+      );
     } finally {
       setBusy(false);
     }
@@ -125,9 +168,15 @@ export function FolderMonitorPanel({ activeChannel, onNotice, onQueueRefresh }: 
     try {
       const updated = await disableFolderMonitor();
       setSettings(updated);
-      onNotice("Folder monitoring is disabled. Existing queued files and source videos were not changed.");
+      onNotice(
+        "Folder monitoring is disabled. Existing queued files and source videos were not changed.",
+      );
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : "Folder monitoring could not be disabled.");
+      onNotice(
+        error instanceof Error
+          ? error.message
+          : "Folder monitoring could not be disabled.",
+      );
     } finally {
       setBusy(false);
     }
@@ -136,54 +185,194 @@ export function FolderMonitorPanel({ activeChannel, onNotice, onQueueRefresh }: 
   const activeStatus = settings.enabled && settings.status === "watching";
 
   return (
-    <section className="panel folder-monitor" aria-labelledby="folder-monitor-heading">
+    <section
+      className="panel folder-monitor"
+      aria-labelledby="folder-monitor-heading"
+    >
       <header className="section-heading folder-monitor__heading">
         <div>
           <p className="eyebrow">OPT-IN AUTOMATION</p>
           <h2 id="folder-monitor-heading">Watched folder uploads</h2>
-          <p className="section-copy">Monitor one local folder while this app is running and send newly added, completed video files to the channel you approve.</p>
+          <p className="section-copy">
+            Monitor one local folder while this app is running and send newly
+            added, completed video files to the channel you approve.
+          </p>
         </div>
-        <span className={`monitor-status${activeStatus ? " monitor-status--active" : settings.enabled ? " monitor-status--paused" : ""}`}>
+        <span
+          className={`monitor-status${activeStatus ? " monitor-status--active" : settings.enabled ? " monitor-status--paused" : ""}`}
+        >
           <span aria-hidden="true" />
           {statusLabel(settings)}
         </span>
       </header>
 
       <div className="folder-monitor__consent">
-        <strong>New videos upload automatically as {settings.enabled ? settings.visibility : visibility}.</strong>
-        <span>Enabling this is recurring approval to copy supported files added after enabling into the app’s managed workspace and upload them to the bound YouTube channel. Existing files are used as the starting baseline. Nothing is deleted or published publicly.</span>
+        <strong>
+          New videos upload automatically as{" "}
+          {settings.enabled ? settings.visibility : visibility}.
+        </strong>
+        <span>
+          Enabling this is recurring approval to copy supported files added
+          after enabling into the app’s managed workspace and upload them to the
+          bound YouTube channel. Existing files are used as the starting
+          baseline. Original files remain unless source cleanup is explicitly
+          enabled below.
+        </span>
       </div>
 
       {settings.enabled ? (
         <div className="folder-monitor__enabled">
           <dl className="folder-monitor__facts">
-            <div><dt>Folder</dt><dd title={settings.folderPath}>{settings.folderPath ?? "Unavailable"}</dd></div>
-            <div><dt>Bound channel</dt><dd>{settings.channelName ?? "Unavailable"}</dd></div>
-            <div><dt>Visibility</dt><dd>{settings.visibility}</dd></div>
-            <div><dt>Audience</dt><dd>{settings.madeForKids ? "Made for kids" : "Not made for kids"}</dd></div>
-            <div><dt>Playlist</dt><dd>{settings.playlistTitle ?? "No playlist"}</dd></div>
-            <div><dt>Last scan</dt><dd>{formatScanTime(settings.lastScanAt)}</dd></div>
-            <div><dt>Last file</dt><dd>{settings.lastFileName ?? "No file processed yet"}</dd></div>
+            <div>
+              <dt>Folder</dt>
+              <dd title={settings.folderPath}>
+                {settings.folderPath ?? "Unavailable"}
+              </dd>
+            </div>
+            <div>
+              <dt>Bound channel</dt>
+              <dd>{settings.channelName ?? "Unavailable"}</dd>
+            </div>
+            <div>
+              <dt>Visibility</dt>
+              <dd>{settings.visibility}</dd>
+            </div>
+            <div>
+              <dt>Audience</dt>
+              <dd>
+                {settings.madeForKids ? "Made for kids" : "Not made for kids"}
+              </dd>
+            </div>
+            <div>
+              <dt>Original source cleanup</dt>
+              <dd>
+                {settings.deleteSourceAfterUpload
+                  ? "Delete after confirmed upload"
+                  : "Keep original"}
+              </dd>
+            </div>
+            <div>
+              <dt>Playlist</dt>
+              <dd>{settings.playlistTitle ?? "No playlist"}</dd>
+            </div>
+            <div>
+              <dt>Last scan</dt>
+              <dd>{formatScanTime(settings.lastScanAt)}</dd>
+            </div>
+            <div>
+              <dt>Last file</dt>
+              <dd>{settings.lastFileName ?? "No file processed yet"}</dd>
+            </div>
           </dl>
-          <p className="folder-monitor__detail" role="status">{settings.detail}</p>
+          <p className="folder-monitor__detail" role="status">
+            {settings.detail}
+          </p>
           <div className="folder-monitor__actions">
-            <button disabled={busy} onClick={() => void scanNow()} type="button">{busy ? "Working…" : "Scan now"}</button>
-            <button className="danger-button" disabled={busy} onClick={() => void disable()} type="button">Disable monitor</button>
+            <button
+              disabled={busy}
+              onClick={() => void scanNow()}
+              type="button"
+            >
+              {busy ? "Working…" : "Scan now"}
+            </button>
+            <button
+              className="danger-button"
+              disabled={busy}
+              onClick={() => void disable()}
+              type="button"
+            >
+              Disable monitor
+            </button>
           </div>
         </div>
       ) : (
         <div className="folder-monitor__disabled">
           <div>
-            <p>{activeChannel ? `Ready to bind a folder to ${activeChannel}.` : "Connect a YouTube channel before choosing a folder."}</p>
-            <div className="folder-monitor__options"><label className="folder-monitor__visibility"><span>Automatic upload visibility</span><select disabled={!activeChannel || busy} onChange={(event) => setVisibility(event.target.value as FolderMonitorVisibility)} value={visibility}><option value="private">Private</option><option value="unlisted">Unlisted</option></select></label><label className="folder-monitor__visibility"><span>Audience</span><select disabled={!activeChannel || busy} onChange={(event) => setMadeForKids(event.target.value === "yes")} value={madeForKids ? "yes" : "no"}><option value="no">Not made for kids</option><option value="yes">Made for kids</option></select></label><label className="folder-monitor__visibility"><span>Add to playlist</span><select disabled={!activeChannel || busy} onChange={(event) => setPlaylistId(event.target.value)} value={playlistId}><option value="">No playlist</option>{playlists.map((playlist) => <option key={playlist.id} value={playlist.id}>{playlist.title}</option>)}</select></label></div>
+            <p>
+              {activeChannel
+                ? `Ready to bind a folder to ${activeChannel}.`
+                : "Connect a YouTube channel before choosing a folder."}
+            </p>
+            <div className="folder-monitor__options">
+              <label className="folder-monitor__visibility">
+                <span>Automatic upload visibility</span>
+                <select
+                  disabled={!activeChannel || busy}
+                  onChange={(event) =>
+                    setVisibility(event.target.value as FolderMonitorVisibility)
+                  }
+                  value={visibility}
+                >
+                  <option value="private">Private</option>
+                  <option value="unlisted">Unlisted</option>
+                </select>
+              </label>
+              <label className="folder-monitor__source-cleanup">
+                <input
+                  checked={deleteSourceAfterUpload}
+                  disabled={!activeChannel || busy}
+                  onChange={(event) =>
+                    setDeleteSourceAfterUpload(event.target.checked)
+                  }
+                  type="checkbox"
+                />{" "}
+                Delete original only after YouTube confirms each upload
+              </label>
+              <label className="folder-monitor__visibility">
+                <span>Audience</span>
+                <select
+                  disabled={!activeChannel || busy}
+                  onChange={(event) =>
+                    setMadeForKids(event.target.value === "yes")
+                  }
+                  value={madeForKids ? "yes" : "no"}
+                >
+                  <option value="no">Not made for kids</option>
+                  <option value="yes">Made for kids</option>
+                </select>
+              </label>
+              <label className="folder-monitor__visibility">
+                <span>Add to playlist</span>
+                <select
+                  disabled={!activeChannel || busy}
+                  onChange={(event) => setPlaylistId(event.target.value)}
+                  value={playlistId}
+                >
+                  <option value="">No playlist</option>
+                  {playlists.map((playlist) => (
+                    <option key={playlist.id} value={playlist.id}>
+                      {playlist.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
           </div>
-          <button disabled={!isTauri || !activeChannel || busy} onClick={() => void chooseAndEnable()} type="button">{busy ? "Enabling…" : "Choose folder and enable"}</button>
-          {!isTauri && <span>Open the signed desktop app to monitor a local folder.</span>}
+          <button
+            disabled={!isTauri || !activeChannel || busy}
+            onClick={() => void chooseAndEnable()}
+            type="button"
+          >
+            {busy ? "Enabling…" : "Choose folder and enable"}
+          </button>
+          {!isTauri && (
+            <span>Open the signed desktop app to monitor a local folder.</span>
+          )}
         </div>
       )}
 
-      {loadError && <p className="folder-monitor__error" role="alert">{loadError}</p>}
-      <p className="folder-monitor__footnote">The monitor scans direct child files only. A file must stop changing before it is accepted; a matching local SHA-256 record or title in the last synced YouTube library is not uploaded automatically.</p>
+      {loadError && (
+        <p className="folder-monitor__error" role="alert">
+          {loadError}
+        </p>
+      )}
+      <p className="folder-monitor__footnote">
+        The monitor scans direct child files only. A file must stop changing
+        before it is accepted; a matching local SHA-256 record or title in the
+        last synced YouTube library is not uploaded automatically. Source
+        cleanup re-hashes the original after a confirmed upload and never
+        deletes the managed app copy.
+      </p>
     </section>
   );
 }

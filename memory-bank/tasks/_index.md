@@ -44,7 +44,18 @@ This is the source of truth for planned work. Keep one row per task and link the
 | [TASK035](TASK035-universal-crash-resume.md) | Universal crash-safe operation recovery | completed | unassigned | TASK004, TASK005, TASK008, TASK034 | Persisted recovery boundaries now cover local and remote operations. |
 | [TASK036](TASK036-cancel-and-clear-work.md) | Cancel and clear persisted work | completed | unassigned | TASK035 | Explicit, audited cancellation for upload, dedupe, and deletion queues. |
 | [TASK037](TASK037-native-worker-isolation.md) | Native worker isolation | completed | unassigned | TASK033, TASK035 | Blocking disk, compression, and provider operations run outside the UI command path. |
-| [TASK038](TASK038-windows-installer-worker-isolation.md) | Windows installer after worker isolation | in-progress | unassigned | TASK037 | Package the current native-worker release as a Windows installer. |
+| [TASK038](TASK038-windows-installer-worker-isolation.md) | Windows installer after worker isolation | completed | unassigned | TASK037 | Current x64 NSIS installer built and hash-verified. |
+| [TASK039](TASK039-readme-and-github-wiki.md) | README and GitHub Wiki | blocked | unassigned | TASK038 | README updated; remote Wiki publication requires repaired GitHub authentication. |
+| [TASK040](TASK040-security-checkup.md) | Repository security checkup | completed | unassigned | — | Source-based Standard scan completed with two medium and one low finding; no application code changes. |
+| [TASK041](TASK041-normalized-fuzzy-local-remote-dedupe.md) | Normalized local-to-YouTube title dedupe | completed | unassigned | TASK005, TASK034 | Shared punctuation normalization and conservative capture-sequence review candidates verified locally. |
+| [TASK042](TASK042-security-remediation.md) | Security scan remediation | completed | unassigned | TASK040 | Immutable channel binding, exclusive upload claims, and OAuth callback resilience are locally verified. |
+| [TASK043](TASK043-persisted-dedupe-ignore-and-reaudit.md) | Persisted duplicate-review exclusions | completed | unassigned | TASK041 | Persisted false-positive exclusions with operator-requested re-audit are locally verified. |
+| [TASK044](TASK044-remote-video-list-layout.md) | Remote video list alignment | completed | unassigned | TASK012 | Aligned deletion-review list cards with responsive mobile stacking. |
+| [TASK045](TASK045-deletion-action-labels.md) | Deletion action labels | completed | unassigned | TASK012 | Use direct delete labels without weakening confirmation safety. |
+| [TASK046](TASK046-confirmed-upload-source-cleanup.md) | Confirmed-upload source cleanup | completed | unassigned | TASK035, TASK037 | Opt-in original-file cleanup after confirmed YouTube receipts, with persisted retry safety. |
+| [TASK047](TASK047-light-match-local-file-deletion.md) | Light-match local-file deletion | completed | unassigned | TASK029, TASK030 | Permit the guarded local-source deletion flow from filename-first review cards. |
+| [TASK048](TASK048-bulk-local-preingest-deletion.md) | Bulk local pre-ingest deletion | completed | unassigned | TASK030, TASK047 | Local source reviews now have bulk selection, typed batch deletion, and guarded sequential native deletion. |
+| [TASK049](TASK049-remote-title-local-source-deletion.md) | Local deletion for remote-title pre-ingest matches | in-progress | unassigned | TASK041, TASK048 | Extend guarded local source deletion to reviewed active-channel title matches. |
 
 ## Status values
 

@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{HashMap, HashSet},
     fs,
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
@@ -71,6 +71,8 @@ struct UploadItem {
     playlist_title: Option<String>,
     upload_started_at: Option<String>,
     transfer_bytes_per_second: Option<f64>,
+    delete_source_after_upload: bool,
+    source_delete_status: Option<String>,
     updated_at: String,
 }
 
@@ -81,6 +83,7 @@ struct ManualUploadSettings {
     visibility: String,
     playlist_id: Option<String>,
     playlist_title: Option<String>,
+    delete_source_after_upload: bool,
 }
 
 #[derive(Serialize)]
@@ -129,6 +132,8 @@ struct PreIngestDuplicateScan {
 #[serde(rename_all = "camelCase")]
 struct PreIngestDuplicateFile {
     local_delete_token: Option<String>,
+    can_delete_local_duplicate: bool,
+    ordinal: u64,
     file_name: String,
     size_bytes: u64,
     local_matches: Vec<PreIngestLocalMatch>,
@@ -159,6 +164,7 @@ struct DashboardSnapshot {
 struct ConnectionSettings {
     oauth_configured: bool,
     active_channel: Option<String>,
+    active_channel_id: Option<String>,
     connected: bool,
     secure_store_available: bool,
     deletion_authorized: bool,
@@ -263,8 +269,10 @@ struct FolderMonitorSettings {
     enabled: bool,
     folder_path: Option<String>,
     channel_name: Option<String>,
+    channel_id: Option<String>,
     visibility: String,
     made_for_kids: bool,
+    delete_source_after_upload: bool,
     playlist_id: Option<String>,
     playlist_title: Option<String>,
     status: String,
@@ -288,6 +296,7 @@ fn database(state: &AppState) -> Result<Connection, String> {
               title TEXT NOT NULL,
               file_name TEXT NOT NULL,
               channel_name TEXT,
+              channel_id TEXT,
               source_path TEXT,
               workspace_path TEXT NOT NULL,
               partial_path TEXT,
@@ -305,6 +314,8 @@ fn database(state: &AppState) -> Result<Connection, String> {
               playlist_id TEXT,
               playlist_title TEXT,
               duplicate_decision TEXT,
+              delete_source_after_upload INTEGER NOT NULL DEFAULT 0,
+              source_delete_status TEXT,
               upload_started_at TEXT,
               transfer_bytes_per_second REAL,
               created_at TEXT NOT NULL,
@@ -315,6 +326,7 @@ fn database(state: &AppState) -> Result<Connection, String> {
               singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
               oauth_client_id TEXT,
               active_channel TEXT,
+              active_channel_id TEXT,
               connection_detail TEXT,
               deletion_authorized INTEGER NOT NULL DEFAULT 0,
               deletion_sudo_until TEXT,
@@ -382,12 +394,21 @@ fn database(state: &AppState) -> Result<Connection, String> {
               created_at TEXT NOT NULL,
               FOREIGN KEY(item_id) REFERENCES upload_items(id)
             );
+            CREATE TABLE IF NOT EXISTS ignored_duplicate_candidates (
+              candidate_id TEXT PRIMARY KEY NOT NULL,
+              ignored_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS folder_monitor_settings (
               singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
               enabled INTEGER NOT NULL DEFAULT 0,
               folder_path TEXT,
               channel_name TEXT,
+              channel_id TEXT,
               visibility TEXT NOT NULL DEFAULT 'private',
+              made_for_kids INTEGER NOT NULL DEFAULT 0,
+              playlist_id TEXT,
+              playlist_title TEXT,
+              delete_source_after_upload INTEGER NOT NULL DEFAULT 0,
               status TEXT NOT NULL DEFAULT 'disabled',
               detail TEXT NOT NULL DEFAULT 'Folder monitoring is disabled.',
               last_scan_at TEXT,
@@ -421,6 +442,8 @@ fn database(state: &AppState) -> Result<Connection, String> {
         "ALTER TABLE connection_settings ADD COLUMN manual_made_for_kids_default INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE connection_settings ADD COLUMN upload_quota_pause_until TEXT",
         "ALTER TABLE upload_items ADD COLUMN channel_name TEXT",
+        "ALTER TABLE upload_items ADD COLUMN channel_id TEXT",
+        "ALTER TABLE connection_settings ADD COLUMN active_channel_id TEXT",
         "ALTER TABLE audit_events ADD COLUMN channel_name TEXT",
         "ALTER TABLE upload_items ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
         "ALTER TABLE upload_items ADD COLUMN upload_started_at TEXT",
@@ -429,17 +452,24 @@ fn database(state: &AppState) -> Result<Connection, String> {
         "ALTER TABLE folder_monitor_settings ADD COLUMN made_for_kids INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE folder_monitor_settings ADD COLUMN playlist_id TEXT",
         "ALTER TABLE folder_monitor_settings ADD COLUMN playlist_title TEXT",
+        "ALTER TABLE folder_monitor_settings ADD COLUMN channel_id TEXT",
         "ALTER TABLE upload_items ADD COLUMN made_for_kids INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE upload_items ADD COLUMN playlist_id TEXT",
         "ALTER TABLE upload_items ADD COLUMN playlist_title TEXT",
         "ALTER TABLE upload_items ADD COLUMN duplicate_decision TEXT",
+        "ALTER TABLE upload_items ADD COLUMN delete_source_after_upload INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE upload_items ADD COLUMN source_delete_status TEXT",
+        "ALTER TABLE folder_monitor_settings ADD COLUMN delete_source_after_upload INTEGER NOT NULL DEFAULT 0",
     ] {
         let _ = connection.execute(migration, []);
     }
     Ok(connection)
 }
 
-fn export_portable_archive_impl(state: &AppState, destination: &Path) -> Result<PortableArchiveReceipt, String> {
+fn export_portable_archive_impl(
+    state: &AppState,
+    destination: &Path,
+) -> Result<PortableArchiveReceipt, String> {
     let connection = database(state)?;
     let uploads = connection
         .prepare("SELECT id, title, file_name, size_bytes, digest, video_id, created_at, updated_at FROM upload_items WHERE digest IS NOT NULL ORDER BY id ASC")
@@ -460,8 +490,16 @@ fn export_portable_archive_impl(state: &AppState, destination: &Path) -> Result<
         .map_err(user_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(user_error)?;
-    let archive = PortableArchive { version: PORTABLE_ARCHIVE_VERSION, created_at: now(), uploads, remote_videos };
-    let file_name = destination.file_name().and_then(|value| value.to_str()).ok_or_else(|| "Choose a valid archive destination.".to_string())?;
+    let archive = PortableArchive {
+        version: PORTABLE_ARCHIVE_VERSION,
+        created_at: now(),
+        uploads,
+        remote_videos,
+    };
+    let file_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Choose a valid archive destination.".to_string())?;
     let temporary = destination.with_file_name(format!(".{file_name}.{}.partial", Uuid::new_v4()));
     let file = File::create(&temporary).map_err(user_error)?;
     let mut encoder = GzEncoder::new(file, Compression::best());
@@ -473,7 +511,9 @@ fn export_portable_archive_impl(state: &AppState, destination: &Path) -> Result<
     completed.sync_all().map_err(user_error)?;
     if destination.exists() {
         let _ = fs::remove_file(&temporary);
-        return Err("Choose a new archive filename; an existing archive was left unchanged.".into());
+        return Err(
+            "Choose a new archive filename; an existing archive was left unchanged.".into(),
+        );
     }
     fs::rename(&temporary, destination).map_err(|error| {
         let _ = fs::remove_file(&temporary);
@@ -486,17 +526,24 @@ fn export_portable_archive_impl(state: &AppState, destination: &Path) -> Result<
     })
 }
 
-fn import_portable_archive_impl(state: &AppState, source: &Path) -> Result<PortableArchiveReceipt, String> {
+fn import_portable_archive_impl(
+    state: &AppState,
+    source: &Path,
+) -> Result<PortableArchiveReceipt, String> {
     if fs::metadata(source).map_err(user_error)?.len() > PORTABLE_ARCHIVE_MAX_BYTES {
         return Err("This portable archive is too large to import safely.".into());
     }
     let mut decoder = GzDecoder::new(File::open(source).map_err(user_error)?);
     let mut bytes = Vec::new();
-    Read::by_ref(&mut decoder).take(PORTABLE_ARCHIVE_MAX_BYTES + 1).read_to_end(&mut bytes).map_err(user_error)?;
+    Read::by_ref(&mut decoder)
+        .take(PORTABLE_ARCHIVE_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(user_error)?;
     if bytes.len() as u64 > PORTABLE_ARCHIVE_MAX_BYTES {
         return Err("This portable archive expands beyond the safe import limit.".into());
     }
-    let archive: PortableArchive = serde_json::from_slice(&bytes).map_err(|_| "This is not a valid YouTube Upload Manager portable archive.".to_string())?;
+    let archive: PortableArchive = serde_json::from_slice(&bytes)
+        .map_err(|_| "This is not a valid YouTube Upload Manager portable archive.".to_string())?;
     if archive.version != PORTABLE_ARCHIVE_VERSION {
         return Err("This portable archive uses an unsupported format version.".into());
     }
@@ -505,7 +552,11 @@ fn import_portable_archive_impl(state: &AppState, source: &Path) -> Result<Porta
     let mut connection = database(state)?;
     let transaction = connection.transaction().map_err(user_error)?;
     for upload in archive.uploads {
-        if upload.id.trim().is_empty() || upload.title.trim().is_empty() || upload.file_name.trim().is_empty() || upload.digest.as_deref().is_some_and(str::is_empty) {
+        if upload.id.trim().is_empty()
+            || upload.title.trim().is_empty()
+            || upload.file_name.trim().is_empty()
+            || upload.digest.as_deref().is_some_and(str::is_empty)
+        {
             return Err("The portable archive contains invalid upload metadata.".into());
         }
         let id = format!("portable-{}", upload.id);
@@ -515,7 +566,10 @@ fn import_portable_archive_impl(state: &AppState, source: &Path) -> Result<Porta
         ).map_err(user_error)?;
     }
     for video in archive.remote_videos {
-        if video.video_id.trim().is_empty() || video.channel_name.trim().is_empty() || video.title.trim().is_empty() {
+        if video.video_id.trim().is_empty()
+            || video.channel_name.trim().is_empty()
+            || video.title.trim().is_empty()
+        {
             return Err("The portable archive contains invalid YouTube inventory metadata.".into());
         }
         transaction.execute(
@@ -631,19 +685,21 @@ fn defer_item_for_active_quota_pause(
 fn connection_settings(connection: &Connection) -> Result<ConnectionSettings, String> {
     connection
         .query_row(
-            "SELECT oauth_client_id, active_channel, connection_detail, deletion_authorized, deletion_sudo_until FROM connection_settings WHERE singleton = 1",
+            "SELECT oauth_client_id, active_channel, active_channel_id, connection_detail, deletion_authorized, deletion_sudo_until FROM connection_settings WHERE singleton = 1",
             [],
             |row| {
                 let configured_client_id: Option<String> = row.get(0)?;
-                let deletion_sudo_expires_at: Option<String> = row.get(4)?;
+                let active_channel_id: Option<String> = row.get(2)?;
+                let deletion_sudo_expires_at: Option<String> = row.get(5)?;
                 let deletion_sudo_active = deletion_sudo_is_active(deletion_sudo_expires_at.as_deref());
                 Ok(ConnectionSettings {
                     oauth_configured: configured_client_id.is_some(),
                     active_channel: row.get(1)?,
-                    connected: row.get::<_, Option<String>>(1)?.is_some(),
+                    active_channel_id: active_channel_id.clone(),
+                    connected: active_channel_id.is_some(),
                     secure_store_available: secure_store_available(),
-                    detail: row.get(2)?,
-                    deletion_authorized: row.get::<_, i64>(3)? != 0,
+                    detail: row.get(3)?,
+                    deletion_authorized: row.get::<_, i64>(4)? != 0,
                     deletion_sudo_active,
                     deletion_sudo_expires_at: if deletion_sudo_active { deletion_sudo_expires_at } else { None },
                 })
@@ -653,6 +709,7 @@ fn connection_settings(connection: &Connection) -> Result<ConnectionSettings, St
             rusqlite::Error::QueryReturnedNoRows => Ok(ConnectionSettings {
                 oauth_configured: false,
                 active_channel: None,
+                active_channel_id: None,
                 connected: false,
                 secure_store_available: secure_store_available(),
                 detail: None,
@@ -774,13 +831,13 @@ fn oauth_verifier_entry(state: &str) -> Result<CredentialEntry, String> {
 fn set_connection_detail(
     state: &AppState,
     detail: &str,
-    active_channel: Option<&str>,
+    active_channel: Option<(&str, &str)>,
 ) -> Result<(), String> {
     let connection = database(state)?;
     connection
         .execute(
-            "INSERT INTO connection_settings (singleton, active_channel, connection_detail, updated_at) VALUES (1, ?1, ?2, ?3) ON CONFLICT(singleton) DO UPDATE SET active_channel = excluded.active_channel, connection_detail = excluded.connection_detail, updated_at = excluded.updated_at",
-            params![active_channel, detail, now()],
+            "INSERT INTO connection_settings (singleton, active_channel, active_channel_id, connection_detail, updated_at) VALUES (1, ?1, ?2, ?3, ?4) ON CONFLICT(singleton) DO UPDATE SET active_channel = excluded.active_channel, active_channel_id = excluded.active_channel_id, connection_detail = excluded.connection_detail, updated_at = excluded.updated_at",
+            params![active_channel.map(|value| value.0), active_channel.map(|value| value.1), detail, now()],
         )
         .map_err(user_error)?;
     Ok(())
@@ -822,6 +879,14 @@ fn callback_value(target: &str, key: &str) -> Option<String> {
     callback
         .query_pairs()
         .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
+}
+
+fn valid_oauth_callback_request(method: Option<&str>, target: &str, expected_state: &str) -> bool {
+    method == Some("GET")
+        && url::Url::parse(&format!("http://127.0.0.1{target}"))
+            .ok()
+            .is_some_and(|url| url.path() == "/oauth2/callback")
+        && callback_value(target, "state").as_deref() == Some(expected_state)
 }
 
 fn respond_to_callback(stream: &mut TcpStream, text: &str) {
@@ -881,7 +946,7 @@ fn complete_oauth_connection(
         })?;
     let channel_response: serde_json::Value = reqwest::blocking::Client::new()
         .get("https://www.googleapis.com/youtube/v3/channels")
-        .query(&[("part", "snippet"), ("mine", "true")])
+        .query(&[("part", "id,snippet"), ("mine", "true")])
         .bearer_auth(access_token)
         .send()
         .map_err(|_| "YouTube channel verification could not be reached.".to_string())?
@@ -889,19 +954,27 @@ fn complete_oauth_connection(
         .map_err(|_| "YouTube rejected the channel verification request.".to_string())?
         .json()
         .map_err(|_| "YouTube returned an unreadable channel response.".to_string())?;
-    let channel = channel_response
+    let channel_item = channel_response
         .get("items")
         .and_then(|value| value.as_array())
         .and_then(|items| items.first())
-        .and_then(|item| item.pointer("/snippet/title"))
+        .ok_or_else(|| "No YouTube channel was returned for this Google account.".to_string())?;
+    let channel = channel_item
+        .pointer("/snippet/title")
         .and_then(|value| value.as_str())
         .ok_or_else(|| "No YouTube channel was returned for this Google account.".to_string())?
+        .to_string();
+    let channel_id = channel_item
+        .get("id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "YouTube did not return an immutable channel identity.".to_string())?
         .to_string();
     persist_refresh_token(refresh_token)?;
     set_connection_detail(
         state,
         "Connected to YouTube on this device.",
-        Some(&channel),
+        Some((&channel, &channel_id)),
     )?;
     let connection = database(state)?;
     connection
@@ -975,11 +1048,112 @@ fn mark_upload_state(
     let connection = database(state)?;
     connection
         .execute(
-            "UPDATE upload_items SET status = ?1, confirmed_bytes = ?2, detail = ?3, video_id = COALESCE(?4, video_id), updated_at = ?5 WHERE id = ?6",
+            "UPDATE upload_items SET status = ?1, confirmed_bytes = ?2, detail = ?3, video_id = COALESCE(?4, video_id), source_delete_status = CASE WHEN ?1 = 'uploaded' AND delete_source_after_upload = 1 THEN 'pending' ELSE source_delete_status END, updated_at = ?5 WHERE id = ?6",
             params![status, confirmed_bytes as i64, detail, video_id, now(), item_id],
         )
         .map_err(user_error)?;
     Ok(())
+}
+
+fn record_source_delete_outcome(
+    connection: &Connection,
+    item_id: &str,
+    status: &str,
+    audit_kind: &str,
+    audit_detail: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE upload_items SET source_delete_status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, now(), item_id],
+        )
+        .map_err(user_error)?;
+    audit(connection, item_id, audit_kind, audit_detail)
+}
+
+/// Delete only an unchanged external source after a persisted YouTube success.
+/// The managed workspace copy is never a cleanup target. A pending cleanup is
+/// intentionally resumable after a crash or a transient file lock.
+fn finalize_confirmed_source_cleanup(state: &AppState, item_id: &str) -> Result<(), String> {
+    let connection = database(state)?;
+    let cleanup = connection
+        .query_row(
+            "SELECT source_path, digest FROM upload_items WHERE id = ?1 AND status = 'uploaded' AND delete_source_after_upload = 1 AND source_delete_status = 'pending'",
+            [item_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(user_error)?;
+    let Some((source_path, expected_digest)) = cleanup else {
+        return Ok(());
+    };
+    let (Some(source_path), Some(expected_digest)) = (source_path, expected_digest) else {
+        return record_source_delete_outcome(
+            &connection,
+            item_id,
+            "retained",
+            "source_cleanup_retained",
+            "Original source was retained because the verified source path or digest is unavailable.",
+        );
+    };
+    let managed_directory = match state.media_directory.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+    let source = match Path::new(&source_path).canonicalize() {
+        Ok(path) => path,
+        Err(_) => return record_source_delete_outcome(
+            &connection,
+            item_id,
+            "retained",
+            "source_cleanup_retained",
+            "Original source was retained because it is no longer available at the saved location.",
+        ),
+    };
+    if !source.is_file() || source.starts_with(&managed_directory) {
+        return record_source_delete_outcome(
+            &connection,
+            item_id,
+            "retained",
+            "source_cleanup_retained",
+            "Original source was retained because the cleanup target was not a verified external file.",
+        );
+    }
+    let current_digest = match digest_file(&source) {
+        Ok((_, digest)) => digest,
+        Err(_) => return Ok(()),
+    };
+    if current_digest != expected_digest {
+        return record_source_delete_outcome(
+            &connection,
+            item_id,
+            "retained",
+            "source_cleanup_retained",
+            "Original source was retained because it changed after import.",
+        );
+    }
+    match fs::remove_file(&source) {
+        Ok(()) => {
+            connection
+                .execute(
+                    "UPDATE upload_items SET source_path = NULL, source_delete_status = 'deleted', updated_at = ?1 WHERE id = ?2",
+                    params![now(), item_id],
+                )
+                .map_err(user_error)?;
+            audit(
+                &connection,
+                item_id,
+                "source_cleanup_deleted",
+                "Original source was deleted after YouTube confirmed the upload and its SHA-256 still matched.",
+            )
+        }
+        Err(_) => audit(
+            &connection,
+            item_id,
+            "source_cleanup_retry_pending",
+            "Original source deletion is pending retry after a local filesystem error.",
+        ),
+    }
 }
 
 fn begin_upload_transfer(
@@ -1162,10 +1336,11 @@ fn query_upload_session(session_uri: &str, total_bytes: u64) -> Result<Option<u6
 
 fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
     let connection = database(state)?;
-    let (title, workspace_path, total_bytes, channel_name, requested_visibility, made_for_kids, playlist_id, playlist_title): (
+    let (title, workspace_path, total_bytes, channel_name, channel_id, requested_visibility, made_for_kids, playlist_id, playlist_title): (
         String,
         String,
         u64,
+        Option<String>,
         Option<String>,
         String,
         bool,
@@ -1173,7 +1348,7 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
         Option<String>,
     ) = connection
         .query_row(
-            "SELECT title, workspace_path, total_bytes, channel_name, visibility, made_for_kids, playlist_id, playlist_title FROM upload_items WHERE id = ?1 AND status IN ('queued', 'dispatching', 'uploading', 'needs_reconciliation')",
+            "SELECT title, workspace_path, total_bytes, channel_name, channel_id, visibility, made_for_kids, playlist_id, playlist_title FROM upload_items WHERE id = ?1 AND status IN ('dispatching', 'needs_reconciliation')",
             [item_id],
             |row| {
                 Ok((
@@ -1182,9 +1357,10 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
                     row.get::<_, i64>(2)? as u64,
                     row.get(3)?,
                     row.get(4)?,
-                    row.get::<_, i64>(5)? != 0,
-                    row.get(6)?,
+                    row.get(5)?,
+                    row.get::<_, i64>(6)? != 0,
                     row.get(7)?,
+                    row.get(8)?,
                 ))
             },
         )
@@ -1192,9 +1368,9 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
     if !Path::new(&workspace_path).is_file() {
         return Err("The managed local media file is missing; this upload cannot continue.".into());
     }
-    if let Some(expected_channel) = channel_name.as_deref() {
-        let active_channel = connection_settings(&connection)?.active_channel;
-        if active_channel.as_deref() != Some(expected_channel) {
+    if channel_name.is_some() {
+        let active_channel_id = connection_settings(&connection)?.active_channel_id;
+        if channel_id.is_none() || active_channel_id.as_deref() != channel_id.as_deref() {
             connection
                 .execute(
                     "UPDATE upload_items SET status = 'queued', detail = 'Automatic private upload paused until its bound YouTube channel is active.', updated_at = ?1 WHERE id = ?2 AND status = 'dispatching'",
@@ -1260,8 +1436,16 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
     let transfer_started = Instant::now();
     let mut buffer = vec![0_u8; 8 * 1024 * 1024];
     while offset < total_bytes {
-        let active: String = database(state)?.query_row("SELECT status FROM upload_items WHERE id = ?1", [item_id], |row| row.get(0)).map_err(user_error)?;
-        if active == "cancelled" { return Err(UPLOAD_CANCELLED_MARKER.into()); }
+        let active: String = database(state)?
+            .query_row(
+                "SELECT status FROM upload_items WHERE id = ?1",
+                [item_id],
+                |row| row.get(0),
+            )
+            .map_err(user_error)?;
+        if active == "cancelled" {
+            return Err(UPLOAD_CANCELLED_MARKER.into());
+        }
         let bytes = source.read(&mut buffer).map_err(user_error)?;
         if bytes == 0 {
             return Err("Managed local media ended before the expected length.".into());
@@ -1331,6 +1515,7 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
                 &format!("Uploaded to YouTube; processing status can be checked from inventory.{playlist_detail}"),
                 Some(video_id),
             )?;
+            finalize_confirmed_source_cleanup(state, item_id)?;
             let _ = upload_session_entry(item_id)
                 .and_then(|entry| entry.delete_credential().map_err(user_error));
             let audit_connection = database(state)?;
@@ -1392,7 +1577,9 @@ fn run_queued_uploads(state: AppState, item_ids: Vec<String>) {
             Ok(None) => {}
         }
         if let Err(error) = upload_item(&state, &item_id) {
-            if error == UPLOAD_CANCELLED_MARKER { continue; }
+            if error == UPLOAD_CANCELLED_MARKER {
+                continue;
+            }
             if error == DAILY_UPLOAD_LIMIT_MARKER {
                 let _ = record_upload_quota_pause(&state, &item_id);
                 break;
@@ -1462,6 +1649,11 @@ fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
         .pointer("/snippet/title")
         .and_then(|value| value.as_str())
         .ok_or_else(|| "YouTube did not return a channel name.".to_string())?;
+    let channel_id = channel
+        .get("id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "YouTube did not return an immutable channel identity.".to_string())?;
     let uploads_playlist = channel
         .pointer("/contentDetails/relatedPlaylists/uploads")
         .and_then(|value| value.as_str())
@@ -1469,7 +1661,10 @@ fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
     let connection = database(state)?;
     let sync_id = Uuid::new_v4().to_string();
     connection
-        .execute("DELETE FROM remote_video_sync_staging WHERE sync_id = ?1", [&sync_id])
+        .execute(
+            "DELETE FROM remote_video_sync_staging WHERE sync_id = ?1",
+            [&sync_id],
+        )
         .map_err(user_error)?;
     let mut next_page: Option<String> = None;
     let mut count = 0;
@@ -1540,17 +1735,24 @@ fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
     // Keep the last complete inventory until every remote page has been read.
     // A crash or network failure therefore leaves a usable, coherent snapshot.
     let transaction = connection.unchecked_transaction().map_err(user_error)?;
-    transaction.execute("DELETE FROM remote_videos", []).map_err(user_error)?;
+    transaction
+        .execute("DELETE FROM remote_videos", [])
+        .map_err(user_error)?;
     transaction.execute(
         "INSERT INTO remote_videos (video_id, channel_name, title, duration, privacy_status, updated_at) SELECT video_id, channel_name, title, duration, privacy_status, updated_at FROM remote_video_sync_staging WHERE sync_id = ?1",
         [&sync_id],
     ).map_err(user_error)?;
-    transaction.execute("DELETE FROM remote_video_sync_staging WHERE sync_id = ?1", [&sync_id]).map_err(user_error)?;
+    transaction
+        .execute(
+            "DELETE FROM remote_video_sync_staging WHERE sync_id = ?1",
+            [&sync_id],
+        )
+        .map_err(user_error)?;
     transaction.commit().map_err(user_error)?;
     set_connection_detail(
         state,
         &format!("Synced {count} YouTube video records locally."),
-        Some(channel_name),
+        Some((channel_name, channel_id)),
     )?;
     audit_global(
         &connection,
@@ -1583,12 +1785,15 @@ fn await_oauth_callback(
                     .next()
                     .unwrap_or("")
                     .to_string();
-                let target = request_line.split_whitespace().nth(1).unwrap_or("/");
-                let received_state = callback_value(target, "state");
+                let mut request_parts = request_line.split_whitespace();
+                let method = request_parts.next();
+                let target = request_parts.next().unwrap_or("/");
+                if !valid_oauth_callback_request(method, target, &expected_state) {
+                    respond_to_callback(&mut stream, "Connection did not complete.");
+                    continue;
+                }
                 let code = callback_value(target, "code");
-                let result = if received_state.as_deref() != Some(&expected_state) {
-                    Err("The Google authorization response could not be verified.".to_string())
-                } else if let Some(error) = callback_value(target, "error") {
+                let result = if let Some(error) = callback_value(target, "error") {
                     Err(oauth_error_message(&error))
                 } else if let Some(code) = code {
                     let verifier = oauth_verifier_entry(&expected_state)
@@ -1657,6 +1862,8 @@ fn row_to_upload_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<UploadItem> {
         playlist_title: row.get("playlist_title")?,
         upload_started_at: row.get("upload_started_at")?,
         transfer_bytes_per_second: row.get("transfer_bytes_per_second")?,
+        delete_source_after_upload: row.get::<_, i64>("delete_source_after_upload")? != 0,
+        source_delete_status: row.get("source_delete_status")?,
         updated_at: row.get("updated_at")?,
     })
 }
@@ -1664,7 +1871,7 @@ fn row_to_upload_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<UploadItem> {
 fn find_item(connection: &Connection, id: &str) -> Result<UploadItem, String> {
     connection
         .query_row(
-            "SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, updated_at FROM upload_items WHERE id = ?1",
+            "SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, delete_source_after_upload, source_delete_status, updated_at FROM upload_items WHERE id = ?1",
             [id],
             row_to_upload_item,
         )
@@ -1714,21 +1921,110 @@ fn exact_local_duplicates(connection: &Connection) -> Result<Vec<DuplicateCandid
     Ok(candidates)
 }
 
+fn ignored_duplicate_candidate_ids(connection: &Connection) -> Result<HashSet<String>, String> {
+    let mut statement = connection
+        .prepare("SELECT candidate_id FROM ignored_duplicate_candidates")
+        .map_err(user_error)?;
+    let ignored_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(user_error)?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(user_error)?;
+    Ok(ignored_ids)
+}
+
+fn current_duplicate_candidates(
+    connection: &Connection,
+) -> Result<Vec<DuplicateCandidate>, String> {
+    let settings = connection_settings(connection)?;
+    let mut candidates = exact_local_duplicates(connection)?;
+    if let Some(active_channel) = settings.active_channel.as_deref() {
+        candidates.extend(uploaded_title_duplicates(connection, active_channel)?);
+    }
+    Ok(candidates)
+}
+
+fn ignore_duplicate_candidate_impl(state: &AppState, candidate_id: &str) -> Result<(), String> {
+    if candidate_id.trim().is_empty() {
+        return Err("Choose a duplicate candidate to ignore.".into());
+    }
+    let connection = database(state)?;
+    if !current_duplicate_candidates(&connection)?
+        .iter()
+        .any(|candidate| candidate.id == candidate_id)
+    {
+        return Err("That duplicate candidate is no longer available for review.".into());
+    }
+    connection
+        .execute(
+            "INSERT INTO ignored_duplicate_candidates (candidate_id, ignored_at) VALUES (?1, ?2) ON CONFLICT(candidate_id) DO UPDATE SET ignored_at = excluded.ignored_at",
+            params![candidate_id, now()],
+        )
+        .map_err(user_error)?;
+    audit_global(
+        &connection,
+        "duplicate_candidate_ignored",
+        "Operator marked a duplicate candidate as a false positive",
+    )
+}
+
+fn re_audit_ignored_duplicate_candidates_impl(state: &AppState) -> Result<usize, String> {
+    let connection = database(state)?;
+    let cleared = connection
+        .execute("DELETE FROM ignored_duplicate_candidates", [])
+        .map_err(user_error)?;
+    audit_global(
+        &connection,
+        "ignored_duplicate_candidates_reaudited",
+        &format!("Operator restored {cleared} ignored duplicate candidate(s) for re-audit"),
+    )?;
+    Ok(cleared)
+}
+
+fn title_for_matching(title: &str) -> &str {
+    let trimmed = title.trim();
+    let path = Path::new(trimmed);
+    let is_video_filename = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            SUPPORTED_VIDEO_EXTENSIONS
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
+        });
+    if is_video_filename {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(trimmed)
+    } else {
+        trimmed
+    }
+}
+
 fn normalized_uploaded_title(title: &str) -> String {
-    title
+    title_for_matching(title)
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .to_lowercase()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-        .to_lowercase()
 }
 
 fn canonical_uploaded_title(title: &str) -> (String, bool) {
-    let normalized = normalized_uploaded_title(title);
-    let Some(without_closing_parenthesis) = normalized.strip_suffix(')') else {
-        return (normalized, false);
+    let trimmed = title_for_matching(title);
+    let Some(without_closing_parenthesis) = trimmed.strip_suffix(')') else {
+        return (normalized_uploaded_title(trimmed), false);
     };
     let Some(marker_start) = without_closing_parenthesis.rfind(" (") else {
-        return (normalized, false);
+        return (normalized_uploaded_title(trimmed), false);
     };
     let base = &without_closing_parenthesis[..marker_start];
     let marker_number = &without_closing_parenthesis[marker_start + 2..];
@@ -1739,21 +2035,53 @@ fn canonical_uploaded_title(title: &str) -> (String, bool) {
             .all(|character| character.is_ascii_digit())
         && marker_number.parse::<u64>().is_ok_and(|number| number >= 2);
     if is_duplicate_marker {
-        (base.to_string(), true)
+        (normalized_uploaded_title(base), true)
     } else {
-        (normalized, false)
+        (normalized_uploaded_title(trimmed), false)
     }
 }
 
-fn uploaded_titles_match(left: &str, right: &str) -> bool {
+fn title_number_sequences(title: &str) -> Vec<String> {
+    let mut sequences = Vec::new();
+    let mut current = String::new();
+    for character in title_for_matching(title).chars() {
+        if character.is_ascii_digit() {
+            current.push(character);
+        } else if !current.is_empty() {
+            sequences.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        sequences.push(current);
+    }
+    sequences
+}
+
+/// Returns review-only title evidence. Numeric-sequence matching is deliberately
+/// conservative: it needs multiple ordered sequences and at least six digits,
+/// so short incidental numbers do not become duplicate candidates.
+fn uploaded_title_match_evidence(left: &str, right: &str) -> Option<&'static str> {
     let left_normalized = normalized_uploaded_title(left);
     let right_normalized = normalized_uploaded_title(right);
     if left_normalized == right_normalized {
-        return true;
+        return Some("Normalized titles match exactly; case and filename separators such as underscores are ignored.");
     }
     let (left_canonical, left_has_suffix) = canonical_uploaded_title(left);
     let (right_canonical, right_has_suffix) = canonical_uploaded_title(right);
-    left_canonical == right_canonical && (left_has_suffix || right_has_suffix)
+    if left_canonical == right_canonical && (left_has_suffix || right_has_suffix) {
+        return Some("Normalized titles match after removing a trailing duplicate-copy marker of (2) or higher.");
+    }
+    let left_numbers = title_number_sequences(left);
+    let right_numbers = title_number_sequences(right);
+    let total_digits = left_numbers.iter().map(String::len).sum::<usize>();
+    if left_numbers.len() >= 2 && left_numbers == right_numbers && total_digits >= 6 {
+        return Some("Possible filename/title match: the ordered multi-part number sequence matches. Review before upload or deletion.");
+    }
+    None
+}
+
+fn uploaded_titles_match(left: &str, right: &str) -> bool {
+    uploaded_title_match_evidence(left, right).is_some()
 }
 
 fn synced_uploaded_title_exists(
@@ -1895,9 +2223,17 @@ fn check_upload_title_duplicates_impl(
 
 /// Creates a persistent pre-ingest job. Light matching only compares names; deep
 /// matching streams SHA-256 one source at a time and checkpoints after each file.
-fn create_preflight_scan_job(state: &AppState, paths: &[FilePath], mode: &str) -> Result<String, String> {
-    if paths.is_empty() { return Err("Choose at least one file to check.".into()); }
-    if !matches!(mode, "light" | "deep") { return Err("Choose either light or deep matching.".into()); }
+fn create_preflight_scan_job(
+    state: &AppState,
+    paths: &[FilePath],
+    mode: &str,
+) -> Result<String, String> {
+    if paths.is_empty() {
+        return Err("Choose at least one file to check.".into());
+    }
+    if !matches!(mode, "light" | "deep") {
+        return Err("Choose either light or deep matching.".into());
+    }
     let id = Uuid::new_v4().to_string();
     let connection = database(state)?;
     let timestamp = now();
@@ -1912,27 +2248,50 @@ fn create_preflight_scan_job(state: &AppState, paths: &[FilePath], mode: &str) -
             params![&id, ordinal as i64, locator, preflight_file_name(path)],
         ).map_err(user_error)?;
     }
-    audit_global(&connection, "preflight_scan_created", &format!("Created persistent {mode} pre-ingest duplicate scan"))?;
+    audit_global(
+        &connection,
+        "preflight_scan_created",
+        &format!("Created persistent {mode} pre-ingest duplicate scan"),
+    )?;
     Ok(id)
 }
 
 fn run_preflight_scan_job(state: &AppState, app: &AppHandle, job_id: &str) -> Result<(), String> {
     let connection = database(state)?;
-    let mode: String = connection.query_row("SELECT mode FROM preflight_scan_jobs WHERE id = ?1", [job_id], |row| row.get(0)).map_err(user_error)?;
+    let mode: String = connection
+        .query_row(
+            "SELECT mode FROM preflight_scan_jobs WHERE id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .map_err(user_error)?;
     connection.execute("UPDATE preflight_scan_jobs SET status = 'running', detail = NULL, updated_at = ?1 WHERE id = ?2", params![now(), job_id]).map_err(user_error)?;
     loop {
-        let active: String = connection.query_row("SELECT status FROM preflight_scan_jobs WHERE id = ?1", [job_id], |row| row.get(0)).map_err(user_error)?;
-        if active == "cancelled" { return Ok(()); }
+        let active: String = connection
+            .query_row(
+                "SELECT status FROM preflight_scan_jobs WHERE id = ?1",
+                [job_id],
+                |row| row.get(0),
+            )
+            .map_err(user_error)?;
+        if active == "cancelled" {
+            return Ok(());
+        }
         let next = connection.query_row(
             "SELECT ordinal, source_locator FROM preflight_scan_files WHERE job_id = ?1 AND status = 'queued' ORDER BY ordinal ASC LIMIT 1",
             [job_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         ).optional().map_err(user_error)?;
-        let Some((ordinal, locator)) = next else { break };
+        let Some((ordinal, locator)) = next else {
+            break;
+        };
         let outcome = if mode == "light" {
             Ok((0_u64, None))
         } else {
-            serde_json::from_str::<FilePath>(&locator).map_err(|_| "This saved file reference is invalid.".to_string())
-                .and_then(|path| digest_preflight_file(app, &path).map(|(bytes, digest)| (bytes, Some(digest))))
+            serde_json::from_str::<FilePath>(&locator)
+                .map_err(|_| "This saved file reference is invalid.".to_string())
+                .and_then(|path| {
+                    digest_preflight_file(app, &path).map(|(bytes, digest)| (bytes, Some(digest)))
+                })
         };
         match outcome {
             Ok((size_bytes, _digest)) if mode == "deep" && size_bytes == 0 => {
@@ -1947,8 +2306,16 @@ fn run_preflight_scan_job(state: &AppState, app: &AppHandle, job_id: &str) -> Re
         }
         connection.execute("UPDATE preflight_scan_jobs SET completed_files = (SELECT COUNT(*) FROM preflight_scan_files WHERE job_id = ?1 AND status IN ('complete', 'error')), updated_at = ?2 WHERE id = ?1", params![job_id, now()]).map_err(user_error)?;
     }
-    let active: String = connection.query_row("SELECT status FROM preflight_scan_jobs WHERE id = ?1", [job_id], |row| row.get(0)).map_err(user_error)?;
-    if active == "cancelled" { return Ok(()); }
+    let active: String = connection
+        .query_row(
+            "SELECT status FROM preflight_scan_jobs WHERE id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .map_err(user_error)?;
+    if active == "cancelled" {
+        return Ok(());
+    }
     if mode == "deep" && connection_settings(&connection)?.connected {
         connection.execute("UPDATE preflight_scan_jobs SET status = 'syncing', inventory_status = 'syncing', updated_at = ?1 WHERE id = ?2", params![now(), job_id]).map_err(user_error)?;
         drop(connection);
@@ -1957,10 +2324,18 @@ fn run_preflight_scan_job(state: &AppState, app: &AppHandle, job_id: &str) -> Re
             Err(error) => database(state)?.execute("UPDATE preflight_scan_jobs SET status = 'complete', inventory_status = 'failed', detail = ?1, updated_at = ?2 WHERE id = ?3", params![format!("YouTube titles were not refreshed: {error}"), now(), job_id]).map_err(user_error)?,
         };
     } else {
-        let detail = if mode == "deep" { "Connect YouTube to refresh uploaded titles; local deep matching completed." } else { "Fast filename match completed. Deep matching is available on demand." };
+        let detail = if mode == "deep" {
+            "Connect YouTube to refresh uploaded titles; local deep matching completed."
+        } else {
+            "Fast filename match completed. Deep matching is available on demand."
+        };
         connection.execute("UPDATE preflight_scan_jobs SET status = 'complete', detail = ?1, updated_at = ?2 WHERE id = ?3", params![detail, now(), job_id]).map_err(user_error)?;
     }
-    audit_global(&database(state)?, "preflight_scan_completed", &format!("Completed persistent {mode} pre-ingest duplicate scan"))?;
+    audit_global(
+        &database(state)?,
+        "preflight_scan_completed",
+        &format!("Completed persistent {mode} pre-ingest duplicate scan"),
+    )?;
     Ok(())
 }
 
@@ -1976,7 +2351,10 @@ fn load_preflight_scan(state: &AppState, job_id: &str) -> Result<PreIngestDuplic
         .collect::<Result<Vec<_>, _>>().map_err(user_error)?;
     let mut files = Vec::new();
     for (ordinal, locator, file_name, size_bytes, digest, error) in &rows {
-        let title = Path::new(file_name).file_stem().and_then(|value| value.to_str()).unwrap_or(file_name);
+        let title = Path::new(file_name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(file_name);
         let local_matches = if mode == "deep" {
             digest.as_deref().map(|digest| {
                 connection.prepare("SELECT title, file_name, status FROM upload_items WHERE digest = ?1 ORDER BY created_at ASC").map_err(user_error)?
@@ -1988,21 +2366,62 @@ fn load_preflight_scan(state: &AppState, job_id: &str) -> Result<PreIngestDuplic
                 .query_map([file_name], |row| Ok(PreIngestLocalMatch { title: row.get(0)?, file_name: row.get(1)?, status: row.get(2)? })).map_err(user_error)?
                 .collect::<Result<Vec<_>, _>>().map_err(user_error)?
         };
-        let dropped_duplicate_file_names = rows.iter().filter_map(|(other_ordinal, _, other_name, _, other_digest, _)| {
-            (*other_ordinal != *ordinal && if mode == "deep" { digest.is_some() && digest == other_digest } else { file_name.eq_ignore_ascii_case(other_name) }).then(|| other_name.clone())
-        }).collect();
+        let dropped_duplicate_file_names = rows
+            .iter()
+            .filter_map(|(other_ordinal, _, other_name, _, other_digest, _)| {
+                (*other_ordinal != *ordinal
+                    && if mode == "deep" {
+                        digest.is_some() && digest == other_digest
+                    } else {
+                        file_name.eq_ignore_ascii_case(other_name)
+                    })
+                .then(|| other_name.clone())
+            })
+            .collect();
+        let uploaded_title_matches = channel
+            .as_deref()
+            .map(|channel| matching_uploaded_titles(&connection, channel, title))
+            .transpose()?
+            .unwrap_or_default();
+        let source_is_desktop_path = serde_json::from_str::<FilePath>(locator)
+            .ok()
+            .and_then(|value| value.as_path().map(Path::to_path_buf));
         let local_delete_token = if mode == "deep" && !local_matches.is_empty() {
-            let path = serde_json::from_str::<FilePath>(locator).ok().and_then(|value| value.as_path().map(Path::to_path_buf));
-            digest.as_deref().and_then(|value| register_preflight_local_delete_target(&state.media_directory, path.as_deref(), value, file_name))
-        } else { None };
+            digest.as_deref().and_then(|value| {
+                register_preflight_local_delete_target(
+                    &state.media_directory,
+                    source_is_desktop_path.as_deref(),
+                    value,
+                    file_name,
+                )
+            })
+        } else {
+            None
+        };
+        let can_delete_local_duplicate = source_is_desktop_path.is_some()
+            && (!local_matches.is_empty() || !uploaded_title_matches.is_empty());
         files.push(PreIngestDuplicateFile {
-            local_delete_token, file_name: file_name.clone(), size_bytes: *size_bytes as u64, local_matches,
+            local_delete_token,
+            can_delete_local_duplicate,
+            ordinal: *ordinal as u64,
+            file_name: file_name.clone(),
+            size_bytes: *size_bytes as u64,
+            local_matches,
             dropped_duplicate_file_names,
-            uploaded_title_matches: channel.as_deref().map(|channel| matching_uploaded_titles(&connection, channel, title)).transpose()?.unwrap_or_default(),
+            uploaded_title_matches,
             error: error.clone(),
         });
     }
-    Ok(PreIngestDuplicateScan { id: job_id.to_string(), mode, status, total_files: total_files as u64, completed_files: completed_files as u64, files, youtube_title_checked: inventory_status == "complete", youtube_check_detail: detail })
+    Ok(PreIngestDuplicateScan {
+        id: job_id.to_string(),
+        mode,
+        status,
+        total_files: total_files as u64,
+        completed_files: completed_files as u64,
+        files,
+        youtube_title_checked: inventory_status == "complete",
+        youtube_check_detail: detail,
+    })
 }
 
 fn resume_preflight_scan_jobs(state: AppState, app: AppHandle) {
@@ -2012,8 +2431,14 @@ fn resume_preflight_scan_jobs(state: AppState, app: AppHandle) {
             .query_map([], |row| row.get::<_, String>(0)).map_err(user_error)?
             .collect::<Result<Vec<_>, _>>().map_err(user_error)
     }).unwrap_or_default();
-    if jobs.is_empty() { return; }
-    thread::spawn(move || for job_id in jobs { let _ = run_preflight_scan_job(&state, &app, &job_id); });
+    if jobs.is_empty() {
+        return;
+    }
+    thread::spawn(move || {
+        for job_id in jobs {
+            let _ = run_preflight_scan_job(&state, &app, &job_id);
+        }
+    });
 }
 
 /// Opens and streams one picker or drag-drop file through the platform-aware
@@ -2026,11 +2451,14 @@ fn digest_preflight_file(app: &AppHandle, path: &FilePath) -> Result<(u64, Strin
         .fs()
         .open(path.clone(), options)
         .map_err(|_| "This file could not be opened for local comparison.".to_string())?;
-    let result = digest_reader(&mut file).map_err(|_| "This file could not be read completely.".to_string());
+    let result =
+        digest_reader(&mut file).map_err(|_| "This file could not be read completely.".to_string());
     drop(file);
     #[cfg(target_os = "ios")]
     if matches!(path, FilePath::Url(url) if url.scheme() == "file") {
-        let _ = app.fs().stop_accessing_security_scoped_resource(path.clone());
+        let _ = app
+            .fs()
+            .stop_accessing_security_scoped_resource(path.clone());
     }
     result
 }
@@ -2059,6 +2487,81 @@ fn register_preflight_local_delete_target(
     Some(token)
 }
 
+/// Creates a short-lived deletion target only after re-reading a persisted
+/// light/deep scan result. Light matching remains filename evidence; hashing
+/// here protects the irreversible local-file operation rather than changing
+/// the scan's selected matching mode.
+fn prepare_preflight_local_delete_target(
+    state: &AppState,
+    job_id: &str,
+    ordinal: u64,
+) -> Result<String, String> {
+    let connection = database(state)?;
+    let (mode, locator, file_name, digest, error): (String, String, String, Option<String>, Option<String>) = connection
+        .query_row(
+            "SELECT jobs.mode, files.source_locator, files.file_name, files.digest, files.error FROM preflight_scan_files AS files JOIN preflight_scan_jobs AS jobs ON jobs.id = files.job_id WHERE files.job_id = ?1 AND files.ordinal = ?2",
+            params![job_id, ordinal as i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .map_err(|_| "This duplicate review entry is no longer available. Run the check again.".to_string())?;
+    if error.is_some() {
+        return Err(
+            "This file could not be checked, so it cannot be deleted from duplicate review.".into(),
+        );
+    }
+    let has_local_match = if mode == "deep" {
+        digest
+            .as_deref()
+            .map(|value| {
+                connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM upload_items WHERE digest = ?1)",
+                        [value],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map(|value| value != 0)
+                    .map_err(user_error)
+            })
+            .transpose()?
+            .unwrap_or(false)
+    } else {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM upload_items WHERE lower(file_name) = lower(?1))",
+                [&file_name],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|value| value != 0)
+            .map_err(user_error)?
+    };
+    let title = Path::new(&file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&file_name);
+    let has_uploaded_title_match = connection_settings(&connection)?
+        .active_channel
+        .as_deref()
+        .map(|channel| matching_uploaded_titles(&connection, channel, title))
+        .transpose()?
+        .is_some_and(|matches| !matches.is_empty());
+    if !has_local_match && !has_uploaded_title_match {
+        return Err(
+            "This selected file no longer has a saved local or uploaded-title match to review."
+                .into(),
+        );
+    }
+    let path = serde_json::from_str::<FilePath>(&locator)
+        .ok()
+        .and_then(|value| value.as_path().map(Path::to_path_buf))
+        .ok_or_else(|| {
+            "Local duplicate deletion is available only for a desktop filesystem source."
+                .to_string()
+        })?;
+    let (_, digest) = digest_file(&path)?;
+    register_preflight_local_delete_target(&state.media_directory, Some(&path), &digest, &file_name)
+        .ok_or_else(|| "This source cannot be safely deleted from duplicate review.".to_string())
+}
+
 fn delete_preflight_duplicate_file_impl(
     state: &AppState,
     token: &str,
@@ -2066,19 +2569,33 @@ fn delete_preflight_duplicate_file_impl(
 ) -> Result<(), String> {
     let target = preflight_local_delete_targets()
         .lock()
-        .map_err(|_| "The local duplicate review is unavailable; scan the files again.".to_string())?
+        .map_err(|_| {
+            "The local duplicate review is unavailable; scan the files again.".to_string()
+        })?
         .get(token)
         .cloned()
-        .ok_or_else(|| "This local duplicate review has expired. Drop the files again before deleting.".to_string())?;
+        .ok_or_else(|| {
+            "This local duplicate review has expired. Drop the files again before deleting."
+                .to_string()
+        })?;
     if target.created_at.elapsed() > Duration::from_secs(15 * 60) {
-        preflight_local_delete_targets().lock().ok().and_then(|mut targets| targets.remove(token));
-        return Err("This local duplicate review has expired. Drop the files again before deleting.".into());
+        preflight_local_delete_targets()
+            .lock()
+            .ok()
+            .and_then(|mut targets| targets.remove(token));
+        return Err(
+            "This local duplicate review has expired. Drop the files again before deleting.".into(),
+        );
     }
     if confirmation != target.file_name {
-        return Err("Type the exact file name before permanently deleting this local duplicate.".into());
+        return Err(
+            "Type the exact file name before permanently deleting this local duplicate.".into(),
+        );
     }
     let managed_directory = state.media_directory.canonicalize().map_err(user_error)?;
-    let current_path = target.path.canonicalize().map_err(|_| "The selected local file is no longer available; it was not deleted.".to_string())?;
+    let current_path = target.path.canonicalize().map_err(|_| {
+        "The selected local file is no longer available; it was not deleted.".to_string()
+    })?;
     if current_path.starts_with(&managed_directory) {
         return Err("Managed upload copies cannot be deleted from duplicate review.".into());
     }
@@ -2087,8 +2604,15 @@ fn delete_preflight_duplicate_file_impl(
         return Err("The local file changed after duplicate detection; it was not deleted.".into());
     }
     fs::remove_file(&current_path).map_err(user_error)?;
-    preflight_local_delete_targets().lock().ok().and_then(|mut targets| targets.remove(token));
-    audit_global(&database(state)?, "preflight_local_duplicate_deleted", "Operator permanently deleted a verified local duplicate after filename confirmation")?;
+    preflight_local_delete_targets()
+        .lock()
+        .ok()
+        .and_then(|mut targets| targets.remove(token));
+    audit_global(
+        &database(state)?,
+        "preflight_local_duplicate_deleted",
+        "Operator permanently deleted a verified local duplicate after filename confirmation",
+    )?;
     Ok(())
 }
 
@@ -2153,50 +2677,29 @@ fn uploaded_title_duplicates(
         .query_map([channel_name], |row| {
             let video_id = row.get::<_, String>(0)?;
             let title = row.get::<_, String>(1)?;
-            let normalized = normalized_uploaded_title(&title);
-            let (canonical, has_duplicate_suffix) = canonical_uploaded_title(&title);
-            Ok((video_id, title, normalized, canonical, has_duplicate_suffix))
+            Ok((video_id, title))
         })
         .map_err(user_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(user_error)?;
 
-    let mut by_canonical_title = BTreeMap::<String, Vec<_>>::new();
-    for video in videos {
-        by_canonical_title
-            .entry(video.3.clone())
-            .or_default()
-            .push(video);
-    }
-
     let mut candidates = Vec::new();
-    for videos in by_canonical_title.values() {
-        for left_index in 0..videos.len() {
-            let (left_id, left_title, left_normalized, _, left_has_suffix) = &videos[left_index];
-            for (right_id, right_title, right_normalized, _, right_has_suffix) in
-                videos.iter().skip(left_index + 1)
-            {
-                let evidence = if left_normalized == right_normalized {
-                    Some("Normalized uploaded titles match exactly; case and repeated whitespace are ignored.")
-                } else if *left_has_suffix || *right_has_suffix {
-                    Some("Uploaded titles match after removing a trailing duplicate-copy marker of (2) or higher.")
-                } else {
-                    None
-                };
-                let Some(evidence) = evidence else {
-                    continue;
-                };
-                candidates.push(DuplicateCandidate {
-                    id: format!("remote:{left_id}:{right_id}"),
-                    confidence: "metadata".into(),
-                    left_title: left_title.clone(),
-                    right_title: right_title.clone(),
-                    left_video_id: Some(left_id.clone()),
-                    right_video_id: Some(right_id.clone()),
-                    evidence: evidence.into(),
-                    decision: None,
-                });
-            }
+    for left_index in 0..videos.len() {
+        let (left_id, left_title) = &videos[left_index];
+        for (right_id, right_title) in videos.iter().skip(left_index + 1) {
+            let Some(evidence) = uploaded_title_match_evidence(left_title, right_title) else {
+                continue;
+            };
+            candidates.push(DuplicateCandidate {
+                id: format!("remote:{left_id}:{right_id}"),
+                confidence: "metadata".into(),
+                left_title: left_title.clone(),
+                right_title: right_title.clone(),
+                left_video_id: Some(left_id.clone()),
+                right_video_id: Some(right_id.clone()),
+                evidence: evidence.into(),
+                decision: None,
+            });
         }
     }
     Ok(candidates)
@@ -2372,21 +2875,23 @@ struct MonitorFileOutcome {
 fn folder_monitor_settings(connection: &Connection) -> Result<FolderMonitorSettings, String> {
     connection
         .query_row(
-            "SELECT enabled, folder_path, channel_name, visibility, made_for_kids, playlist_id, playlist_title, status, detail, last_scan_at, last_file_name FROM folder_monitor_settings WHERE singleton = 1",
+            "SELECT enabled, folder_path, channel_name, channel_id, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, status, detail, last_scan_at, last_file_name FROM folder_monitor_settings WHERE singleton = 1",
             [],
             |row| {
                 Ok(FolderMonitorSettings {
                     enabled: row.get::<_, i64>(0)? != 0,
                     folder_path: row.get(1)?,
                     channel_name: row.get(2)?,
-                    visibility: row.get(3)?,
-                    made_for_kids: row.get::<_, i64>(4)? != 0,
-                    playlist_id: row.get(5)?,
-                    playlist_title: row.get(6)?,
-                    status: row.get(7)?,
-                    detail: row.get(8)?,
-                    last_scan_at: row.get(9)?,
-                    last_file_name: row.get(10)?,
+                    channel_id: row.get(3)?,
+                    visibility: row.get(4)?,
+                    made_for_kids: row.get::<_, i64>(5)? != 0,
+                    delete_source_after_upload: row.get::<_, i64>(6)? != 0,
+                    playlist_id: row.get(7)?,
+                    playlist_title: row.get(8)?,
+                    status: row.get(9)?,
+                    detail: row.get(10)?,
+                    last_scan_at: row.get(11)?,
+                    last_file_name: row.get(12)?,
                 })
             },
         )
@@ -2395,8 +2900,10 @@ fn folder_monitor_settings(connection: &Connection) -> Result<FolderMonitorSetti
                 enabled: false,
                 folder_path: None,
                 channel_name: None,
+                channel_id: None,
                 visibility: "private".into(),
                 made_for_kids: false,
+                delete_source_after_upload: false,
                 playlist_id: None,
                 playlist_title: None,
                 status: "disabled".into(),
@@ -2502,7 +3009,23 @@ fn monitor_authorized(
     Ok(monitor.enabled
         && monitor.folder_path.as_deref() == Some(folder_path)
         && monitor.channel_name.as_deref() == Some(channel_name)
-        && connection_settings.active_channel.as_deref() == Some(channel_name))
+        && monitor.channel_id.is_some()
+        && connection_settings.active_channel_id == monitor.channel_id)
+}
+
+fn monitored_channel_id(
+    connection: &Connection,
+    folder_path: &str,
+    channel_name: &str,
+) -> Result<String, String> {
+    let monitor = folder_monitor_settings(connection)?;
+    if !monitor_authorized(connection, folder_path, channel_name)? {
+        return Err("The watched-folder channel is no longer active.".into());
+    }
+    monitor.channel_id.ok_or_else(|| {
+        "This watched-folder binding predates immutable channel IDs. Reconnect YouTube and enable the monitor again."
+            .to_string()
+    })
 }
 
 fn set_observation_state(
@@ -2558,10 +3081,11 @@ fn queue_monitored_item(
         )
         .map_err(user_error)?;
     if status == "draft" {
+        let channel_id = monitored_channel_id(connection, folder_path, channel_name)?;
         connection
             .execute(
-                "UPDATE upload_items SET channel_name = ?1, visibility = ?2, status = 'queued', detail = ?3, updated_at = ?4 WHERE id = ?5",
-                params![channel_name, visibility, format!("Watched-folder file verified and queued for automatic {visibility} upload."), now(), item_id],
+                "UPDATE upload_items SET channel_name = ?1, channel_id = ?2, visibility = ?3, status = 'queued', detail = ?4, updated_at = ?5 WHERE id = ?6",
+                params![channel_name, channel_id, visibility, format!("Watched-folder file verified and queued for automatic {visibility} upload."), now(), item_id],
             )
             .map_err(user_error)?;
         audit(
@@ -2594,10 +3118,12 @@ fn ingest_stable_monitored_file(
     channel_name: &str,
     visibility: &str,
     made_for_kids: bool,
+    delete_source_after_upload: bool,
     playlist_id: Option<&str>,
     playlist_title: Option<&str>,
     file: &MonitoredFile,
 ) -> Result<MonitorFileOutcome, String> {
+    let channel_id = monitored_channel_id(connection, folder_path, channel_name)?;
     let item_id = Uuid::new_v4().to_string();
     set_observation_state(
         connection,
@@ -2644,8 +3170,8 @@ fn ingest_stable_monitored_file(
         .unwrap_or("Untitled video");
     let existing = connection
         .query_row(
-            "SELECT id, status FROM upload_items WHERE digest = ?1 AND (channel_name = ?2 OR channel_name IS NULL) ORDER BY created_at ASC LIMIT 1",
-            params![digest, channel_name],
+            "SELECT id, status FROM upload_items WHERE digest = ?1 AND (channel_id = ?2 OR channel_id IS NULL) ORDER BY created_at ASC LIMIT 1",
+            params![digest, channel_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
@@ -2691,18 +3217,20 @@ fn ingest_stable_monitored_file(
     let timestamp = now();
     connection
         .execute(
-            "INSERT INTO upload_items (id, title, file_name, channel_name, source_path, workspace_path, partial_path, size_bytes, status, total_bytes, visibility, made_for_kids, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'importing', ?8, ?9, ?10, ?11, ?12, ?13, ?13, 'Importing stable watched file into device-local workspace')",
+            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, source_path, workspace_path, partial_path, size_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'importing', ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, 'Importing stable watched file into device-local workspace')",
             params![
                 item_id,
                 title,
                 file.file_name,
                 channel_name,
+                channel_id,
                 file.path.to_string_lossy(),
                 workspace_path.to_string_lossy(),
                 partial_path.to_string_lossy(),
                 file.size_bytes as i64,
                 visibility,
                 made_for_kids as i64,
+                delete_source_after_upload as i64,
                 playlist_id,
                 playlist_title,
                 timestamp
@@ -2882,8 +3410,20 @@ fn scan_folder_monitor_locked(
         .channel_name
         .as_deref()
         .ok_or_else(|| "The enabled folder monitor has no channel binding.".to_string())?;
+    let Some(channel_id) = settings.channel_id.as_deref() else {
+        return update_monitor_result(
+            &connection,
+            "paused",
+            "This watched-folder binding predates immutable channel IDs. Reconnect YouTube and enable the monitor again.",
+            None,
+        );
+    };
     let visibility = valid_folder_monitor_visibility(&settings.visibility)?;
-    if connection_settings(&connection)?.active_channel.as_deref() != Some(channel_name) {
+    if connection_settings(&connection)?
+        .active_channel_id
+        .as_deref()
+        != Some(channel_id)
+    {
         return update_monitor_result(
             &connection,
             "paused",
@@ -2979,6 +3519,7 @@ fn scan_folder_monitor_locked(
                     channel_name,
                     visibility,
                     settings.made_for_kids,
+                    settings.delete_source_after_upload,
                     settings.playlist_id.as_deref(),
                     settings.playlist_title.as_deref(),
                     &file,
@@ -3138,6 +3679,7 @@ fn enable_folder_monitor_impl(
     path: String,
     visibility: String,
     made_for_kids: bool,
+    delete_source_after_upload: bool,
     playlist_id: Option<String>,
     playlist_title: Option<String>,
 ) -> Result<FolderMonitorSettings, String> {
@@ -3156,18 +3698,20 @@ fn enable_folder_monitor_impl(
     let (playlist_id, playlist_title) = valid_playlist_selection(playlist_id, playlist_title)?;
     let baseline_files = monitored_files(&folder)?;
     let mut connection = database(state)?;
-    let channel_name = connection_settings(&connection)?
-        .active_channel
-        .ok_or_else(|| {
-            "Connect the YouTube channel that should receive watched-folder uploads first."
-                .to_string()
-        })?;
+    let connection_settings = connection_settings(&connection)?;
+    let channel_name = connection_settings.active_channel.ok_or_else(|| {
+        "Connect the YouTube channel that should receive watched-folder uploads first.".to_string()
+    })?;
+    let channel_id = connection_settings.active_channel_id.ok_or_else(|| {
+        "Reconnect YouTube before enabling a watched folder so the app can bind it to the immutable channel ID."
+            .to_string()
+    })?;
     let timestamp = now();
     let transaction = connection.transaction().map_err(user_error)?;
     transaction
         .execute(
-            "INSERT INTO folder_monitor_settings (singleton, enabled, folder_path, channel_name, visibility, made_for_kids, playlist_id, playlist_title, status, detail, updated_at) VALUES (1, 1, ?1, ?2, ?3, ?4, ?5, ?6, 'watching', ?7, ?8) ON CONFLICT(singleton) DO UPDATE SET enabled = 1, folder_path = excluded.folder_path, channel_name = excluded.channel_name, visibility = excluded.visibility, made_for_kids = excluded.made_for_kids, playlist_id = excluded.playlist_id, playlist_title = excluded.playlist_title, status = excluded.status, detail = excluded.detail, last_scan_at = NULL, last_file_name = NULL, updated_at = excluded.updated_at",
-            params![folder.to_string_lossy(), channel_name, visibility, made_for_kids as i64, playlist_id, playlist_title, format!("Folder monitoring enabled; supported videos must remain unchanged across two scans before {visibility} upload."), timestamp],
+            "INSERT INTO folder_monitor_settings (singleton, enabled, folder_path, channel_name, channel_id, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, status, detail, updated_at) VALUES (1, 1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'watching', ?9, ?10) ON CONFLICT(singleton) DO UPDATE SET enabled = 1, folder_path = excluded.folder_path, channel_name = excluded.channel_name, channel_id = excluded.channel_id, visibility = excluded.visibility, made_for_kids = excluded.made_for_kids, delete_source_after_upload = excluded.delete_source_after_upload, playlist_id = excluded.playlist_id, playlist_title = excluded.playlist_title, status = excluded.status, detail = excluded.detail, last_scan_at = NULL, last_file_name = NULL, updated_at = excluded.updated_at",
+            params![folder.to_string_lossy(), channel_name, channel_id, visibility, made_for_kids as i64, delete_source_after_upload as i64, playlist_id, playlist_title, format!("Folder monitoring enabled; supported videos must remain unchanged across two scans before {visibility} upload."), timestamp],
         )
         .map_err(user_error)?;
     for file in baseline_files {
@@ -3247,10 +3791,34 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
     if item_ids.is_empty() {
         return Err("No reviewed uploads are waiting in the local queue.".into());
     }
-    let total = item_ids.len();
+    let claimed_item_ids = claim_queued_upload_items(&connection, item_ids)?;
+    let total = claimed_item_ids.len();
+    if total == 0 {
+        return Err("Queued uploads were already claimed by another local worker.".into());
+    }
     let worker_state = state.clone();
-    thread::spawn(move || run_queued_uploads(worker_state, item_ids));
+    thread::spawn(move || run_queued_uploads(worker_state, claimed_item_ids));
     Ok(total)
+}
+
+fn claim_queued_upload_items(
+    connection: &Connection,
+    item_ids: impl IntoIterator<Item = String>,
+) -> Result<Vec<String>, String> {
+    let mut claimed_item_ids = Vec::new();
+    for item_id in item_ids {
+        if connection
+            .execute(
+                "UPDATE upload_items SET status = 'dispatching', detail = 'Upload worker claimed this item.', updated_at = ?1 WHERE id = ?2 AND status = 'queued'",
+                params![now(), item_id],
+            )
+            .map_err(user_error)?
+            == 1
+        {
+            claimed_item_ids.push(item_id);
+        }
+    }
+    Ok(claimed_item_ids)
 }
 
 fn quota_resume_poll_loop(state: AppState) {
@@ -3304,11 +3872,20 @@ fn enable_folder_monitor(
     path: String,
     visibility: String,
     made_for_kids: bool,
+    delete_source_after_upload: bool,
     playlist_id: Option<String>,
     playlist_title: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<FolderMonitorSettings, String> {
-    enable_folder_monitor_impl(&state, path, visibility, made_for_kids, playlist_id, playlist_title)
+    enable_folder_monitor_impl(
+        &state,
+        path,
+        visibility,
+        made_for_kids,
+        delete_source_after_upload,
+        playlist_id,
+        playlist_title,
+    )
 }
 
 #[tauri::command]
@@ -3317,16 +3894,20 @@ fn disable_folder_monitor(state: State<'_, AppState>) -> Result<FolderMonitorSet
 }
 
 #[tauri::command]
-async fn scan_folder_monitor_now(state: State<'_, AppState>) -> Result<FolderMonitorSettings, String> {
+async fn scan_folder_monitor_now(
+    state: State<'_, AppState>,
+) -> Result<FolderMonitorSettings, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || scan_folder_monitor_impl(&state, true)).await.map_err(|_| "Folder monitoring stopped unexpectedly.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || scan_folder_monitor_impl(&state, true))
+        .await
+        .map_err(|_| "Folder monitoring stopped unexpectedly.".to_string())?
 }
 
 #[tauri::command]
 fn dashboard_snapshot(state: State<'_, AppState>) -> Result<DashboardSnapshot, String> {
     let connection = database(&state)?;
     let mut statement = connection
-        .prepare("SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, updated_at FROM upload_items ORDER BY updated_at DESC")
+        .prepare("SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, delete_source_after_upload, source_delete_status, updated_at FROM upload_items ORDER BY updated_at DESC")
         .map_err(user_error)?;
     let items = statement
         .query_map([], row_to_upload_item)
@@ -3334,10 +3915,9 @@ fn dashboard_snapshot(state: State<'_, AppState>) -> Result<DashboardSnapshot, S
         .collect::<Result<Vec<_>, _>>()
         .map_err(user_error)?;
     let settings = connection_settings(&connection)?;
-    let mut duplicates = exact_local_duplicates(&connection)?;
-    if let Some(active_channel) = settings.active_channel.as_deref() {
-        duplicates.extend(uploaded_title_duplicates(&connection, active_channel)?);
-    }
+    let ignored_candidate_ids = ignored_duplicate_candidate_ids(&connection)?;
+    let mut duplicates = current_duplicate_candidates(&connection)?;
+    duplicates.retain(|candidate| !ignored_candidate_ids.contains(&candidate.id));
     let pending_title_duplicates = settings
         .active_channel
         .as_deref()
@@ -3424,7 +4004,7 @@ fn import_desktop_oauth_client(
     let connection = database(&state)?;
     connection
         .execute(
-            "INSERT INTO connection_settings (singleton, oauth_client_id, active_channel, connection_detail, deletion_authorized, updated_at) VALUES (1, ?1, NULL, 'Custom Google Desktop OAuth client imported on this device.', 0, ?2) ON CONFLICT(singleton) DO UPDATE SET oauth_client_id = excluded.oauth_client_id, active_channel = NULL, connection_detail = excluded.connection_detail, deletion_authorized = 0, updated_at = excluded.updated_at",
+            "INSERT INTO connection_settings (singleton, oauth_client_id, active_channel, active_channel_id, connection_detail, deletion_authorized, updated_at) VALUES (1, ?1, NULL, NULL, 'Custom Google Desktop OAuth client imported on this device.', 0, ?2) ON CONFLICT(singleton) DO UPDATE SET oauth_client_id = excluded.oauth_client_id, active_channel = NULL, active_channel_id = NULL, connection_detail = excluded.connection_detail, deletion_authorized = 0, updated_at = excluded.updated_at",
             params![client_id, now()],
         )
         .map_err(user_error)?;
@@ -3437,15 +4017,29 @@ fn import_desktop_oauth_client(
 }
 
 #[tauri::command]
-async fn export_portable_archive(path: String, state: State<'_, AppState>) -> Result<PortableArchiveReceipt, String> {
+async fn export_portable_archive(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<PortableArchiveReceipt, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || export_portable_archive_impl(&state, Path::new(&path))).await.map_err(|_| "Archive export stopped unexpectedly.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        export_portable_archive_impl(&state, Path::new(&path))
+    })
+    .await
+    .map_err(|_| "Archive export stopped unexpectedly.".to_string())?
 }
 
 #[tauri::command]
-async fn import_portable_archive(path: String, state: State<'_, AppState>) -> Result<PortableArchiveReceipt, String> {
+async fn import_portable_archive(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<PortableArchiveReceipt, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || import_portable_archive_impl(&state, Path::new(&path))).await.map_err(|_| "Archive import stopped unexpectedly.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        import_portable_archive_impl(&state, Path::new(&path))
+    })
+    .await
+    .map_err(|_| "Archive import stopped unexpectedly.".to_string())?
 }
 
 fn begin_oauth_connection(
@@ -3533,7 +4127,11 @@ fn enable_deletion_sudo_mode(state: State<'_, AppState>) -> Result<ConnectionSet
             params![deletion_sudo_until(), now()],
         )
         .map_err(user_error)?;
-    audit_global(&connection, "youtube_deletion_sudo_enabled", "Operator entered temporary deletion mode")?;
+    audit_global(
+        &connection,
+        "youtube_deletion_sudo_enabled",
+        "Operator entered temporary deletion mode",
+    )?;
     connection_settings(&connection)
 }
 
@@ -3546,7 +4144,11 @@ fn disable_deletion_sudo_mode(state: State<'_, AppState>) -> Result<ConnectionSe
             params![now()],
         )
         .map_err(user_error)?;
-    audit_global(&connection, "youtube_deletion_sudo_disabled", "Operator exited temporary deletion mode")?;
+    audit_global(
+        &connection,
+        "youtube_deletion_sudo_disabled",
+        "Operator exited temporary deletion mode",
+    )?;
     connection_settings(&connection)
 }
 
@@ -3558,7 +4160,7 @@ fn disconnect_youtube(state: State<'_, AppState>) -> Result<ConnectionSettings, 
     let connection = database(&state)?;
     connection
         .execute(
-            "UPDATE connection_settings SET active_channel = NULL, deletion_authorized = 0, deletion_sudo_until = NULL, connection_detail = 'YouTube disconnected on this device.', updated_at = ?1 WHERE singleton = 1",
+            "UPDATE connection_settings SET active_channel = NULL, active_channel_id = NULL, deletion_authorized = 0, deletion_sudo_until = NULL, connection_detail = 'YouTube disconnected on this device.', updated_at = ?1 WHERE singleton = 1",
             params![now()],
         )
         .map_err(user_error)?;
@@ -3580,9 +4182,13 @@ async fn sync_channel_inventory(state: State<'_, AppState>) -> Result<usize, Str
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let settings = connection_settings(&database(&state)?)?;
-        if !settings.connected { return Err("Connect a YouTube channel before syncing its library.".into()); }
+        if !settings.connected {
+            return Err("Connect a YouTube channel before syncing its library.".into());
+        }
         sync_channel_inventory_worker(&state)
-    }).await.map_err(|_| "YouTube inventory synchronization stopped unexpectedly.".to_string())?
+    })
+    .await
+    .map_err(|_| "YouTube inventory synchronization stopped unexpectedly.".to_string())?
 }
 
 #[tauri::command]
@@ -3591,7 +4197,35 @@ async fn check_upload_title_duplicates(
     state: State<'_, AppState>,
 ) -> Result<Vec<UploadTitleDuplicate>, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || check_upload_title_duplicates_impl(&state, &item_ids)).await.map_err(|_| "The duplicate title check stopped unexpectedly.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        check_upload_title_duplicates_impl(&state, &item_ids)
+    })
+    .await
+    .map_err(|_| "The duplicate title check stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+async fn ignore_duplicate_candidate(
+    candidate_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ignore_duplicate_candidate_impl(&state, &candidate_id)
+    })
+    .await
+    .map_err(|_| "Saving the duplicate-review decision stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+async fn re_audit_ignored_duplicate_candidates(
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || re_audit_ignored_duplicate_candidates_impl(&state))
+        .await
+        .map_err(|_| "Restoring ignored duplicate candidates stopped unexpectedly.")
+        .map(|result| result)?
 }
 
 #[tauri::command]
@@ -3606,7 +4240,9 @@ async fn start_preflight_duplicate_files(
     let worker_state = state.clone();
     let worker_app = app.clone();
     let worker_job_id = job_id.clone();
-    thread::spawn(move || { let _ = run_preflight_scan_job(&worker_state, &worker_app, &worker_job_id); });
+    thread::spawn(move || {
+        let _ = run_preflight_scan_job(&worker_state, &worker_app, &worker_job_id);
+    });
     load_preflight_scan(&state, &job_id)
 }
 
@@ -3619,15 +4255,38 @@ fn load_preflight_duplicate_scan(
 }
 
 #[tauri::command]
-fn cancel_preflight_duplicate_scan(job_id: String, state: State<'_, AppState>) -> Result<(), String> {
+fn cancel_preflight_duplicate_scan(
+    job_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let connection = database(&state)?;
     let changed = connection.execute(
         "UPDATE preflight_scan_jobs SET status = 'cancelled', detail = 'Operator cancelled this pre-ingest check. No selected file was ingested or uploaded.', updated_at = ?1 WHERE id = ?2 AND status IN ('queued', 'running', 'syncing')",
         params![now(), job_id],
     ).map_err(user_error)?;
-    if changed != 1 { return Err("Only an active pre-ingest duplicate check can be cancelled.".into()); }
-    audit_global(&connection, "preflight_scan_cancelled", "Operator cancelled a persisted pre-ingest duplicate check")?;
+    if changed != 1 {
+        return Err("Only an active pre-ingest duplicate check can be cancelled.".into());
+    }
+    audit_global(
+        &connection,
+        "preflight_scan_cancelled",
+        "Operator cancelled a persisted pre-ingest duplicate check",
+    )?;
     Ok(())
+}
+
+#[tauri::command]
+async fn prepare_preflight_local_delete_file(
+    job_id: String,
+    ordinal: u64,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        prepare_preflight_local_delete_target(&state, &job_id, ordinal)
+    })
+    .await
+    .map_err(|_| "Preparing local duplicate deletion stopped unexpectedly.".to_string())?
 }
 
 #[tauri::command]
@@ -3694,9 +4353,13 @@ fn list_youtube_playlists_impl(state: &AppState) -> Result<Vec<YouTubePlaylist>,
 }
 
 #[tauri::command]
-async fn list_youtube_playlists(state: State<'_, AppState>) -> Result<Vec<YouTubePlaylist>, String> {
+async fn list_youtube_playlists(
+    state: State<'_, AppState>,
+) -> Result<Vec<YouTubePlaylist>, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || list_youtube_playlists_impl(&state)).await.map_err(|_| "Playlist loading stopped unexpectedly.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || list_youtube_playlists_impl(&state))
+        .await
+        .map_err(|_| "Playlist loading stopped unexpectedly.".to_string())?
 }
 
 fn row_to_remote_video(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteVideo> {
@@ -3801,7 +4464,9 @@ fn cancel_deletion_request(id: String, state: State<'_, AppState>) -> Result<(),
         )
         .map_err(user_error)?;
     if affected != 1 {
-        return Err("Only a pending or recoverable local deletion request can be cancelled.".into());
+        return Err(
+            "Only a pending or recoverable local deletion request can be cancelled.".into(),
+        );
     }
     audit_global(
         &connection,
@@ -3818,7 +4483,13 @@ fn clear_deletion_requests(state: State<'_, AppState>) -> Result<usize, String> 
         "UPDATE deletion_requests SET status = 'cancelled', detail = 'Operator cleared this local deletion request. No YouTube video was changed.', updated_at = ?1 WHERE status IN ('pending', 'needs_reconciliation')",
         [now()],
     ).map_err(user_error)?;
-    if changed > 0 { audit_global(&connection, "youtube_deletion_queue_cleared", "Operator cleared pending local deletion requests")?; }
+    if changed > 0 {
+        audit_global(
+            &connection,
+            "youtube_deletion_queue_cleared",
+            "Operator cleared pending local deletion requests",
+        )?;
+    }
     Ok(changed)
 }
 
@@ -3846,8 +4517,7 @@ fn execute_deletion_request_impl(
     let settings = connection_settings(&connection)?;
     if !settings.deletion_authorized {
         return Err(
-            "Grant YouTube deletion permission before executing a deletion request."
-                .into(),
+            "Grant YouTube deletion permission before executing a deletion request.".into(),
         );
     }
     if !settings.deletion_sudo_active {
@@ -3901,9 +4571,14 @@ fn execute_deletion_request_impl(
         .query(&[("id", video_id.as_str())])
         .bearer_auth(&access_token)
         .send()
-        .map_err(|_| "YouTube deletion could not be reached; the saved request needs reconciliation.".to_string())?;
+        .map_err(|_| {
+            "YouTube deletion could not be reached; the saved request needs reconciliation."
+                .to_string()
+        })?;
     if response.status().as_u16() != 204 {
-        return Err("YouTube rejected the deletion; the saved request needs reconciliation.".into());
+        return Err(
+            "YouTube rejected the deletion; the saved request needs reconciliation.".into(),
+        );
     }
     connection
         .execute(
@@ -3929,9 +4604,19 @@ fn execute_deletion_request_impl(
 }
 
 #[tauri::command]
-async fn execute_deletion_request(id: String, confirmation: String, state: State<'_, AppState>) -> Result<DeletionRequest, String> {
+async fn execute_deletion_request(
+    id: String,
+    confirmation: String,
+    state: State<'_, AppState>,
+) -> Result<DeletionRequest, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || execute_deletion_request_impl(id, confirmation, &state)).await.map_err(|_| "YouTube deletion stopped unexpectedly; the request needs reconciliation.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        execute_deletion_request_impl(id, confirmation, &state)
+    })
+    .await
+    .map_err(|_| {
+        "YouTube deletion stopped unexpectedly; the request needs reconciliation.".to_string()
+    })?
 }
 
 fn import_asset_impl(
@@ -3979,8 +4664,8 @@ fn import_asset_impl(
 
     connection
         .execute(
-            "INSERT INTO upload_items (id, title, file_name, source_path, workspace_path, partial_path, size_bytes, status, total_bytes, visibility, made_for_kids, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'importing', ?7, ?8, ?9, ?10, ?11, ?12, ?12, 'Importing into device-local workspace')",
-            params![id, title, file_name, path, workspace_path.to_string_lossy(), partial_path.to_string_lossy(), metadata.len() as i64, visibility, settings.made_for_kids as i64, playlist_id, playlist_title, timestamp],
+            "INSERT INTO upload_items (id, title, file_name, source_path, workspace_path, partial_path, size_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'importing', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, 'Importing into device-local workspace')",
+            params![id, title, file_name, path, workspace_path.to_string_lossy(), partial_path.to_string_lossy(), metadata.len() as i64, visibility, settings.made_for_kids as i64, settings.delete_source_after_upload as i64, playlist_id, playlist_title, timestamp],
         )
         .map_err(user_error)?;
     audit(
@@ -4012,9 +4697,18 @@ fn import_asset_impl(
 }
 
 #[tauri::command]
-async fn import_asset(path: String, settings: ManualUploadSettings, state: State<'_, AppState>) -> Result<UploadItem, String> {
+async fn import_asset(
+    path: String,
+    settings: ManualUploadSettings,
+    state: State<'_, AppState>,
+) -> Result<UploadItem, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || import_asset_impl(path, settings, &state)).await.map_err(|_| "Local media import stopped unexpectedly; its checkpoint will be recovered on launch.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || import_asset_impl(path, settings, &state))
+        .await
+        .map_err(|_| {
+            "Local media import stopped unexpectedly; its checkpoint will be recovered on launch."
+                .to_string()
+        })?
 }
 
 fn set_item_visibility_impl(
@@ -4059,6 +4753,48 @@ fn set_item_visibility(
     state: State<'_, AppState>,
 ) -> Result<UploadItem, String> {
     set_item_visibility_impl(&state, &id, &visibility)
+}
+
+fn set_item_delete_source_after_upload_impl(
+    state: &AppState,
+    id: &str,
+    delete_source_after_upload: bool,
+) -> Result<UploadItem, String> {
+    let connection = database(state)?;
+    let changed = connection
+        .execute(
+            "UPDATE upload_items SET delete_source_after_upload = ?1, source_delete_status = NULL, updated_at = ?2 WHERE id = ?3 AND status IN ('draft', 'failed')",
+            params![delete_source_after_upload as i64, now(), id],
+        )
+        .map_err(user_error)?;
+    if changed == 0 {
+        return Err("Set source cleanup before this item is queued for upload.".into());
+    }
+    audit(
+        &connection,
+        id,
+        "source_cleanup_preference_set",
+        if delete_source_after_upload {
+            "Operator enabled original-source deletion after a confirmed YouTube upload."
+        } else {
+            "Operator disabled original-source deletion after a confirmed YouTube upload."
+        },
+    )?;
+    find_item(&connection, id)
+}
+
+#[tauri::command]
+async fn set_item_delete_source_after_upload(
+    id: String,
+    delete_source_after_upload: bool,
+    state: State<'_, AppState>,
+) -> Result<UploadItem, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        set_item_delete_source_after_upload_impl(&state, &id, delete_source_after_upload)
+    })
+    .await
+    .map_err(|_| "Saving the source cleanup choice stopped unexpectedly.".to_string())?
 }
 
 #[tauri::command]
@@ -4109,7 +4845,13 @@ fn clear_upload_queue(state: State<'_, AppState>) -> Result<usize, String> {
         "UPDATE upload_items SET status = 'cancelled', detail = 'Operator cancelled this local upload job. The managed media copy and any resumable evidence were retained; an in-flight request stops at its next checkpoint.', updated_at = ?1 WHERE status IN ('draft', 'queued', 'dispatching', 'uploading', 'needs_reconciliation')",
         [now()],
     ).map_err(user_error)?;
-    if changed > 0 { audit_global(&connection, "upload_queue_cleared", "Operator cleared local upload jobs without deleting managed media")?; }
+    if changed > 0 {
+        audit_global(
+            &connection,
+            "upload_queue_cleared",
+            "Operator cleared local upload jobs without deleting managed media",
+        )?;
+    }
     Ok(changed)
 }
 
@@ -4249,8 +4991,19 @@ fn reconcile_queue_impl(state: &AppState) -> Result<Vec<UploadItem>, String> {
         )
         .map_err(user_error)?;
 
+    let pending_source_cleanup_ids = connection
+        .prepare("SELECT id FROM upload_items WHERE status = 'uploaded' AND delete_source_after_upload = 1 AND source_delete_status = 'pending'")
+        .map_err(user_error)?
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?;
+    for item_id in pending_source_cleanup_ids {
+        finalize_confirmed_source_cleanup(state, &item_id)?;
+    }
+
     let mut all = connection
-        .prepare("SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, updated_at FROM upload_items ORDER BY updated_at DESC")
+        .prepare("SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, delete_source_after_upload, source_delete_status, updated_at FROM upload_items ORDER BY updated_at DESC")
         .map_err(user_error)?;
     let items = all
         .query_map([], row_to_upload_item)
@@ -4270,7 +5023,11 @@ fn reconcile_interrupted_deletions(state: &AppState) -> Result<(), String> {
         [now()],
     ).map_err(user_error)?;
     if recovered > 0 {
-        audit_global(&connection, "youtube_deletion_recovery_required", "Interrupted deletion requests retained for explicit reconciliation")?;
+        audit_global(
+            &connection,
+            "youtube_deletion_recovery_required",
+            "Interrupted deletion requests retained for explicit reconciliation",
+        )?;
     }
     Ok(())
 }
@@ -4278,7 +5035,9 @@ fn reconcile_interrupted_deletions(state: &AppState) -> Result<(), String> {
 #[tauri::command]
 async fn reconcile_queue(state: State<'_, AppState>) -> Result<Vec<UploadItem>, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || reconcile_queue_impl(&state)).await.map_err(|_| "Queue recovery stopped unexpectedly.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || reconcile_queue_impl(&state))
+        .await
+        .map_err(|_| "Queue recovery stopped unexpectedly.".to_string())?
 }
 
 pub fn run() {
@@ -4312,9 +5071,12 @@ pub fn run() {
             start_queued_uploads,
             sync_channel_inventory,
             check_upload_title_duplicates,
+            ignore_duplicate_candidate,
+            re_audit_ignored_duplicate_candidates,
             start_preflight_duplicate_files,
             load_preflight_duplicate_scan,
             cancel_preflight_duplicate_scan,
+            prepare_preflight_local_delete_file,
             delete_preflight_duplicate_file,
             resolve_upload_title_duplicates,
             list_remote_videos,
@@ -4329,6 +5091,7 @@ pub fn run() {
             import_asset,
             list_youtube_playlists,
             set_item_visibility,
+            set_item_delete_source_after_upload,
             queue_item,
             clear_upload_queue,
             reconcile_queue
@@ -4346,13 +5109,158 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
-                "CREATE TABLE connection_settings (singleton INTEGER PRIMARY KEY, oauth_client_id TEXT, active_channel TEXT, connection_detail TEXT, deletion_authorized INTEGER NOT NULL DEFAULT 0, deletion_sudo_until TEXT)",
+                "CREATE TABLE connection_settings (singleton INTEGER PRIMARY KEY, oauth_client_id TEXT, active_channel TEXT, active_channel_id TEXT, connection_detail TEXT, deletion_authorized INTEGER NOT NULL DEFAULT 0, deletion_sudo_until TEXT)",
             )
             .unwrap();
 
         let settings = connection_settings(&connection).unwrap();
         assert!(!settings.oauth_configured);
         assert!(configured_oauth_client_id(&connection).is_err());
+    }
+
+    #[test]
+    fn confirmed_source_cleanup_deletes_only_an_unchanged_external_source() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let source = root.join("camera-original.insv");
+        let managed = state.media_directory.join("uploaded.media");
+        let contents = b"confirmed-upload-source";
+        fs::write(&source, contents).unwrap();
+        fs::write(&managed, contents).unwrap();
+        let digest = format!("{:x}", Sha256::digest(contents));
+        let connection = database(&state).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, source_path, workspace_path, size_bytes, digest, status, total_bytes, delete_source_after_upload, source_delete_status, created_at, updated_at) VALUES ('uploaded', 'Uploaded', 'camera-original.insv', ?1, ?2, ?3, ?4, 'uploaded', ?3, 1, 'pending', ?5, ?5)",
+            params![source.to_string_lossy(), managed.to_string_lossy(), contents.len() as i64, digest, now()],
+        ).unwrap();
+        drop(connection);
+
+        finalize_confirmed_source_cleanup(&state, "uploaded").unwrap();
+
+        assert!(!source.exists());
+        assert!(managed.is_file());
+        let connection = database(&state).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT source_delete_status FROM upload_items WHERE id = 'uploaded'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "deleted"
+        );
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn confirmed_source_cleanup_retains_a_source_changed_after_import() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let source = root.join("changed-source.mp4");
+        let managed = state.media_directory.join("changed.media");
+        fs::write(&source, b"changed-after-import").unwrap();
+        fs::write(&managed, b"original-import").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"original-import"));
+        let connection = database(&state).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, source_path, workspace_path, size_bytes, digest, status, total_bytes, delete_source_after_upload, source_delete_status, created_at, updated_at) VALUES ('changed', 'Changed', 'changed-source.mp4', ?1, ?2, 15, ?3, 'uploaded', 15, 1, 'pending', ?4, ?4)",
+            params![source.to_string_lossy(), managed.to_string_lossy(), digest, now()],
+        ).unwrap();
+        drop(connection);
+
+        finalize_confirmed_source_cleanup(&state, "changed").unwrap();
+
+        assert!(source.is_file());
+        let connection = database(&state).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT source_delete_status FROM upload_items WHERE id = 'changed'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "retained"
+        );
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_one_worker_can_claim_a_queued_upload() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let connection = database(&state).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, status, total_bytes, created_at, updated_at) VALUES ('claimable', 'Claimable', 'claimable.mp4', ?1, 1, 'queued', 1, ?2, ?2)",
+            params![state.media_directory.join("claimable.media").to_string_lossy(), now()],
+        ).unwrap();
+        assert_eq!(
+            claim_queued_upload_items(&connection, vec!["claimable".into()]).unwrap(),
+            vec!["claimable"]
+        );
+        assert!(
+            claim_queued_upload_items(&connection, vec!["claimable".into()])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status FROM upload_items WHERE id = 'claimable'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "dispatching"
+        );
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_loopback_requests_do_not_validate_as_oauth_callbacks() {
+        let expected_state = "expected-state";
+        assert!(!valid_oauth_callback_request(
+            Some("GET"),
+            "/oauth2/callback?state=wrong",
+            expected_state
+        ));
+        assert!(!valid_oauth_callback_request(
+            Some("POST"),
+            "/oauth2/callback?state=expected-state",
+            expected_state
+        ));
+        assert!(!valid_oauth_callback_request(
+            Some("GET"),
+            "/oauth2/callback-other?state=expected-state",
+            expected_state
+        ));
+        assert!(valid_oauth_callback_request(
+            Some("GET"),
+            "/oauth2/callback?state=expected-state&code=code",
+            expected_state
+        ));
     }
 
     #[test]
@@ -4513,6 +5421,41 @@ mod tests {
     }
 
     #[test]
+    fn ignored_duplicate_candidates_stay_hidden_until_an_operator_reaudits() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let connection = database(&state).unwrap();
+        for (id, title) in [("first", "First copy"), ("second", "Second copy")] {
+            connection.execute("INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES (?1, ?2, ?2, ?2, 1, 'matching-digest', 'draft', 1, ?3, ?3)", params![id, title, now()]).unwrap();
+        }
+        let candidate_id = current_duplicate_candidates(&connection).unwrap()[0]
+            .id
+            .clone();
+        drop(connection);
+
+        ignore_duplicate_candidate_impl(&state, &candidate_id).unwrap();
+        let connection = database(&state).unwrap();
+        assert!(ignored_duplicate_candidate_ids(&connection)
+            .unwrap()
+            .contains(&candidate_id));
+        drop(connection);
+
+        assert_eq!(
+            re_audit_ignored_duplicate_candidates_impl(&state).unwrap(),
+            1
+        );
+        assert!(ignored_duplicate_candidate_ids(&database(&state).unwrap())
+            .unwrap()
+            .is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn proprietary_file_extensions_are_hashable_without_ingestion() {
         let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
         let media = root.join("media");
@@ -4531,8 +5474,89 @@ mod tests {
 
         assert_eq!(size_bytes, b"proprietary-camera-payload".len() as u64);
         assert_eq!(actual_digest, digest);
-        assert_eq!(connection.query_row("SELECT COUNT(*) FROM upload_items", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM upload_items", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
         drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn light_preflight_match_can_prepare_the_guarded_local_delete_target() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let source = root.join("camera-original.insv");
+        fs::write(&source, b"light-match-source").unwrap();
+        let timestamp = now();
+        let locator = serde_json::to_string(&FilePath::Path(source.clone())).unwrap();
+        let connection = database(&state).unwrap();
+        connection.execute(
+            "INSERT INTO preflight_scan_jobs (id, mode, status, total_files, completed_files, inventory_status, created_at, updated_at) VALUES ('light-job', 'light', 'complete', 1, 1, 'not_requested', ?1, ?1)",
+            [timestamp.clone()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO preflight_scan_files (job_id, ordinal, source_locator, file_name, status) VALUES ('light-job', 0, ?1, 'camera-original.insv', 'complete')",
+            [locator],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, status, total_bytes, created_at, updated_at) VALUES ('saved', 'Camera original', 'camera-original.insv', 'saved.media', 1, 'draft', 1, ?1, ?1)",
+            [timestamp],
+        ).unwrap();
+        drop(connection);
+
+        let token = prepare_preflight_local_delete_target(&state, "light-job", 0).unwrap();
+        delete_preflight_duplicate_file_impl(&state, &token, "camera-original.insv").unwrap();
+
+        assert!(!source.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uploaded_title_match_can_prepare_the_guarded_local_delete_target() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let source = root.join("VID_20251218_195343_00_005.mp4");
+        fs::write(&source, b"remote-title-match-source").unwrap();
+        let timestamp = now();
+        let locator = serde_json::to_string(&FilePath::Path(source.clone())).unwrap();
+        let connection = database(&state).unwrap();
+        connection.execute(
+            "UPDATE connection_settings SET active_channel = 'Channel A', updated_at = ?1 WHERE singleton = 1",
+            [timestamp.clone()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO remote_videos (video_id, channel_name, title, updated_at) VALUES ('remote-title', 'Channel A', 'VID 20251218 195343 00 005', ?1)",
+            [timestamp.clone()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO preflight_scan_jobs (id, mode, status, total_files, completed_files, inventory_status, created_at, updated_at) VALUES ('remote-job', 'light', 'complete', 1, 1, 'complete', ?1, ?1)",
+            [timestamp.clone()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO preflight_scan_files (job_id, ordinal, source_locator, file_name, status) VALUES ('remote-job', 0, ?1, 'VID_20251218_195343_00_005.mp4', 'complete')",
+            [locator],
+        ).unwrap();
+        drop(connection);
+
+        let token = prepare_preflight_local_delete_target(&state, "remote-job", 0).unwrap();
+        delete_preflight_duplicate_file_impl(&state, &token, "VID_20251218_195343_00_005.mp4")
+            .unwrap();
+
+        assert!(!source.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4571,9 +5595,21 @@ mod tests {
         let source = root.join("duplicate.insv");
         fs::write(&source, b"same-camera-bytes").unwrap();
         let (_, digest) = digest_file(&source).unwrap();
-        let token = register_preflight_local_delete_target(&media, Some(&source), &digest, "duplicate.insv").unwrap();
+        let token = register_preflight_local_delete_target(
+            &media,
+            Some(&source),
+            &digest,
+            "duplicate.insv",
+        )
+        .unwrap();
 
-        assert!(register_preflight_local_delete_target(&media, Some(&media), &digest, "managed.media").is_none());
+        assert!(register_preflight_local_delete_target(
+            &media,
+            Some(&media),
+            &digest,
+            "managed.media"
+        )
+        .is_none());
         assert!(delete_preflight_duplicate_file_impl(&state, &token, "wrong.insv").is_err());
         assert!(source.exists());
         delete_preflight_duplicate_file_impl(&state, &token, "duplicate.insv").unwrap();
@@ -4585,7 +5621,11 @@ mod tests {
     #[test]
     fn interrupted_deletion_is_retained_for_explicit_reconciliation() {
         let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
-        let state = AppState { database_path: root.join("queue.sqlite3"), media_directory: root.join("media"), folder_monitor_lock: Arc::new(Mutex::new(())) };
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
         fs::create_dir_all(&state.media_directory).unwrap();
         let connection = database(&state).unwrap();
         connection.execute("INSERT INTO deletion_requests (id, video_id, title, status, detail, created_at, updated_at) VALUES ('request-1', 'video-1', 'Video', 'executing', 'Awaiting receipt', ?1, ?1)", [now()]).unwrap();
@@ -4593,14 +5633,28 @@ mod tests {
 
         reconcile_interrupted_deletions(&state).unwrap();
 
-        assert_eq!(database(&state).unwrap().query_row("SELECT status FROM deletion_requests WHERE id = 'request-1'", [], |row| row.get::<_, String>(0)).unwrap(), "needs_reconciliation");
+        assert_eq!(
+            database(&state)
+                .unwrap()
+                .query_row(
+                    "SELECT status FROM deletion_requests WHERE id = 'request-1'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "needs_reconciliation"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn archive_export_never_overwrites_an_existing_file() {
         let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
-        let state = AppState { database_path: root.join("queue.sqlite3"), media_directory: root.join("media"), folder_monitor_lock: Arc::new(Mutex::new(())) };
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
         fs::create_dir_all(&state.media_directory).unwrap();
         database(&state).unwrap();
         let archive = root.join("existing.yumx.gz");
@@ -4618,8 +5672,16 @@ mod tests {
         let target_media = root.join("target-media");
         fs::create_dir_all(&source_media).unwrap();
         fs::create_dir_all(&target_media).unwrap();
-        let source_state = AppState { database_path: root.join("source.sqlite3"), media_directory: source_media, folder_monitor_lock: Arc::new(Mutex::new(())) };
-        let target_state = AppState { database_path: root.join("target.sqlite3"), media_directory: target_media, folder_monitor_lock: Arc::new(Mutex::new(())) };
+        let source_state = AppState {
+            database_path: root.join("source.sqlite3"),
+            media_directory: source_media,
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        let target_state = AppState {
+            database_path: root.join("target.sqlite3"),
+            media_directory: target_media,
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
         let connection = database(&source_state).unwrap();
         connection.execute("INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES ('asset-1', 'Camera clip', 'camera.insv', 'secret-local-path.media', 12, 'digest-1', 'draft', 12, ?1, ?1)", [now()]).unwrap();
         connection.execute("INSERT INTO remote_videos (video_id, channel_name, title, updated_at) VALUES ('video-1', 'Channel', 'Camera clip', ?1)", [now()]).unwrap();
@@ -4631,19 +5693,50 @@ mod tests {
         assert_eq!(exported.upload_count, 1);
         assert_eq!(imported.remote_video_count, 1);
         assert!(exported.bytes < 2048);
-        assert_eq!(target.query_row("SELECT digest FROM upload_items WHERE id = 'portable-asset-1'", [], |row| row.get::<_, String>(0)).unwrap(), "digest-1");
-        assert_eq!(target.query_row("SELECT status FROM upload_items WHERE id = 'portable-asset-1'", [], |row| row.get::<_, String>(0)).unwrap(), "metadata_only");
-        assert_eq!(target.query_row("SELECT COUNT(*) FROM remote_videos WHERE video_id = 'video-1'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            target
+                .query_row(
+                    "SELECT digest FROM upload_items WHERE id = 'portable-asset-1'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "digest-1"
+        );
+        assert_eq!(
+            target
+                .query_row(
+                    "SELECT status FROM upload_items WHERE id = 'portable-asset-1'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "metadata_only"
+        );
+        assert_eq!(
+            target
+                .query_row(
+                    "SELECT COUNT(*) FROM remote_videos WHERE video_id = 'video-1'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
         drop(target);
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn uploaded_title_canonicalization_only_strips_trailing_duplicate_markers() {
+    fn uploaded_title_normalization_handles_filename_separators_and_capture_sequences() {
         assert_eq!(
             normalized_uploaded_title("  Launch\tVIDEO  "),
             "launch video"
+        );
+        assert_eq!(
+            normalized_uploaded_title("VID_20251219_204823_00_014.mp4"),
+            "vid 20251219 204823 00 014"
         );
         assert_eq!(
             canonical_uploaded_title("Launch Video (2)"),
@@ -4655,18 +5748,31 @@ mod tests {
         );
         assert_eq!(
             canonical_uploaded_title("Launch Video (1)"),
-            ("launch video (1)".into(), false)
+            ("launch video 1".into(), false)
         );
         assert_eq!(
             canonical_uploaded_title("Launch Video(2)"),
-            ("launch video(2)".into(), false)
+            ("launch video 2".into(), false)
         );
         assert_eq!(
             canonical_uploaded_title("Launch (2) Video"),
-            ("launch (2) video".into(), false)
+            ("launch 2 video".into(), false)
         );
         assert!(uploaded_titles_match("Launch Video", "launch video (2)"));
         assert!(!uploaded_titles_match("Launch Video", "Launch Videos"));
+        assert!(uploaded_titles_match(
+            "VID_20251219_204823_00_014.mp4",
+            "VID 20251219 204823 00 014"
+        ));
+        assert!(uploaded_titles_match(
+            "VID_20251219_204823_00_014.mp4",
+            "Camera import 20251219 204823 00 014"
+        ));
+        assert!(!uploaded_titles_match("Clip 12 34", "Other 12 34"));
+        assert!(!uploaded_titles_match(
+            "VID_20251219_204823_00_014.mp4",
+            "VID 20251219 204824 00 014"
+        ));
     }
 
     #[test]
@@ -4722,6 +5828,35 @@ mod tests {
     }
 
     #[test]
+    fn uploaded_title_candidates_include_capture_sequence_matches() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let connection = database(&state).unwrap();
+        for (video_id, title) in [
+            ("camera-file", "VID_20251219_204823_00_014"),
+            ("camera-import", "Camera import 20251219 204823 00 014"),
+            ("different-capture", "Camera import 20251219 204824 00 014"),
+        ] {
+            connection.execute(
+                "INSERT INTO remote_videos (video_id, channel_name, title, updated_at) VALUES (?1, 'Channel A', ?2, ?3)",
+                params![video_id, title, now()],
+            ).unwrap();
+        }
+        let candidates = uploaded_title_duplicates(&connection, "Channel A").unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, "remote:camera-file:camera-import");
+        assert!(candidates[0].evidence.contains("number sequence"));
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn folder_monitor_waits_for_stability_and_reuses_the_channel_digest_record() {
         let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
         let watched = root.join("watched");
@@ -4736,7 +5871,7 @@ mod tests {
         let connection = database(&state).unwrap();
         connection
             .execute(
-                "INSERT INTO connection_settings (singleton, active_channel, connection_detail, updated_at) VALUES (1, 'Channel A', 'Test connection', ?1)",
+                "INSERT INTO connection_settings (singleton, active_channel, active_channel_id, connection_detail, updated_at) VALUES (1, 'Channel A', 'channel-a-id', 'Test connection', ?1)",
                 params![now()],
             )
             .unwrap();
@@ -4748,12 +5883,14 @@ mod tests {
             watched.to_string_lossy().to_string(),
             "unlisted".into(),
             false,
+            false,
             None,
             None,
         )
         .unwrap();
         assert!(enabled.enabled);
         assert_eq!(enabled.channel_name.as_deref(), Some("Channel A"));
+        assert_eq!(enabled.channel_id.as_deref(), Some("channel-a-id"));
         assert_eq!(enabled.visibility, "unlisted");
         scan_folder_monitor_impl(&state, false).unwrap();
         scan_folder_monitor_impl(&state, false).unwrap();
@@ -4793,15 +5930,30 @@ mod tests {
         let second_scan = scan_folder_monitor_impl(&state, false).unwrap();
         assert_eq!(second_scan.status, "watching");
         assert!(second_scan.detail.contains("Queued 1"));
-        let (item_id, status, channel_name, digest): (String, String, String, String) = connection
+        let (item_id, status, channel_name, channel_id, digest): (
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = connection
             .query_row(
-                "SELECT id, status, channel_name, digest FROM upload_items",
+                "SELECT id, status, channel_name, channel_id, digest FROM upload_items",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(status, "queued");
         assert_eq!(channel_name, "Channel A");
+        assert_eq!(channel_id, "channel-a-id");
         assert!(!digest.is_empty());
 
         let duplicate = watched.join("second.mp4");
@@ -4868,7 +6020,7 @@ mod tests {
 
         connection
             .execute(
-                "UPDATE connection_settings SET active_channel = 'Channel B', updated_at = ?1 WHERE singleton = 1",
+                "UPDATE connection_settings SET active_channel = 'Channel A', active_channel_id = 'channel-b-id', updated_at = ?1 WHERE singleton = 1",
                 params![now()],
             )
             .unwrap();
@@ -4943,14 +6095,21 @@ mod tests {
             root.join("missing").to_string_lossy().into(),
             "private".into(),
             false,
+            false,
             None,
             None,
         )
         .is_err());
-        assert!(
-            enable_folder_monitor_impl(&state, root.to_string_lossy().into(), "public".into(), false, None, None)
-                .is_err()
-        );
+        assert!(enable_folder_monitor_impl(
+            &state,
+            root.to_string_lossy().into(),
+            "public".into(),
+            false,
+            false,
+            None,
+            None
+        )
+        .is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

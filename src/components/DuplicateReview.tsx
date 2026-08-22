@@ -70,6 +70,7 @@ function ForwardTenIcon() {
 
 type DuplicateReviewProps = {
   candidates: DuplicateCandidate[];
+  onIgnore: (candidateId: string) => void | Promise<void>;
   onDeletionComplete?: (videoId: string, title: string) => Promise<void> | void;
   onBulkDeletionComplete?: (count: number) => Promise<void> | void;
 };
@@ -735,6 +736,7 @@ function EmbeddedComparison({
 
 export function DuplicateReview({
   candidates,
+  onIgnore,
   onDeletionComplete,
   onBulkDeletionComplete,
 }: DuplicateReviewProps) {
@@ -1166,7 +1168,16 @@ export function DuplicateReview({
                     </span>
                     <p>{candidate.evidence}</p>
                   </div>
-                  <span className="duplicate-group__count">{decision}</span>
+                  <div className="duplicate-group__actions">
+                    <span className="duplicate-group__count">{decision}</span>
+                    <button
+                      className="secondary-action"
+                      onClick={() => void onIgnore(candidate.id)}
+                      type="button"
+                    >
+                      Ignore match
+                    </button>
+                  </div>
                 </header>
                 {isUploadedTitle ? (
                   <EmbeddedComparison

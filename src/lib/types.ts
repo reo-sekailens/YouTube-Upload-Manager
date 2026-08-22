@@ -19,6 +19,7 @@ export type ManualUploadSettings = {
   visibility: UploadVisibility;
   playlistId?: string;
   playlistTitle?: string;
+  deleteSourceAfterUpload: boolean;
 };
 
 /** Device-wide default used to prefill, never hide, the manual intake declaration. */
@@ -50,6 +51,8 @@ export type UploadItem = {
   uploadStartedAt?: string;
   /** Native, acknowledged transfer rate. Absent until enough upload progress is measured. */
   transferBytesPerSecond?: number;
+  deleteSourceAfterUpload?: boolean;
+  sourceDeleteStatus?: "pending" | "deleted" | "retained";
   videoId?: string;
   detail?: string;
   updatedAt: string;
@@ -80,6 +83,10 @@ export type UploadTitleDuplicateDecision = "ignore" | "skip";
 export type PreIngestDuplicateFile = {
   /** Opaque, short-lived native handle for deleting only this verified desktop source file. */
   localDeleteToken?: string;
+  /** A persisted local match has an eligible desktop source; native code still revalidates it before deletion. */
+  canDeleteLocalDuplicate: boolean;
+  /** Stable persisted ordinal used by native delete preparation and UI selection. */
+  ordinal: number;
   fileName: string;
   sizeBytes: number;
   localMatches: Array<{ title: string; fileName: string; status: string }>;
@@ -115,6 +122,7 @@ export type FolderMonitorSettings = {
   channelName?: string;
   visibility: FolderMonitorVisibility;
   madeForKids: boolean;
+  deleteSourceAfterUpload?: boolean;
   playlistId?: string;
   playlistTitle?: string;
   status: string;

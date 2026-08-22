@@ -1,5 +1,22 @@
 import { invoke, isTauri as detectTauri } from "@tauri-apps/api/core";
-import type { ConnectionSettings, DashboardSnapshot, DeletionRequest, FolderMonitorSettings, FolderMonitorVisibility, ManualUploadDefaults, ManualUploadSettings, PortableArchiveReceipt, PreIngestDuplicateScan, RemoteVideo, UploadItem, UploadTitleDuplicate, UploadTitleDuplicateDecision, UploadVisibility, YouTubeConnectionStart, YouTubePlaylist } from "./types";
+import type {
+  ConnectionSettings,
+  DashboardSnapshot,
+  DeletionRequest,
+  FolderMonitorSettings,
+  FolderMonitorVisibility,
+  ManualUploadDefaults,
+  ManualUploadSettings,
+  PortableArchiveReceipt,
+  PreIngestDuplicateScan,
+  RemoteVideo,
+  UploadItem,
+  UploadTitleDuplicate,
+  UploadTitleDuplicateDecision,
+  UploadVisibility,
+  YouTubeConnectionStart,
+  YouTubePlaylist,
+} from "./types";
 
 // Use Tauri's public runtime detector. Internal bridge properties are not an
 // application capability contract and can leave interactive controls disabled.
@@ -14,7 +31,10 @@ const googleSetupBrowserUrls = {
 
 /** Opens an isolated app window directly on YouTube; this app never sees credentials entered there. */
 export async function openYouTubeAccountBrowser(): Promise<void> {
-  if (!isTauri) throw new Error("The YouTube account browser is available only in the signed desktop app.");
+  if (!isTauri)
+    throw new Error(
+      "The YouTube account browser is available only in the signed desktop app.",
+    );
   const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
   const existing = await WebviewWindow.getByLabel(youtubeAccountBrowserLabel);
   if (existing) {
@@ -32,13 +52,20 @@ export async function openYouTubeAccountBrowser(): Promise<void> {
   });
   await new Promise<void>((resolve, reject) => {
     void accountWindow.once("tauri://created", () => resolve());
-    void accountWindow.once("tauri://error", (event) => reject(new Error(String(event.payload))));
+    void accountWindow.once("tauri://error", (event) =>
+      reject(new Error(String(event.payload))),
+    );
   });
 }
 
 /** Opens a separate, unprivileged Google page for an operator-owned setup action. */
-export async function openGoogleSetupBrowser(destination: keyof typeof googleSetupBrowserUrls): Promise<void> {
-  if (!isTauri) throw new Error("Google setup is available only in the signed desktop app.");
+export async function openGoogleSetupBrowser(
+  destination: keyof typeof googleSetupBrowserUrls,
+): Promise<void> {
+  if (!isTauri)
+    throw new Error(
+      "Google setup is available only in the signed desktop app.",
+    );
   const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
   const label = `google-setup-${destination}`;
   const existing = await WebviewWindow.getByLabel(label);
@@ -49,7 +76,8 @@ export async function openGoogleSetupBrowser(destination: keyof typeof googleSet
   }
   const setupWindow = new WebviewWindow(label, {
     url: googleSetupBrowserUrls[destination],
-    title: destination === "account" ? "Google account setup" : "Google Cloud setup",
+    title:
+      destination === "account" ? "Google account setup" : "Google Cloud setup",
     width: 1_120,
     height: 760,
     minWidth: 720,
@@ -57,16 +85,22 @@ export async function openGoogleSetupBrowser(destination: keyof typeof googleSet
   });
   await new Promise<void>((resolve, reject) => {
     void setupWindow.once("tauri://created", () => resolve());
-    void setupWindow.once("tauri://error", (event) => reject(new Error(String(event.payload))));
+    void setupWindow.once("tauri://error", (event) =>
+      reject(new Error(String(event.payload))),
+    );
   });
 }
 
 export async function loadSnapshot(): Promise<DashboardSnapshot> {
-  if (!isTauri) return { items: [], duplicates: [], pendingTitleDuplicates: [] };
+  if (!isTauri)
+    return { items: [], duplicates: [], pendingTitleDuplicates: [] };
   return invoke<DashboardSnapshot>("dashboard_snapshot");
 }
 
-export async function importAsset(path: string, settings: ManualUploadSettings): Promise<UploadItem> {
+export async function importAsset(
+  path: string,
+  settings: ManualUploadSettings,
+): Promise<UploadItem> {
   return invoke<UploadItem>("import_asset", { path, settings });
 }
 
@@ -80,8 +114,12 @@ export async function loadManualUploadDefaults(): Promise<ManualUploadDefaults> 
   return invoke<ManualUploadDefaults>("load_manual_upload_defaults");
 }
 
-export async function saveManualUploadDefaults(madeForKids: boolean): Promise<ManualUploadDefaults> {
-  return invoke<ManualUploadDefaults>("save_manual_upload_defaults", { madeForKids });
+export async function saveManualUploadDefaults(
+  madeForKids: boolean,
+): Promise<ManualUploadDefaults> {
+  return invoke<ManualUploadDefaults>("save_manual_upload_defaults", {
+    madeForKids,
+  });
 }
 
 export async function queueItem(id: string): Promise<UploadItem> {
@@ -93,41 +131,118 @@ export async function clearUploadQueue(): Promise<number> {
 }
 
 /** Synchronizes the connected channel's inventory, then returns title matches for these local items. */
-export async function checkUploadTitleDuplicates(itemIds: string[]): Promise<UploadTitleDuplicate[]> {
+export async function checkUploadTitleDuplicates(
+  itemIds: string[],
+): Promise<UploadTitleDuplicate[]> {
   if (!isTauri || itemIds.length === 0) return [];
-  return invoke<UploadTitleDuplicate[]>("check_upload_title_duplicates", { itemIds });
+  return invoke<UploadTitleDuplicate[]>("check_upload_title_duplicates", {
+    itemIds,
+  });
+}
+
+/** Hides one reviewed false-positive match locally until the operator explicitly re-audits ignored matches. */
+export async function ignoreDuplicateCandidate(
+  candidateId: string,
+): Promise<void> {
+  return invoke<void>("ignore_duplicate_candidate", { candidateId });
+}
+
+/** Restores all persisted ignored matches so the next dedupe review includes them again. */
+export async function reAuditIgnoredDuplicateCandidates(): Promise<number> {
+  return invoke<number>("re_audit_ignored_duplicate_candidates");
 }
 
 /** Starts a crash-resumable pre-ingest job. Light compares filenames; deep streams SHA-256 locally. */
-export async function preflightDuplicateFiles(paths: string[], mode: "light" | "deep" = "light"): Promise<PreIngestDuplicateScan> {
-  if (!isTauri || paths.length === 0) return { id: "", mode, status: "complete", totalFiles: 0, completedFiles: 0, files: [], youtubeTitleChecked: false };
-  return invoke<PreIngestDuplicateScan>("start_preflight_duplicate_files", { paths, mode });
+export async function preflightDuplicateFiles(
+  paths: string[],
+  mode: "light" | "deep" = "light",
+): Promise<PreIngestDuplicateScan> {
+  if (!isTauri || paths.length === 0)
+    return {
+      id: "",
+      mode,
+      status: "complete",
+      totalFiles: 0,
+      completedFiles: 0,
+      files: [],
+      youtubeTitleChecked: false,
+    };
+  return invoke<PreIngestDuplicateScan>("start_preflight_duplicate_files", {
+    paths,
+    mode,
+  });
 }
 
 /** Reads the latest checkpointed results for a persistent pre-ingest job. */
-export async function loadPreflightDuplicateScan(jobId: string): Promise<PreIngestDuplicateScan> {
-  return invoke<PreIngestDuplicateScan>("load_preflight_duplicate_scan", { jobId });
+export async function loadPreflightDuplicateScan(
+  jobId: string,
+): Promise<PreIngestDuplicateScan> {
+  return invoke<PreIngestDuplicateScan>("load_preflight_duplicate_scan", {
+    jobId,
+  });
 }
 
-export async function cancelPreflightDuplicateScan(jobId: string): Promise<void> {
+export async function cancelPreflightDuplicateScan(
+  jobId: string,
+): Promise<void> {
   return invoke<void>("cancel_preflight_duplicate_scan", { jobId });
 }
 
+/** Revalidates a light or deep local match and returns a short-lived native deletion token. */
+export async function preparePreflightLocalDeleteFile(
+  jobId: string,
+  ordinal: number,
+): Promise<string> {
+  if (!isTauri)
+    throw new Error(
+      "Local duplicate deletion is available only in the signed desktop app.",
+    );
+  return invoke<string>("prepare_preflight_local_delete_file", { jobId, ordinal });
+}
+
 /** Permanently deletes one freshly verified desktop source file after exact filename confirmation. */
-export async function deletePreflightDuplicateFile(token: string, confirmation: string): Promise<void> {
-  if (!isTauri) throw new Error("Local duplicate deletion is available only in the signed desktop app.");
-  return invoke<void>("delete_preflight_duplicate_file", { token, confirmation });
+export async function deletePreflightDuplicateFile(
+  token: string,
+  confirmation: string,
+): Promise<void> {
+  if (!isTauri)
+    throw new Error(
+      "Local duplicate deletion is available only in the signed desktop app.",
+    );
+  return invoke<void>("delete_preflight_duplicate_file", {
+    token,
+    confirmation,
+  });
 }
 
 /** Persists an explicit decision for one or more title matches. Ignored matches can then be queued. */
-export async function resolveUploadTitleDuplicates(itemIds: string[], action: UploadTitleDuplicateDecision): Promise<UploadItem[]> {
+export async function resolveUploadTitleDuplicates(
+  itemIds: string[],
+  action: UploadTitleDuplicateDecision,
+): Promise<UploadItem[]> {
   if (!isTauri || itemIds.length === 0) return [];
-  return invoke<UploadItem[]>("resolve_upload_title_duplicates", { itemIds, action });
+  return invoke<UploadItem[]>("resolve_upload_title_duplicates", {
+    itemIds,
+    action,
+  });
 }
 
 /** Saves the operator-selected visibility on one manual upload before it is queued. */
-export async function setItemVisibility(id: string, visibility: UploadVisibility): Promise<UploadItem> {
+export async function setItemVisibility(
+  id: string,
+  visibility: UploadVisibility,
+): Promise<UploadItem> {
   return invoke<UploadItem>("set_item_visibility", { id, visibility });
+}
+
+export async function setItemDeleteSourceAfterUpload(
+  id: string,
+  deleteSourceAfterUpload: boolean,
+): Promise<UploadItem> {
+  return invoke<UploadItem>("set_item_delete_source_after_upload", {
+    id,
+    deleteSourceAfterUpload,
+  });
 }
 
 export async function reconcileQueue(): Promise<UploadItem[]> {
@@ -148,6 +263,7 @@ export async function loadFolderMonitorSettings(): Promise<FolderMonitorSettings
       enabled: false,
       visibility: "private",
       madeForKids: false,
+      deleteSourceAfterUpload: false,
       status: "disabled",
       detail: "Folder monitoring is available only in the signed desktop app.",
     };
@@ -155,8 +271,22 @@ export async function loadFolderMonitorSettings(): Promise<FolderMonitorSettings
   return invoke<FolderMonitorSettings>("load_folder_monitor_settings");
 }
 
-export async function enableFolderMonitor(path: string, visibility: FolderMonitorVisibility, madeForKids: boolean, playlistId?: string, playlistTitle?: string): Promise<FolderMonitorSettings> {
-  return invoke<FolderMonitorSettings>("enable_folder_monitor", { path, visibility, madeForKids, playlistId, playlistTitle });
+export async function enableFolderMonitor(
+  path: string,
+  visibility: FolderMonitorVisibility,
+  madeForKids: boolean,
+  deleteSourceAfterUpload: boolean,
+  playlistId?: string,
+  playlistTitle?: string,
+): Promise<FolderMonitorSettings> {
+  return invoke<FolderMonitorSettings>("enable_folder_monitor", {
+    path,
+    visibility,
+    madeForKids,
+    deleteSourceAfterUpload,
+    playlistId,
+    playlistTitle,
+  });
 }
 
 export async function disableFolderMonitor(): Promise<FolderMonitorSettings> {
@@ -173,7 +303,9 @@ export async function loadConnectionSettings(): Promise<ConnectionSettings> {
 }
 
 /** Parses a downloaded Google Desktop OAuth JSON file only in Rust; its secret stays in OS-protected storage. */
-export async function importDesktopOAuthClient(path: string): Promise<ConnectionSettings> {
+export async function importDesktopOAuthClient(
+  path: string,
+): Promise<ConnectionSettings> {
   return invoke<ConnectionSettings>("import_desktop_oauth_client", { path });
 }
 
@@ -195,8 +327,14 @@ export async function listDeletionRequests(): Promise<DeletionRequest[]> {
   return invoke<DeletionRequest[]>("list_deletion_requests");
 }
 
-export async function requestVideoDeletion(videoId: string, confirmation: string): Promise<DeletionRequest> {
-  return invoke<DeletionRequest>("request_video_deletion", { videoId, confirmation });
+export async function requestVideoDeletion(
+  videoId: string,
+  confirmation: string,
+): Promise<DeletionRequest> {
+  return invoke<DeletionRequest>("request_video_deletion", {
+    videoId,
+    confirmation,
+  });
 }
 
 export async function cancelDeletionRequest(id: string): Promise<void> {
@@ -213,12 +351,16 @@ export async function beginDeletionAuthorization(): Promise<YouTubeConnectionSta
 }
 
 /** Writes compact dedupe metadata only; credentials, source paths, sessions, and media stay on this device. */
-export async function exportPortableArchive(path: string): Promise<PortableArchiveReceipt> {
+export async function exportPortableArchive(
+  path: string,
+): Promise<PortableArchiveReceipt> {
   return invoke<PortableArchiveReceipt>("export_portable_archive", { path });
 }
 
 /** Merges compact dedupe metadata from another install without importing media or OAuth credentials. */
-export async function importPortableArchive(path: string): Promise<PortableArchiveReceipt> {
+export async function importPortableArchive(
+  path: string,
+): Promise<PortableArchiveReceipt> {
   return invoke<PortableArchiveReceipt>("import_portable_archive", { path });
 }
 
@@ -233,6 +375,12 @@ export async function disableDeletionSudoMode(): Promise<ConnectionSettings> {
 }
 
 /** Executes one already-reviewed request after its video ID is typed again. */
-export async function executeDeletionRequest(id: string, confirmation: string): Promise<DeletionRequest> {
-  return invoke<DeletionRequest>("execute_deletion_request", { id, confirmation });
+export async function executeDeletionRequest(
+  id: string,
+  confirmation: string,
+): Promise<DeletionRequest> {
+  return invoke<DeletionRequest>("execute_deletion_request", {
+    id,
+    confirmation,
+  });
 }

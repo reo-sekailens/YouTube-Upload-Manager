@@ -23,12 +23,39 @@ authorize and start.
 
 ## Capabilities
 
-- Import videos into a persistent, device-local workspace and queue.
-- Recover interrupted imports and resumable uploads from saved checkpoints.
-- Connect an operator-authorized YouTube channel through installed-app OAuth.
-- Upload private videos directly to YouTube from the native application.
-- Sync the channel library locally and review explainable duplicate candidates.
-- Create typed-ID deletion requests, then cancel or separately authorize them.
+- Guided first-open Google Cloud setup: create your own project, enable the
+  YouTube Data API, create a Desktop OAuth client, and import its JSON.
+- Native, multi-file intake with a required Made for Kids declaration,
+  visibility, and optional owner-authorized playlist selection.
+- Device-local managed media, resumable YouTube uploads, progress/ETA, daily
+  quota pause recovery, and safe startup reconciliation.
+- Optional watched-folder intake for private or unlisted videos only, with
+  stable-file checks, channel binding, and duplicate withholding.
+- Duplicate review with local SHA-256 evidence, synchronized uploaded-title
+  evidence, lazy YouTube comparison players, search, and audited decisions.
+- Pre-ingest checks for arbitrary files including `.insv` and `.lrv`: desktop
+  drops default to fast filename matching, while deep SHA-256 matching is
+  opt-in and checkpointed per file.
+- Compact gzip export/import for duplicate hashes and YouTube inventory; media,
+  source paths, refresh tokens, client secrets, and upload sessions are never
+  exported.
+- Typed-ID YouTube deletion review with separate authorization, ownership
+  verification, a temporary deletion mode, and durable recovery receipts.
+- Explicit cancellation and queue clearing for upload work, pre-ingest dedupe,
+  and pending/recoverable deletion requests. Clearing never deletes managed
+  media or changes YouTube videos.
+
+## Responsive native architecture
+
+The interface is presentation-only. Hashing, managed-file copying, folder
+scans, queue recovery, archive compression, and Google/YouTube API work run in
+native background workers, so a large import, deep match, inventory sync, or
+remote operation does not freeze the UI.
+
+All multi-step work is durable and crash-safe. Imports, uploads, watched-folder
+observations, pre-ingest jobs, and inventory refreshes resume from their
+persisted checkpoints. Remote ambiguity is retained for reconciliation rather
+than blindly repeating an operation.
 
 ## Quick start
 
@@ -57,18 +84,29 @@ npm run test
 npm run build
 ```
 
+Build a Windows x64 NSIS installer:
+
+```sh
+npm run tauri build -- --bundles nsis
+```
+
+The installer is emitted under `src-tauri/target/release/bundle/nsis/`. Build
+artifacts are unsigned unless a separate signing process is configured.
+
 ## Documentation
 
 - [Project home](docs/index.md)
 - [Privacy policy](docs/privacy.md)
 - [Terms of service](docs/terms.md)
+- [GitHub Wiki](../../wiki) (setup, operations, recovery, and security guides)
 - [Google OAuth for installed apps](https://developers.google.com/identity/protocols/oauth2/native-app)
 - [YouTube Data API](https://developers.google.com/youtube/v3)
 
 ## Status
 
-The local app, persistent queue, native OAuth path, resumable-upload workflow,
-inventory sync, and deletion-request review are implemented and locally tested.
+The local app, persistent queue, native OAuth path, background-worker
+isolation, resumable-upload workflow, inventory sync, duplicate review,
+export/import, and deletion-request review are implemented and locally tested.
 Live YouTube verification is intentionally separate: it requires an operator's
 authorized test channel.
 
@@ -78,7 +116,8 @@ OAuth credentials and upload checkpoints are handled by the native layer and
 kept out of the webview. The queue, managed media, local inventory, and audit
 records stay on the device. Deletion is never automatic: an operator must
 select the video, type its exact ID, and pass a fresh authorization and
-ownership check before a YouTube delete operation can occur.
+ownership check before a YouTube delete operation can occur. Cancellation is
+also local and auditable; it stops future work without deleting operator media.
 
 This project uses official Google OAuth and YouTube APIs only. It does not
 bypass account restrictions, quotas, copyright rules, or YouTube policies.
