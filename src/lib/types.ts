@@ -89,6 +89,17 @@ export type PreIngestDuplicateFile = {
   ordinal: number;
   fileName: string;
   sizeBytes: number;
+  /** Locally derived source-file facts; source paths remain native-only. */
+  localMetadata: {
+    fileType?: string;
+    modifiedAt?: string;
+    durationSeconds?: number;
+    sizeBytes?: number;
+    containerFormat?: string;
+    bitRate?: string;
+    streams: Array<{ kind: string; label: string; fields: Array<{ label: string; value: string }> }>;
+    metadataFields: Array<{ label: string; value: string }>;
+  };
   localMatches: Array<{ title: string; fileName: string; status: string }>;
   droppedDuplicateFileNames: string[];
   uploadedTitleMatches: Array<{
@@ -108,7 +119,13 @@ export type PreIngestDuplicateScan = {
   status: "queued" | "running" | "syncing" | "complete" | string;
   totalFiles: number;
   completedFiles: number;
+  /** The persisted file currently being checked, if native work is active. */
+  currentFileName?: string;
+  /** FFprobe metadata still being collected independently of duplicate matching. */
+  pendingMetadataFiles: number;
   files: PreIngestDuplicateFile[];
+  /** Safe, persisted operation events. They contain filenames but never source paths. */
+  activityLog: Array<{ fileName?: string; message: string; createdAt: string }>;
   youtubeTitleChecked: boolean;
   youtubeCheckDetail?: string;
 };

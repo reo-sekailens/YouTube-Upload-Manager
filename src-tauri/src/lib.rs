@@ -12,6 +12,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
+    process::Command,
     sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant, UNIX_EPOCH},
@@ -22,12 +23,18 @@ use uuid::Uuid;
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 const FOLDER_MONITOR_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const QUOTA_RESUME_POLL_INTERVAL: Duration = Duration::from_secs(30);
 const DAILY_UPLOAD_LIMIT_MARKER: &str = "youtube_daily_upload_limit";
 const UPLOAD_CANCELLED_MARKER: &str = "upload_cancelled_locally";
 const DELETION_SUDO_MODE_MINUTES: i64 = 15;
+const DIAGNOSTIC_REPORT_EVENT_LIMIT: i64 = 30;
+const PANIC_MARKER_FILE: &str = "last-panic-marker";
+const WEBVIEW_ERROR_MARKER_FILE: &str = "last-webview-error-marker";
+const APP_RELEASE_CHANNEL: &str = env!("APP_RELEASE_CHANNEL");
 const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &[
     "3g2", "3gp", "avi", "flv", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "webm", "wmv",
 ];
@@ -61,7 +68,6 @@ fn cancel_connection_attempt(
 #[derive(Clone)]
 struct PreflightLocalDeleteTarget {
     path: PathBuf,
-    digest: String,
     file_name: String,
     created_at: Instant,
 }
@@ -142,9 +148,20 @@ struct PreIngestDuplicateScan {
     status: String,
     total_files: u64,
     completed_files: u64,
+    current_file_name: Option<String>,
+    pending_metadata_files: u64,
     files: Vec<PreIngestDuplicateFile>,
+    activity_log: Vec<PreIngestActivityLogEntry>,
     youtube_title_checked: bool,
     youtube_check_detail: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreIngestActivityLogEntry {
+    file_name: Option<String>,
+    message: String,
+    created_at: String,
 }
 
 #[derive(Serialize)]
@@ -155,10 +172,52 @@ struct PreIngestDuplicateFile {
     ordinal: u64,
     file_name: String,
     size_bytes: u64,
+    local_metadata: PreIngestLocalMetadata,
     local_matches: Vec<PreIngestLocalMatch>,
     dropped_duplicate_file_names: Vec<String>,
     uploaded_title_matches: Vec<PreIngestUploadedTitleMatch>,
     error: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreIngestLocalMetadata {
+    file_type: Option<String>,
+    modified_at: Option<String>,
+    duration_seconds: Option<f64>,
+    size_bytes: Option<u64>,
+    container_format: Option<String>,
+    bit_rate: Option<String>,
+    streams: Vec<PreIngestMetadataStream>,
+    metadata_fields: Vec<PreIngestMetadataField>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreIngestMetadataField {
+    label: String,
+    value: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreIngestMetadataStream {
+    kind: String,
+    label: String,
+    fields: Vec<PreIngestMetadataField>,
+}
+
+fn unavailable_preflight_local_metadata(file_type: Option<String>) -> PreIngestLocalMetadata {
+    PreIngestLocalMetadata {
+        file_type,
+        modified_at: None,
+        duration_seconds: None,
+        size_bytes: None,
+        container_format: None,
+        bit_rate: None,
+        streams: Vec::new(),
+        metadata_fields: Vec::new(),
+    }
 }
 
 #[derive(Serialize)]
@@ -401,10 +460,21 @@ fn database(state: &AppState) -> Result<Connection, String> {
               digest TEXT,
               status TEXT NOT NULL,
               error TEXT,
+              metadata_json TEXT,
+              metadata_status TEXT NOT NULL DEFAULT 'pending',
               PRIMARY KEY(job_id, ordinal),
               FOREIGN KEY(job_id) REFERENCES preflight_scan_jobs(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS preflight_scan_files_job_status_idx ON preflight_scan_files(job_id, status);
+            CREATE TABLE IF NOT EXISTS preflight_scan_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              job_id TEXT NOT NULL,
+              file_name TEXT,
+              message TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(job_id) REFERENCES preflight_scan_jobs(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS preflight_scan_events_job_id_idx ON preflight_scan_events(job_id, id);
             CREATE TABLE IF NOT EXISTS deletion_requests (
               id TEXT PRIMARY KEY NOT NULL,
               video_id TEXT NOT NULL UNIQUE,
@@ -489,6 +559,8 @@ fn database(state: &AppState) -> Result<Connection, String> {
         "ALTER TABLE upload_items ADD COLUMN delete_source_after_upload INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE upload_items ADD COLUMN source_delete_status TEXT",
         "ALTER TABLE folder_monitor_settings ADD COLUMN delete_source_after_upload INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE preflight_scan_files ADD COLUMN metadata_json TEXT",
+        "ALTER TABLE preflight_scan_files ADD COLUMN metadata_status TEXT NOT NULL DEFAULT 'pending'",
     ] {
         let _ = connection.execute(migration, []);
     }
@@ -613,6 +685,311 @@ fn import_portable_archive_impl(
 
 fn now() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn panic_marker_path() -> &'static OnceLock<PathBuf> {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    &PATH
+}
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CrashRecoveryStatus {
+    crash_detected: bool,
+    detected_at: Option<String>,
+    failure_kind: Option<String>,
+}
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AppReleaseIdentity {
+    version: String,
+    channel: String,
+    build_profile: String,
+}
+
+fn release_identity() -> AppReleaseIdentity {
+    AppReleaseIdentity {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        channel: APP_RELEASE_CHANNEL.to_string(),
+        build_profile: if cfg!(debug_assertions) {
+            "debug".to_string()
+        } else {
+            "release".to_string()
+        },
+    }
+}
+
+fn marker_timestamp(path: &Path, key: &str) -> Option<String> {
+    // Marker files are intentionally tiny and contain no error or provider
+    // details. Parse strictly so a corrupted local file cannot surface data in
+    // the webview or a GitHub report.
+    let mut marker = String::new();
+    File::open(path)
+        .ok()?
+        .take(256)
+        .read_to_string(&mut marker)
+        .ok()?;
+    let timestamp = marker.trim().strip_prefix(key)?;
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc).to_rfc3339())
+}
+
+fn crash_recovery_status_for_paths(
+    panic_path: &Path,
+    webview_error_path: &Path,
+) -> CrashRecoveryStatus {
+    let markers = [
+        (marker_timestamp(panic_path, "panic_at="), "Native panic"),
+        (
+            marker_timestamp(webview_error_path, "webview_error_at="),
+            "Webview error",
+        ),
+    ];
+    let latest_marker = markers
+        .into_iter()
+        .filter_map(|(detected_at, failure_kind)| {
+            detected_at.map(|detected_at| (detected_at, failure_kind))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0));
+    CrashRecoveryStatus {
+        crash_detected: latest_marker.is_some(),
+        detected_at: latest_marker
+            .as_ref()
+            .map(|(detected_at, _)| detected_at.clone()),
+        failure_kind: latest_marker.map(|(_, failure_kind)| failure_kind.to_string()),
+    }
+}
+
+fn crash_recovery_status(state: &AppState) -> CrashRecoveryStatus {
+    crash_recovery_status_for_paths(
+        &state.database_path.with_file_name(PANIC_MARKER_FILE),
+        &state
+            .database_path
+            .with_file_name(WEBVIEW_ERROR_MARKER_FILE),
+    )
+}
+
+fn record_webview_error_impl(state: &AppState) -> Result<(), String> {
+    // Do not accept an error message from the webview: it might contain
+    // account data, local paths, OAuth material, or provider responses.
+    fs::write(
+        state
+            .database_path
+            .with_file_name(WEBVIEW_ERROR_MARKER_FILE),
+        format!("webview_error_at={}\n", now()),
+    )
+    .map_err(|_| "Unable to persist the local crash recovery marker.".to_string())
+}
+
+fn acknowledge_crash_recovery_impl(state: &AppState) -> Result<(), String> {
+    for path in [
+        state.database_path.with_file_name(PANIC_MARKER_FILE),
+        state
+            .database_path
+            .with_file_name(WEBVIEW_ERROR_MARKER_FILE),
+    ] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("Unable to clear the local crash recovery marker.".into()),
+        }
+    }
+    Ok(())
+}
+
+/// Persist only that a panic occurred and when it happened. Panic payloads can
+/// contain credentials, paths, or provider responses, so they are never saved.
+fn install_panic_marker(path: PathBuf) {
+    if panic_marker_path().set(path).is_err() {
+        return;
+    }
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(marker_path) = panic_marker_path().get() {
+            let _ = fs::write(marker_path, format!("panic_at={}\n", now()));
+        }
+        previous_hook(info);
+    }));
+}
+
+fn diagnostic_detail(value: &str) -> String {
+    let normalized = value.to_ascii_lowercase();
+    let contains_sensitive_value = [
+        "token",
+        "secret",
+        "password",
+        "authorization",
+        "bearer ",
+        "cookie",
+        "verifier",
+        "client_id",
+        "refresh_",
+        "access_",
+        "http://",
+        "https://",
+        "\\\\",
+        ":\\",
+        "/users/",
+        "/home/",
+        "/var/",
+        "/private/",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle));
+    let contains_channel_id = value.split_whitespace().any(|word| {
+        let word = word.trim_matches(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '-' && character != '_'
+        });
+        word.starts_with("UC") && word.len() >= 20
+    });
+    if contains_sensitive_value || contains_channel_id {
+        "[redacted sensitive detail]".into()
+    } else {
+        value.chars().take(500).collect()
+    }
+}
+
+fn safe_diagnostic_issue_name(kind: &str) -> String {
+    let is_safe = !kind.is_empty()
+        && kind.len() <= 80
+        && kind
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    is_safe
+        .then(|| kind.to_string())
+        .unwrap_or_else(|| "unclassified_local_event".into())
+}
+
+fn is_diagnostic_issue_name(kind: &str) -> bool {
+    [
+        "error",
+        "failed",
+        "warning",
+        "crash",
+        "interrupted",
+        "cancelled",
+    ]
+    .iter()
+    .any(|needle| kind.contains(needle))
+}
+
+fn diagnostic_report_impl(state: &AppState) -> Result<String, String> {
+    let connection =
+        database(state).map_err(|_| "Unable to read the local diagnostic data.".to_string())?;
+    let release_identity = release_identity();
+    let mut report = format!(
+        "# YouTube Upload Manager diagnostic report\n\n## App and system\n\n- App version: {}\n- Release channel: {}\n- Build profile: {}\n- Operating system: {} ({})\n- CPU architecture: {}\n- Generated at: {}\n- Local-only diagnostic report: yes\n\n## Connection and queue\n\n",
+        release_identity.version,
+        release_identity.channel,
+        release_identity.build_profile,
+        std::env::consts::OS,
+        std::env::consts::FAMILY,
+        std::env::consts::ARCH,
+        now(),
+    );
+    let (oauth_client_imported, youtube_connected): (bool, bool) = connection
+        .query_row(
+            "SELECT oauth_client_id IS NOT NULL, active_channel IS NOT NULL FROM connection_settings WHERE singleton = 1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
+        )
+        .optional()
+        .map_err(|_| "Unable to read the local diagnostic data.".to_string())?
+        .unwrap_or((false, false));
+    report.push_str(&format!(
+        "- Desktop OAuth client imported: {}\n- YouTube connection active: {}\n",
+        if oauth_client_imported { "yes" } else { "no" },
+        if youtube_connected { "yes" } else { "no" },
+    ));
+    let mut status_statement = connection
+        .prepare("SELECT status, COUNT(*) FROM upload_items GROUP BY status ORDER BY status")
+        .map_err(|_| "Unable to read the local diagnostic data.".to_string())?;
+    let statuses = status_statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|_| "Unable to read the local diagnostic data.".to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "Unable to read the local diagnostic data.".to_string())?;
+    if statuses.is_empty() {
+        report.push_str("- Queue: empty\n");
+    } else {
+        report.push_str("- Queue counts:\n");
+        for (status, count) in statuses {
+            report.push_str(&format!("  - `{status}`: {count}\n"));
+        }
+    }
+
+    report.push_str("\n## Crash marker\n\n");
+    let crash_recovery = crash_recovery_status(state);
+    if crash_recovery.crash_detected {
+        report.push_str(&format!(
+            "- `{}` was detected at {}.\n",
+            crash_recovery
+                .failure_kind
+                .as_deref()
+                .unwrap_or("Unclassified crash"),
+            crash_recovery
+                .detected_at
+                .as_deref()
+                .unwrap_or("an unknown time")
+        ));
+    } else {
+        report.push_str("- No unacknowledged app crash or webview error recorded.\n");
+    }
+
+    report.push_str("\n## Recent warnings, errors, and audit events\n\n");
+    let mut events_statement = connection
+        .prepare(
+            "SELECT kind, detail, created_at FROM audit_events ORDER BY created_at DESC LIMIT ?1",
+        )
+        .map_err(|_| "Unable to read the local diagnostic data.".to_string())?;
+    let events = events_statement
+        .query_map([DIAGNOSTIC_REPORT_EVENT_LIMIT], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|_| "Unable to read the local diagnostic data.".to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "Unable to read the local diagnostic data.".to_string())?;
+    let mut issue_names = events
+        .iter()
+        .filter_map(|(kind, _, _)| {
+            is_diagnostic_issue_name(kind).then(|| safe_diagnostic_issue_name(kind))
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Some(failure_kind) = crash_recovery.failure_kind.as_deref() {
+        issue_names.push(failure_kind.to_string());
+    }
+    issue_names.sort();
+    issue_names.dedup();
+    report.push_str("\n## Detected crash, error, and warning names\n\n");
+    if issue_names.is_empty() {
+        report.push_str("- No persisted crash, error, or warning names.\n");
+    } else {
+        for issue_name in issue_names {
+            report.push_str(&format!("- `{issue_name}`\n"));
+        }
+    }
+    if events.is_empty() {
+        report.push_str("- No persisted audit events.\n");
+    } else {
+        for (kind, detail, created_at) in events {
+            let detail = detail
+                .map(|value| diagnostic_detail(&value))
+                .unwrap_or_else(|| "No detail recorded.".into());
+            report.push_str(&format!("- {created_at} — `{kind}` — {detail}\n"));
+        }
+    }
+    report.push_str("\n## Reproduction steps\n\n1. Describe what you were doing when the problem occurred.\n2. Include the expected result and the actual result.\n3. Attach screenshots only after checking that they do not expose account or video information.\n");
+    Ok(report)
 }
 
 fn deletion_sudo_until() -> String {
@@ -755,17 +1132,14 @@ fn secure_store_available() -> bool {
     CredentialEntry::store_status().is_ok()
 }
 
+const SECURE_STORE_SERVICE: &str = "com.sekailens.youtube-upload-manager";
+
 fn refresh_token_entry() -> Result<CredentialEntry, String> {
-    CredentialEntry::new("ph.furries.youtube-mass-uploader", "youtube-refresh-token")
-        .map_err(user_error)
+    CredentialEntry::new(SECURE_STORE_SERVICE, "youtube-refresh-token").map_err(user_error)
 }
 
 fn oauth_client_secret_entry() -> Result<CredentialEntry, String> {
-    CredentialEntry::new(
-        "ph.furries.youtube-mass-uploader",
-        "youtube-oauth-client-secret",
-    )
-    .map_err(user_error)
+    CredentialEntry::new(SECURE_STORE_SERVICE, "youtube-oauth-client-secret").map_err(user_error)
 }
 
 fn configured_oauth_client_secret() -> Result<Option<String>, String> {
@@ -823,7 +1197,7 @@ fn clear_refresh_token() -> Result<(), String> {
 
 fn upload_session_entry(item_id: &str) -> Result<CredentialEntry, String> {
     CredentialEntry::new(
-        "ph.furries.youtube-mass-uploader",
+        SECURE_STORE_SERVICE,
         &format!("youtube-resumable-session-{item_id}"),
     )
     .map_err(user_error)
@@ -850,11 +1224,8 @@ fn confirmed_offset_from_range(range: Option<&str>) -> Result<u64, String> {
 }
 
 fn oauth_verifier_entry(state: &str) -> Result<CredentialEntry, String> {
-    CredentialEntry::new(
-        "ph.furries.youtube-mass-uploader",
-        &format!("youtube-oauth-pkce-{state}"),
-    )
-    .map_err(user_error)
+    CredentialEntry::new(SECURE_STORE_SERVICE, &format!("youtube-oauth-pkce-{state}"))
+        .map_err(user_error)
 }
 
 fn set_connection_detail(
@@ -1650,16 +2021,35 @@ fn youtube_json(
     path: &str,
     query: &[(&str, &str)],
 ) -> Result<serde_json::Value, String> {
-    reqwest::blocking::Client::new()
+    let response = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|_| "YouTube inventory sync could not be prepared.".to_string())?
         .get(format!("https://www.googleapis.com/youtube/v3/{path}"))
         .bearer_auth(access_token)
         .query(query)
         .send()
-        .map_err(|_| "YouTube inventory sync could not be reached.".to_string())?
-        .error_for_status()
-        .map_err(|_| "YouTube rejected the inventory request.".to_string())?
+        .map_err(|_| {
+            "YouTube inventory sync could not be reached. Check your connection and try again."
+                .to_string()
+        })?;
+    if !response.status().is_success() {
+        return Err(youtube_inventory_http_error(response.status().as_u16()));
+    }
+    response
         .json()
         .map_err(|_| "YouTube returned an unreadable inventory response.".to_string())
+}
+
+fn youtube_inventory_http_error(status: u16) -> String {
+    match status {
+        401 => "YouTube authorization expired or was revoked. Connect YouTube again, then refresh the library.".into(),
+        403 => "Google denied library access. Confirm the YouTube Data API is enabled for this OAuth project, then reconnect YouTube and try again.".into(),
+        429 => "YouTube is rate-limiting library refreshes. Wait a little, then try again.".into(),
+        500..=599 => "YouTube is temporarily unavailable. Your last complete local library was kept; try refreshing again shortly.".into(),
+        _ => "YouTube rejected the library refresh. Your last complete local library was kept.".into(),
+    }
 }
 
 fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
@@ -2338,7 +2728,32 @@ fn create_preflight_scan_job(
         "preflight_scan_created",
         &format!("Created persistent {mode} pre-ingest duplicate scan"),
     )?;
+    record_preflight_scan_event(
+        &connection,
+        &id,
+        None,
+        if mode == "deep" {
+            "Deep SHA-256 duplicate check created."
+        } else {
+            "Light filename duplicate check created."
+        },
+    )?;
     Ok(id)
+}
+
+fn record_preflight_scan_event(
+    connection: &Connection,
+    job_id: &str,
+    file_name: Option<&str>,
+    message: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO preflight_scan_events (job_id, file_name, message, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![job_id, file_name, message, now()],
+        )
+        .map_err(user_error)?;
+    Ok(())
 }
 
 fn run_preflight_scan_job(state: &AppState, app: &AppHandle, job_id: &str) -> Result<(), String> {
@@ -2363,12 +2778,25 @@ fn run_preflight_scan_job(state: &AppState, app: &AppHandle, job_id: &str) -> Re
             return Ok(());
         }
         let next = connection.query_row(
-            "SELECT ordinal, source_locator FROM preflight_scan_files WHERE job_id = ?1 AND status = 'queued' ORDER BY ordinal ASC LIMIT 1",
-            [job_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            "SELECT ordinal, source_locator, file_name FROM preflight_scan_files WHERE job_id = ?1 AND status = 'queued' ORDER BY ordinal ASC LIMIT 1",
+            [job_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
         ).optional().map_err(user_error)?;
-        let Some((ordinal, locator)) = next else {
+        let Some((ordinal, locator, file_name)) = next else {
             break;
         };
+        if connection.execute("UPDATE preflight_scan_files SET status = 'running' WHERE job_id = ?1 AND ordinal = ?2 AND status = 'queued'", params![job_id, ordinal]).map_err(user_error)? == 0 {
+            continue;
+        }
+        record_preflight_scan_event(
+            &connection,
+            job_id,
+            Some(&file_name),
+            if mode == "deep" {
+                "Hashing file."
+            } else {
+                "Matching filename."
+            },
+        )?;
         let outcome = if mode == "light" {
             Ok((0_u64, None))
         } else {
@@ -2381,12 +2809,30 @@ fn run_preflight_scan_job(state: &AppState, app: &AppHandle, job_id: &str) -> Re
         match outcome {
             Ok((size_bytes, _digest)) if mode == "deep" && size_bytes == 0 => {
                 connection.execute("UPDATE preflight_scan_files SET status = 'error', size_bytes = 0, error = 'Empty files cannot be compared.' WHERE job_id = ?1 AND ordinal = ?2", params![job_id, ordinal]).map_err(user_error)?;
+                record_preflight_scan_event(
+                    &connection,
+                    job_id,
+                    Some(&file_name),
+                    "Skipped: empty files cannot be compared.",
+                )?;
             }
             Ok((size_bytes, digest)) => {
                 connection.execute("UPDATE preflight_scan_files SET status = 'complete', size_bytes = ?1, digest = ?2, error = NULL WHERE job_id = ?3 AND ordinal = ?4", params![size_bytes as i64, digest, job_id, ordinal]).map_err(user_error)?;
+                record_preflight_scan_event(
+                    &connection,
+                    job_id,
+                    Some(&file_name),
+                    "Duplicate check completed.",
+                )?;
             }
             Err(error) => {
                 connection.execute("UPDATE preflight_scan_files SET status = 'error', error = ?1 WHERE job_id = ?2 AND ordinal = ?3", params![error, job_id, ordinal]).map_err(user_error)?;
+                record_preflight_scan_event(
+                    &connection,
+                    job_id,
+                    Some(&file_name),
+                    "Duplicate check could not complete.",
+                )?;
             }
         }
         connection.execute("UPDATE preflight_scan_jobs SET completed_files = (SELECT COUNT(*) FROM preflight_scan_files WHERE job_id = ?1 AND status IN ('complete', 'error')), updated_at = ?2 WHERE id = ?1", params![job_id, now()]).map_err(user_error)?;
@@ -2421,6 +2867,67 @@ fn run_preflight_scan_job(state: &AppState, app: &AppHandle, job_id: &str) -> Re
         "preflight_scan_completed",
         &format!("Completed persistent {mode} pre-ingest duplicate scan"),
     )?;
+    queue_preflight_metadata_collection(state.clone(), job_id.to_string());
+    Ok(())
+}
+
+/// FFprobe enrichment is intentionally separate from duplicate matching. The
+/// scan's filename or hash result is ready immediately; each source's optional
+/// container metadata is collected once on a native worker and retained with
+/// the resumable local job for later UI reads.
+fn queue_preflight_metadata_collection(state: AppState, job_id: String) {
+    thread::spawn(move || {
+        let _ = run_preflight_metadata_collection(&state, &job_id);
+    });
+}
+
+fn run_preflight_metadata_collection(state: &AppState, job_id: &str) -> Result<(), String> {
+    let connection = database(state)?;
+    loop {
+        let next = connection
+            .query_row(
+                "SELECT ordinal, source_locator, file_name FROM preflight_scan_files WHERE job_id = ?1 AND status = 'complete' AND metadata_status = 'pending' ORDER BY ordinal ASC LIMIT 1",
+                [job_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            )
+            .optional()
+            .map_err(user_error)?;
+        let Some((ordinal, locator, file_name)) = next else {
+            break;
+        };
+        if connection
+            .execute(
+                "UPDATE preflight_scan_files SET metadata_status = 'running' WHERE job_id = ?1 AND ordinal = ?2 AND metadata_status = 'pending'",
+                params![job_id, ordinal],
+            )
+            .map_err(user_error)?
+            == 0
+        {
+            continue;
+        }
+        record_preflight_scan_event(
+            &connection,
+            job_id,
+            Some(&file_name),
+            "Reading media metadata in the background.",
+        )?;
+        let metadata = serde_json::from_str::<FilePath>(&locator)
+            .map(|path| preflight_local_metadata(&path, &file_name, true))
+            .unwrap_or_else(|_| unavailable_preflight_local_metadata(None));
+        let metadata_json = serde_json::to_string(&metadata).map_err(user_error)?;
+        connection
+            .execute(
+                "UPDATE preflight_scan_files SET metadata_json = ?1, metadata_status = 'complete' WHERE job_id = ?2 AND ordinal = ?3",
+                params![metadata_json, job_id, ordinal],
+            )
+            .map_err(user_error)?;
+        record_preflight_scan_event(
+            &connection,
+            job_id,
+            Some(&file_name),
+            "Media metadata recorded.",
+        )?;
+    }
     Ok(())
 }
 
@@ -2431,15 +2938,41 @@ fn load_preflight_scan(state: &AppState, job_id: &str) -> Result<PreIngestDuplic
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
     ).map_err(|error| if matches!(error, rusqlite::Error::QueryReturnedNoRows) { "This duplicate scan is no longer available.".to_string() } else { user_error(error) })?;
     let channel = connection_settings(&connection)?.active_channel;
-    let rows = connection.prepare("SELECT ordinal, source_locator, file_name, size_bytes, digest, error FROM preflight_scan_files WHERE job_id = ?1 ORDER BY ordinal ASC").map_err(user_error)?
-        .query_map([job_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?))).map_err(user_error)?
+    let rows = connection.prepare("SELECT ordinal, source_locator, file_name, size_bytes, digest, status, error, metadata_json FROM preflight_scan_files WHERE job_id = ?1 ORDER BY ordinal ASC").map_err(user_error)?
+        .query_map([job_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?))).map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>().map_err(user_error)?;
+    let current_file_name = rows
+        .iter()
+        .find_map(|(_, _, file_name, _, _, status, _, _)| {
+            (status == "running").then(|| file_name.clone())
+        });
+    let pending_metadata_files = connection
+        .query_row(
+            "SELECT COUNT(*) FROM preflight_scan_files WHERE job_id = ?1 AND status = 'complete' AND metadata_status != 'complete'",
+            [job_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(user_error)? as u64;
+    let activity_log = connection.prepare("SELECT file_name, message, created_at FROM preflight_scan_events WHERE job_id = ?1 ORDER BY id ASC LIMIT 512").map_err(user_error)?
+        .query_map([job_id], |row| Ok(PreIngestActivityLogEntry { file_name: row.get(0)?, message: row.get(1)?, created_at: row.get(2)? })).map_err(user_error)?
         .collect::<Result<Vec<_>, _>>().map_err(user_error)?;
     let mut files = Vec::new();
-    for (ordinal, locator, file_name, size_bytes, digest, error) in &rows {
+    for (ordinal, locator, file_name, size_bytes, digest, _file_status, error, metadata_json) in
+        &rows
+    {
         let title = Path::new(file_name)
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or(file_name);
+        let local_metadata = metadata_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<PreIngestLocalMetadata>(value).ok())
+            .or_else(|| {
+                serde_json::from_str::<FilePath>(locator)
+                    .ok()
+                    .map(|path| preflight_local_metadata(&path, file_name, false))
+            })
+            .unwrap_or_else(|| unavailable_preflight_local_metadata(None));
         let local_matches = if mode == "deep" {
             digest.as_deref().map(|digest| {
                 connection.prepare("SELECT title, file_name, status FROM upload_items WHERE digest = ?1 ORDER BY created_at ASC").map_err(user_error)?
@@ -2453,7 +2986,7 @@ fn load_preflight_scan(state: &AppState, job_id: &str) -> Result<PreIngestDuplic
         };
         let dropped_duplicate_file_names = rows
             .iter()
-            .filter_map(|(other_ordinal, _, other_name, _, other_digest, _)| {
+            .filter_map(|(other_ordinal, _, other_name, _, other_digest, _, _, _)| {
                 (*other_ordinal != *ordinal
                     && if mode == "deep" {
                         digest.is_some() && digest == other_digest
@@ -2471,15 +3004,13 @@ fn load_preflight_scan(state: &AppState, job_id: &str) -> Result<PreIngestDuplic
         let source_is_desktop_path = serde_json::from_str::<FilePath>(locator)
             .ok()
             .and_then(|value| value.as_path().map(Path::to_path_buf));
-        let local_delete_token = if mode == "deep" && !local_matches.is_empty() {
-            digest.as_deref().and_then(|value| {
-                register_preflight_local_delete_target(
-                    &state.media_directory,
-                    source_is_desktop_path.as_deref(),
-                    value,
-                    file_name,
-                )
-            })
+        let local_delete_token = if mode == "deep" && !local_matches.is_empty() && digest.is_some()
+        {
+            register_preflight_local_delete_target(
+                &state.media_directory,
+                source_is_desktop_path.as_deref(),
+                file_name,
+            )
         } else {
             None
         };
@@ -2491,6 +3022,7 @@ fn load_preflight_scan(state: &AppState, job_id: &str) -> Result<PreIngestDuplic
             ordinal: *ordinal as u64,
             file_name: file_name.clone(),
             size_bytes: *size_bytes as u64,
+            local_metadata,
             local_matches,
             dropped_duplicate_file_names,
             uploaded_title_matches,
@@ -2503,27 +3035,38 @@ fn load_preflight_scan(state: &AppState, job_id: &str) -> Result<PreIngestDuplic
         status,
         total_files: total_files as u64,
         completed_files: completed_files as u64,
+        current_file_name,
+        pending_metadata_files,
         files,
+        activity_log,
         youtube_title_checked: inventory_status == "complete",
         youtube_check_detail: detail,
     })
 }
 
 fn resume_preflight_scan_jobs(state: AppState, app: AppHandle) {
-    let jobs = database(&state).and_then(|connection| {
+    let (jobs, metadata_jobs) = database(&state).and_then(|connection| {
         connection.execute("UPDATE preflight_scan_jobs SET status = 'queued', inventory_status = CASE WHEN inventory_status = 'syncing' THEN 'pending' ELSE inventory_status END, updated_at = ?1 WHERE status IN ('queued', 'running', 'syncing')", [now()]).map_err(user_error)?;
-        connection.prepare("SELECT id FROM preflight_scan_jobs WHERE status = 'queued' ORDER BY created_at ASC").map_err(user_error)?
+        connection.execute("UPDATE preflight_scan_files SET metadata_status = 'pending' WHERE metadata_status = 'running'", []).map_err(user_error)?;
+        let jobs = connection.prepare("SELECT id FROM preflight_scan_jobs WHERE status = 'queued' ORDER BY created_at ASC").map_err(user_error)?
             .query_map([], |row| row.get::<_, String>(0)).map_err(user_error)?
-            .collect::<Result<Vec<_>, _>>().map_err(user_error)
+            .collect::<Result<Vec<_>, _>>().map_err(user_error)?;
+        let metadata_jobs = connection.prepare("SELECT DISTINCT job_id FROM preflight_scan_files WHERE status = 'complete' AND metadata_status = 'pending' ORDER BY job_id ASC").map_err(user_error)?
+            .query_map([], |row| row.get::<_, String>(0)).map_err(user_error)?
+            .collect::<Result<Vec<_>, _>>().map_err(user_error)?;
+        Ok((jobs, metadata_jobs))
     }).unwrap_or_default();
-    if jobs.is_empty() {
-        return;
+    if !jobs.is_empty() {
+        let worker_state = state.clone();
+        thread::spawn(move || {
+            for job_id in jobs {
+                let _ = run_preflight_scan_job(&worker_state, &app, &job_id);
+            }
+        });
     }
-    thread::spawn(move || {
-        for job_id in jobs {
-            let _ = run_preflight_scan_job(&state, &app, &job_id);
-        }
-    });
+    for job_id in metadata_jobs {
+        queue_preflight_metadata_collection(state.clone(), job_id);
+    }
 }
 
 /// Opens and streams one picker or drag-drop file through the platform-aware
@@ -2551,7 +3094,6 @@ fn digest_preflight_file(app: &AppHandle, path: &FilePath) -> Result<(u64, Strin
 fn register_preflight_local_delete_target(
     media_directory: &Path,
     source_path: Option<&Path>,
-    digest: &str,
     file_name: &str,
 ) -> Option<String> {
     let source_path = source_path?.canonicalize().ok()?;
@@ -2564,7 +3106,6 @@ fn register_preflight_local_delete_target(
         token.clone(),
         PreflightLocalDeleteTarget {
             path: source_path,
-            digest: digest.to_string(),
             file_name: file_name.to_string(),
             created_at: Instant::now(),
         },
@@ -2572,10 +3113,8 @@ fn register_preflight_local_delete_target(
     Some(token)
 }
 
-/// Creates a short-lived deletion target only after re-reading a persisted
-/// light/deep scan result. Light matching remains filename evidence; hashing
-/// here protects the irreversible local-file operation rather than changing
-/// the scan's selected matching mode.
+/// Creates a short-lived deletion target after re-reading the persisted opt-in
+/// duplicate review. Deletion never restarts SHA-256 work.
 fn prepare_preflight_local_delete_target(
     state: &AppState,
     job_id: &str,
@@ -2642,8 +3181,7 @@ fn prepare_preflight_local_delete_target(
             "Local duplicate deletion is available only for a desktop filesystem source."
                 .to_string()
         })?;
-    let (_, digest) = digest_file(&path)?;
-    register_preflight_local_delete_target(&state.media_directory, Some(&path), &digest, &file_name)
+    register_preflight_local_delete_target(&state.media_directory, Some(&path), &file_name)
         .ok_or_else(|| "This source cannot be safely deleted from duplicate review.".to_string())
 }
 
@@ -2684,10 +3222,6 @@ fn delete_preflight_duplicate_file_impl(
     if current_path.starts_with(&managed_directory) {
         return Err("Managed upload copies cannot be deleted from duplicate review.".into());
     }
-    let (_, current_digest) = digest_file(&current_path)?;
-    if current_digest != target.digest {
-        return Err("The local file changed after duplicate detection; it was not deleted.".into());
-    }
     fs::remove_file(&current_path).map_err(user_error)?;
     preflight_local_delete_targets()
         .lock()
@@ -2696,7 +3230,7 @@ fn delete_preflight_duplicate_file_impl(
     audit_global(
         &database(state)?,
         "preflight_local_duplicate_deleted",
-        "Operator permanently deleted a verified local duplicate after filename confirmation",
+        "Operator permanently deleted a locally reviewed duplicate after filename confirmation",
     )?;
     Ok(())
 }
@@ -2907,6 +3441,280 @@ fn preflight_file_name(path: &FilePath) -> String {
             .filter(|value| !value.is_empty())
             .unwrap_or("Selected file")
             .to_string(),
+    }
+}
+
+fn iso_bmff_duration_seconds(path: &Path) -> Option<f64> {
+    let mut file = File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let mut cursor = 0_u64;
+    while cursor.saturating_add(8) <= length {
+        file.seek(SeekFrom::Start(cursor)).ok()?;
+        let mut header = [0_u8; 8];
+        file.read_exact(&mut header).ok()?;
+        let size = u32::from_be_bytes(header[..4].try_into().ok()?) as u64;
+        let mut header_length = 8_u64;
+        let box_size = if size == 1 {
+            let mut extended_size = [0_u8; 8];
+            file.read_exact(&mut extended_size).ok()?;
+            header_length = 16;
+            u64::from_be_bytes(extended_size)
+        } else if size == 0 {
+            length.saturating_sub(cursor)
+        } else {
+            size
+        };
+        if box_size < header_length || cursor.saturating_add(box_size) > length {
+            return None;
+        }
+        if &header[4..8] == b"moov" {
+            let moov_end = cursor + box_size;
+            let mut child = cursor + header_length;
+            while child.saturating_add(8) <= moov_end {
+                file.seek(SeekFrom::Start(child)).ok()?;
+                let mut child_header = [0_u8; 8];
+                file.read_exact(&mut child_header).ok()?;
+                let child_size = u32::from_be_bytes(child_header[..4].try_into().ok()?) as u64;
+                if child_size < 8 || child.saturating_add(child_size) > moov_end {
+                    return None;
+                }
+                if &child_header[4..8] == b"mvhd" && child_size >= 28 {
+                    let mut content = vec![0_u8; (child_size - 8).min(32) as usize];
+                    file.read_exact(&mut content).ok()?;
+                    let (timescale, duration) = match content.first().copied()? {
+                        0 if content.len() >= 20 => (
+                            u32::from_be_bytes(content[12..16].try_into().ok()?) as u64,
+                            u32::from_be_bytes(content[16..20].try_into().ok()?) as u64,
+                        ),
+                        1 if content.len() >= 32 => (
+                            u32::from_be_bytes(content[20..24].try_into().ok()?) as u64,
+                            u64::from_be_bytes(content[24..32].try_into().ok()?),
+                        ),
+                        _ => return None,
+                    };
+                    return (timescale > 0 && duration != u64::MAX)
+                        .then(|| duration as f64 / timescale as f64);
+                }
+                child += child_size;
+            }
+            return None;
+        }
+        cursor += box_size;
+    }
+    None
+}
+
+fn metadata_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        value => serde_json::to_string(value).ok(),
+    }
+}
+
+fn metadata_fields(value: &serde_json::Value) -> Vec<PreIngestMetadataField> {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    let mut fields = Vec::new();
+    for (label, value) in object {
+        if label == "tags" {
+            if let Some(tags) = value.as_object() {
+                for (tag, value) in tags {
+                    if let Some(value) = metadata_value(value) {
+                        fields.push(PreIngestMetadataField {
+                            label: format!("Tag · {tag}"),
+                            value,
+                        });
+                    }
+                }
+            }
+        } else if let Some(value) = metadata_value(value) {
+            fields.push(PreIngestMetadataField {
+                label: label.replace('_', " "),
+                value,
+            });
+        }
+    }
+    fields
+}
+
+fn ffprobe_metadata(
+    path: &Path,
+) -> Option<(
+    Option<f64>,
+    Option<String>,
+    Option<String>,
+    Vec<PreIngestMetadataStream>,
+    Vec<PreIngestMetadataField>,
+)> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = path;
+        return None;
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let output = ffprobe_command()
+            .args([
+                "-v",
+                "error",
+                "-show_format",
+                "-show_streams",
+                "-of",
+                "json",
+            ])
+            .arg(path)
+            .output()
+            .ok()?;
+        if !output.status.success() || output.stdout.len() > 2 * 1024 * 1024 {
+            return None;
+        }
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        let format = report
+            .get("format")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let duration_seconds = format
+            .get("duration")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| value.parse::<f64>().ok());
+        let container_format = format
+            .get("format_long_name")
+            .or_else(|| format.get("format_name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let bit_rate = format
+            .get("bit_rate")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let streams = report
+            .get("streams")
+            .and_then(serde_json::Value::as_array)
+            .map(|streams| {
+                streams
+                    .iter()
+                    .take(64)
+                    .enumerate()
+                    .map(|(index, stream)| {
+                        let kind = stream
+                            .get("codec_type")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("data")
+                            .to_string();
+                        let codec = stream
+                            .get("codec_long_name")
+                            .or_else(|| stream.get("codec_name"))
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("Unknown codec");
+                        PreIngestMetadataStream {
+                            kind: kind.clone(),
+                            label: format!(
+                                "{} stream {} · {}",
+                                kind.to_ascii_uppercase(),
+                                index + 1,
+                                codec
+                            ),
+                            fields: metadata_fields(stream),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((
+            duration_seconds,
+            container_format,
+            bit_rate,
+            streams,
+            metadata_fields(&format),
+        ))
+    }
+}
+
+/// Resolves the Tauri-bundled FFprobe sidecar before consulting a developer's
+/// PATH. This keeps metadata inspection available on clean desktop installs
+/// without accepting a path from the webview.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn ffprobe_command() -> Command {
+    let executable_name = if cfg!(target_os = "windows") {
+        "ffprobe.exe"
+    } else {
+        "ffprobe"
+    };
+    let bundled = std::env::current_exe()
+        .ok()
+        .and_then(|current_exe| bundled_sidecar_path(&current_exe, executable_name));
+    let mut command = Command::new(bundled.unwrap_or_else(|| PathBuf::from("ffprobe")));
+    // FFprobe is a console executable on Windows. Do not create a short-lived
+    // terminal window or allow it to steal focus from the application.
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    command
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn bundled_sidecar_path(current_exe: &Path, executable_name: &str) -> Option<PathBuf> {
+    let executable_dir = current_exe.parent()?;
+    [
+        executable_dir.join(executable_name),
+        executable_dir.parent()?.join(executable_name),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+}
+
+fn preflight_local_metadata(
+    path: &FilePath,
+    file_name: &str,
+    include_deep_metadata: bool,
+) -> PreIngestLocalMetadata {
+    let file_type = Path::new(file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_uppercase());
+    let Some(source) = path.as_path() else {
+        return unavailable_preflight_local_metadata(file_type);
+    };
+    let Ok(metadata) = fs::metadata(source) else {
+        return unavailable_preflight_local_metadata(file_type);
+    };
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .map(DateTime::<Utc>::from)
+        .map(|value| value.to_rfc3339());
+    let container_duration = matches!(
+        file_type.as_deref(),
+        Some("MP4") | Some("M4V") | Some("MOV") | Some("INSV") | Some("LRV")
+    )
+    .then(|| iso_bmff_duration_seconds(source))
+    .flatten();
+    if !include_deep_metadata {
+        return PreIngestLocalMetadata {
+            file_type,
+            modified_at,
+            duration_seconds: container_duration,
+            size_bytes: Some(metadata.len()),
+            container_format: None,
+            bit_rate: None,
+            streams: Vec::new(),
+            metadata_fields: Vec::new(),
+        };
+    }
+    let (probe_duration, container_format, bit_rate, streams, metadata_fields) =
+        ffprobe_metadata(source).unwrap_or((None, None, None, Vec::new(), Vec::new()));
+    let duration_seconds = probe_duration.or(container_duration);
+    PreIngestLocalMetadata {
+        file_type,
+        modified_at,
+        duration_seconds,
+        size_bytes: Some(metadata.len()),
+        container_format,
+        bit_rate,
+        streams,
+        metadata_fields,
     }
 }
 
@@ -4021,6 +4829,31 @@ fn dashboard_snapshot(state: State<'_, AppState>) -> Result<DashboardSnapshot, S
 #[tauri::command]
 fn load_connection_settings(state: State<'_, AppState>) -> Result<ConnectionSettings, String> {
     connection_settings(&database(&state)?)
+}
+
+#[tauri::command]
+fn github_issue_diagnostic_report(state: State<'_, AppState>) -> Result<String, String> {
+    diagnostic_report_impl(&state)
+}
+
+#[tauri::command]
+fn app_release_identity() -> AppReleaseIdentity {
+    release_identity()
+}
+
+#[tauri::command]
+fn load_crash_recovery_status(state: State<'_, AppState>) -> CrashRecoveryStatus {
+    crash_recovery_status(&state)
+}
+
+#[tauri::command]
+fn record_webview_error(state: State<'_, AppState>) -> Result<(), String> {
+    record_webview_error_impl(&state)
+}
+
+#[tauri::command]
+fn acknowledge_crash_recovery(state: State<'_, AppState>) -> Result<(), String> {
+    acknowledge_crash_recovery_impl(&state)
 }
 
 fn manual_upload_defaults(connection: &Connection) -> Result<ManualUploadDefaults, String> {
@@ -5175,6 +6008,7 @@ pub fn run() {
         .setup(|app| {
             let state = initialize_state(app.handle())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error))?;
+            install_panic_marker(state.database_path.with_file_name(PANIC_MARKER_FILE));
             app.manage(state.clone());
             let monitor_state = state.clone();
             thread::spawn(move || folder_monitor_poll_loop(monitor_state));
@@ -5183,6 +6017,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             dashboard_snapshot,
+            github_issue_diagnostic_report,
+            app_release_identity,
+            load_crash_recovery_status,
+            record_webview_error,
+            acknowledge_crash_recovery,
             load_folder_monitor_settings,
             enable_folder_monitor,
             disable_folder_monitor,
@@ -5231,6 +6070,140 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventory_sync_errors_are_actionable_without_provider_payloads() {
+        assert!(youtube_inventory_http_error(401).contains("Connect YouTube again"));
+        assert!(youtube_inventory_http_error(403).contains("YouTube Data API"));
+        assert!(youtube_inventory_http_error(429).contains("rate-limiting"));
+        assert!(youtube_inventory_http_error(503).contains("last complete local library"));
+    }
+
+    #[test]
+    fn bundled_sidecar_is_resolved_before_a_path_fallback() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let executable = root.join("app").join("bin").join("uploader.exe");
+        let sidecar = executable.parent().unwrap().join("ffprobe.exe");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, []).unwrap();
+        fs::write(&sidecar, []).unwrap();
+
+        assert_eq!(
+            bundled_sidecar_path(&executable, "ffprobe.exe"),
+            Some(sidecar)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn diagnostic_details_redact_sensitive_values_and_paths() {
+        assert_eq!(
+            diagnostic_detail("OAuth failed at C:\\Users\\operator\\client.json"),
+            "[redacted sensitive detail]"
+        );
+        assert_eq!(
+            diagnostic_detail("provider returned access_token=not-for-a-report"),
+            "[redacted sensitive detail]"
+        );
+        assert_eq!(
+            diagnostic_detail("Queued upload paused for the daily limit."),
+            "Queued upload paused for the daily limit."
+        );
+        assert_eq!(safe_diagnostic_issue_name("upload_failed"), "upload_failed");
+        assert_eq!(
+            safe_diagnostic_issue_name("Error at C:\\private"),
+            "unclassified_local_event"
+        );
+    }
+
+    #[test]
+    fn diagnostic_report_is_markdown_and_excludes_sensitive_audit_details() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("media")).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let connection = database(&state).unwrap();
+        connection
+            .execute(
+                "INSERT INTO audit_events (id, kind, detail, created_at) VALUES ('diagnostic-test', 'upload_failed', 'Provider response at C:\\Users\\operator\\token.txt', ?1)",
+                [now()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let report = diagnostic_report_impl(&state).unwrap();
+        assert!(report.starts_with("# YouTube Upload Manager diagnostic report"));
+        assert!(report.contains(&format!("- App version: {}", env!("CARGO_PKG_VERSION"))));
+        assert!(report.contains(&format!("- Release channel: {APP_RELEASE_CHANNEL}")));
+        assert!(report.contains("`upload_failed`"));
+        assert!(report.contains("## Detected crash, error, and warning names"));
+        assert!(report.contains("[redacted sensitive detail]"));
+        assert!(!report.contains("C:\\Users\\operator"));
+        assert!(!report.contains("token.txt"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn release_identity_reports_the_compiled_version_and_supported_channel() {
+        let identity = release_identity();
+
+        assert_eq!(identity.version, env!("CARGO_PKG_VERSION"));
+        assert!(matches!(identity.channel.as_str(), "regular" | "nightly"));
+        assert!(matches!(
+            identity.build_profile.as_str(),
+            "debug" | "release"
+        ));
+    }
+
+    #[test]
+    fn crash_recovery_status_uses_only_valid_timestamp_markers() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let panic_path = root.join(PANIC_MARKER_FILE);
+        let webview_path = root.join(WEBVIEW_ERROR_MARKER_FILE);
+        fs::write(&panic_path, "panic_at=2026-08-22T01:02:03Z\n").unwrap();
+        fs::write(&webview_path, "webview_error_at=not-a-timestamp\n").unwrap();
+
+        assert_eq!(
+            crash_recovery_status_for_paths(&panic_path, &webview_path),
+            CrashRecoveryStatus {
+                crash_detected: true,
+                detected_at: Some("2026-08-22T01:02:03+00:00".into()),
+                failure_kind: Some("Native panic".into()),
+            }
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recording_and_acknowledging_webview_errors_only_persists_a_timestamp() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("media")).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        record_webview_error_impl(&state).unwrap();
+        let marker = fs::read_to_string(root.join(WEBVIEW_ERROR_MARKER_FILE)).unwrap();
+        assert!(marker.starts_with("webview_error_at="));
+        assert!(
+            marker_timestamp(&root.join(WEBVIEW_ERROR_MARKER_FILE), "webview_error_at=").is_some()
+        );
+        assert!(crash_recovery_status(&state).crash_detected);
+
+        acknowledge_crash_recovery_impl(&state).unwrap();
+        assert!(!crash_recovery_status(&state).crash_detected);
+        assert!(!root.join(WEBVIEW_ERROR_MARKER_FILE).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn fresh_connection_settings_require_an_operator_imported_oauth_client() {
@@ -5720,6 +6693,59 @@ mod tests {
     }
 
     #[test]
+    fn local_mp4_metadata_reads_the_container_duration_without_ingestion() {
+        let source = std::env::temp_dir().join(format!(
+            "youtube-upload-manager-metadata-{}.mp4",
+            Uuid::new_v4()
+        ));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&36_u32.to_be_bytes());
+        bytes.extend_from_slice(b"moov");
+        bytes.extend_from_slice(&28_u32.to_be_bytes());
+        bytes.extend_from_slice(b"mvhd");
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.extend_from_slice(&1_000_u32.to_be_bytes());
+        bytes.extend_from_slice(&8_250_u32.to_be_bytes());
+        fs::write(&source, bytes).unwrap();
+
+        let details = preflight_local_metadata(&FilePath::Path(source.clone()), "clip.mp4", true);
+        assert_eq!(details.file_type.as_deref(), Some("MP4"));
+        assert_eq!(details.duration_seconds, Some(8.25));
+        assert_eq!(details.size_bytes, Some(36));
+
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn light_preflight_metadata_avoids_a_media_probe_during_result_loading() {
+        let source = std::env::temp_dir().join(format!(
+            "youtube-upload-manager-light-metadata-{}.mp4",
+            Uuid::new_v4()
+        ));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&36_u32.to_be_bytes());
+        bytes.extend_from_slice(b"moov");
+        bytes.extend_from_slice(&28_u32.to_be_bytes());
+        bytes.extend_from_slice(b"mvhd");
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.extend_from_slice(&1_000_u32.to_be_bytes());
+        bytes.extend_from_slice(&8_250_u32.to_be_bytes());
+        fs::write(&source, bytes).unwrap();
+
+        let details = preflight_local_metadata(&FilePath::Path(source.clone()), "clip.mp4", false);
+        assert_eq!(details.duration_seconds, Some(8.25));
+        assert!(details.container_format.is_none());
+        assert!(details.streams.is_empty());
+        assert!(details.metadata_fields.is_empty());
+
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
     fn preflight_command_accepts_drag_paths_and_mobile_picker_uris() {
         let selected: Vec<FilePath> = serde_json::from_value(serde_json::json!([
             r"C:\Camera\clip.insv",
@@ -5732,7 +6758,7 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_preflight_duplicate_deletion_removes_only_the_external_source() {
+    fn confirmed_preflight_duplicate_deletion_reuses_the_opt_in_review_without_rehashing() {
         let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
         let media = root.join("media");
         fs::create_dir_all(&media).unwrap();
@@ -5745,24 +6771,15 @@ mod tests {
         database(&state).unwrap();
         let source = root.join("duplicate.insv");
         fs::write(&source, b"same-camera-bytes").unwrap();
-        let (_, digest) = digest_file(&source).unwrap();
-        let token = register_preflight_local_delete_target(
-            &media,
-            Some(&source),
-            &digest,
-            "duplicate.insv",
-        )
-        .unwrap();
+        let token = register_preflight_local_delete_target(&media, Some(&source), "duplicate.insv")
+            .unwrap();
 
-        assert!(register_preflight_local_delete_target(
-            &media,
-            Some(&media),
-            &digest,
-            "managed.media"
-        )
-        .is_none());
+        assert!(
+            register_preflight_local_delete_target(&media, Some(&media), "managed.media").is_none()
+        );
         assert!(delete_preflight_duplicate_file_impl(&state, &token, "wrong.insv").is_err());
         assert!(source.exists());
+        fs::write(&source, b"changed-after-opt-in-review").unwrap();
         delete_preflight_duplicate_file_impl(&state, &token, "duplicate.insv").unwrap();
         assert!(!source.exists());
         assert!(media.exists());

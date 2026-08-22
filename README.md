@@ -36,6 +36,9 @@ authorize and start.
 - Pre-ingest checks for arbitrary files including `.insv` and `.lrv`: desktop
   drops default to fast filename matching, while deep SHA-256 matching is
   opt-in and checkpointed per file.
+- Desktop builds bundle FFprobe for local video-container metadata, including
+  duration, tags, and stream details. No separate FFmpeg install is needed;
+  Android and iOS do not execute this desktop sidecar.
 - Compact gzip export/import for duplicate hashes and YouTube inventory; media,
   source paths, refresh tokens, client secrets, and upload sessions are never
   exported.
@@ -92,6 +95,27 @@ npm run tauri build -- --bundles nsis
 
 The installer is emitted under `src-tauri/target/release/bundle/nsis/`. Build
 artifacts are unsigned unless a separate signing process is configured.
+
+## Portable builds
+
+Each GitHub nightly pre-release also includes platform-appropriate portable
+artifacts:
+
+- Windows x64: `YouTube-Upload-Manager-windows-x64-portable.zip`; extract it
+  and run `YouTube-Upload-Manager.exe`. Windows WebView2 is still required by
+  Tauri, but no installer or elevated permission is needed.
+- Linux x64: `YouTube-Upload-Manager-linux-x64-portable.AppImage`; mark it
+  executable and run it. It does not require a package-manager install.
+- macOS Apple Silicon and Intel: portable ZIP archives containing the `.app`
+  bundle. Extract the archive and move/open the app as needed.
+
+Android is distributed as an installable debug APK rather than a portable
+desktop executable. All nightly artifacts are unsigned; macOS and Windows may
+show their normal first-run security warnings.
+
+Desktop FFprobe provenance and licensing are recorded in [NOTICE](NOTICE).
+The canonical project [AGPL license](LICENSE) remains unmodified so GitHub can
+recognize it correctly.
 
 ## Documentation
 

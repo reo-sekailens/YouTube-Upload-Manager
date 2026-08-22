@@ -70,9 +70,8 @@ rebuilds local SHA-256 and uploaded-title candidates for review. It never
 creates or executes a deletion request.
 
 The product display name is **YouTube Upload Manager**. Its Tauri identifier
-and OS credential-store service name deliberately retain the established
-`youtube-mass-uploader` namespace so a product rename cannot orphan existing
-local queues or OAuth credentials.
+and OS credential-store service name use the `com.sekailens` namespace:
+`com.sekailens.youtube-upload-manager`.
 
 ## Decisions pending
 

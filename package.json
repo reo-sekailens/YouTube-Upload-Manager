@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "test": "vitest run",
+    "prepare:ffprobe": "node scripts/prepare-ffprobe.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -15,10 +15,10 @@ import {
 } from "../lib/local";
 import type { DeletionRequest, RemoteVideo } from "../lib/types";
 
-type DeletionReviewProps = { activeChannel?: string; busy?: boolean; onNotice: (notice: string) => void };
+type DeletionReviewProps = { activeChannel?: string; busy?: boolean; onNotice: (notice: string) => void; refreshVersion?: number };
 const isPending = (request: DeletionRequest) => request.status === "pending" || request.status === "needs_reconciliation";
 
-export function DeletionReview({ activeChannel, busy = false, onNotice }: DeletionReviewProps) {
+export function DeletionReview({ activeChannel, busy = false, onNotice, refreshVersion = 0 }: DeletionReviewProps) {
   const [videos, setVideos] = useState<RemoteVideo[]>([]);
   const [requests, setRequests] = useState<DeletionRequest[]>([]);
   const [selected, setSelected] = useState<RemoteVideo>();
@@ -48,7 +48,7 @@ export function DeletionReview({ activeChannel, busy = false, onNotice }: Deleti
     } finally { setLoading(false); }
   }, [activeChannel, onNotice]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { void refresh(); }, [refresh, refreshVersion]);
   useEffect(() => {
     if (!authorizing || !isTauri) return;
     let active = true;

@@ -4,6 +4,7 @@ dist/
 build/
 coverage/
 src-tauri/target/
+src-tauri/binaries/
 
 # Local inspection, test, and debug artifacts
 .playwright-cli/

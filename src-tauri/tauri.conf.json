@@ -2,11 +2,11 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "YouTube Upload Manager",
   "version": "0.1.9",
-  "identifier": "ph.furries.youtube-mass-uploader",
+  "identifier": "com.sekailens.youtube-upload-manager",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run prepare:ffprobe && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run prepare:ffprobe",
     "frontendDist": "../dist"
   },
   "app": {
@@ -16,6 +16,8 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.ico", "icons/icon.icns", "icons/128x128.png"]
+    "icon": ["icons/icon.ico", "icons/icon.icns", "icons/128x128.png"],
+    "externalBin": ["binaries/ffprobe"],
+    "resources": ["binaries/ffprobe-license.txt"]
   }
 }

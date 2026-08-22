@@ -50,8 +50,8 @@
 - Exact desktop pre-ingest matches receive a short-lived opaque native deletion
   token. The webview only receives that token and a filename; before permanent
   deletion Rust requires the exact filename, rejects app-managed media paths,
-  re-hashes the source to prevent time-of-check/time-of-use replacement, then
-  records a local audit event without the source path.
+  reuses the accepted opt-in duplicate review without re-hashing, then records
+  a local audit event without the source path.
 - A desktop pre-ingest source can also enter that same guarded local-deletion
   flow when its normalized filename matches the active channel's persisted
   YouTube title inventory. Native preparation rechecks the current active
@@ -66,13 +66,16 @@
 - Pre-ingest duplicate work is dispatched through Tauri's blocking worker pool.
   This keeps the native event loop responsive while hashing large desktop drops,
   querying local duplicate records, and optionally refreshing YouTube inventory.
-- Pre-ingest checks are persistent device-local jobs. The default light mode only
-  compares filenames and does not open media; deep mode streams SHA-256 one
-  source at a time, checkpointing after every source and resuming unfinished
-  jobs at launch. Native source locators remain in SQLite and are not exposed
-  to the webview. Remote inventory sync stages all pages and replaces the
-  previous inventory atomically only after success, preserving the last known
-  complete snapshot across a crash or failed network call.
+- Pre-ingest checks are persistent device-local jobs. Light mode publishes
+  filename results first, then records optional FFprobe metadata once per file
+  on a separate native worker; result reloads reuse that persisted metadata and
+  never relaunch FFprobe. It retains basic filesystem facts and a small
+  ISO-BMFF duration-header read while enrichment is pending. Deep mode streams
+  SHA-256 one source at a time, checkpointing after every source and resuming
+  unfinished jobs at launch. Native source locators remain in SQLite and are
+  not exposed to the webview. Remote inventory sync stages all pages and
+  replaces the previous inventory atomically only after success, preserving the
+  last known complete snapshot across a crash or failed network call.
 - Crash recovery is deliberately operation-specific. Managed imports resume from
   their partial local copy; queued uploads resume only when the protected
   YouTube resumable-session checkpoint survives and then start at the
@@ -97,6 +100,17 @@
   `.ico` and platform variants with `npx tauri icon src-tauri/icons/icon.png` before
   building an installer; Tauri's Windows bundle embeds `icons/icon.ico`, so updating
   only the PNG leaves the installed taskbar icon stale.
+- **Desktop FFprobe sidecar:** desktop build preparation downloads the pinned
+  `eugeneware/ffmpeg-static` b6.1.1 FFprobe artifacts for Windows x64, Linux
+  x64, and macOS x64/arm64, validates each published SHA-256, and bundles the
+  matching executable plus its supplied license. The utility is used only by
+  the native desktop metadata reader; it never receives media bytes from the
+  webview. Windows launches use `CREATE_NO_WINDOW`, preventing console windows
+  from taking focus during background enrichment. The upstream provenance is FFmpeg n6.1.1 at
+  `https://github.com/FFmpeg/FFmpeg/tree/n6.1.1`. FFprobe's GPLv3-or-later
+  terms are compatible with the app's AGPL-3.0-or-later distribution. Android
+  and iOS never package or execute the sidecar; their metadata behavior uses
+  native/mobile-safe fallbacks.
 
 ## Scaffolded conventions
 
@@ -105,10 +119,37 @@
 - `.codex/instructions.md` supplies a compact AI-agent checklist.
 - Pull-request and feature templates prompt for validation and provider/security impact.
 
-- **Product rename compatibility:** Present the product as **YouTube Upload
-  Manager**, while retaining `ph.furries.youtube-mass-uploader` and the related
-  OS secure-store service namespace. Changing either would strand locally
-  persisted queues and protected OAuth credentials from existing installs.
+- **Application identity:** The product uses the Tauri identifier and OS
+  secure-store service namespace `com.sekailens.youtube-upload-manager`.
+  It is intentionally distinct from the retired `ph.furries` identity.
+- The About and support tab uses a native Markdown diagnostic-report command.
+  It reports app/build/OS/architecture metadata, safe connection booleans,
+  queue-status totals, a timestamp-only native panic marker, and at most 30
+  local audit events. Before copying, details containing secrets, OAuth data,
+  URLs, account IDs, local paths, or provider payloads are redacted. The report
+  is copied only to the local clipboard and is never sent automatically.
+- The About tab opens the public Wiki and project website through the system
+  browser. Those links are fixed project destinations and do not include or
+  transmit diagnostic content.
+- The About and crash-recovery **Report to GitHub** actions open the
+  repository's new-issue page with the complete redacted report already filled
+  into the body and also copy it locally as a backup. They never submit an
+  issue; GitHub submission remains an explicit operator action.
+- Release identity is native build metadata: the version comes from Cargo and
+  the channel is `regular` unless a build explicitly sets `APP_RELEASE_CHANNEL`.
+  The nightly workflow sets it to `nightly` for every published artifact. About
+  and copied reports use the same native command so their release labels agree.
+- Native panics and webview failures create separate timestamp-only recovery
+  markers. React error boundaries plus global error and unhandled-rejection
+  listeners show recovery immediately where the webview remains alive; an
+  unacknowledged native or webview marker is queried before the workspace and
+  produces the same recovery screen on the next launch. Acknowledgement is an
+  explicit local action after the operator can copy the redacted issue report
+  or open the repository's new-issue form.
+- Recovery mode identifies only a safe, fixed failure category (native panic,
+  webview error, unhandled promise rejection, or React render error). It never
+  displays a raw exception message because such messages can contain sensitive
+  local or provider data.
 
 ## Conventions to establish with implementation
 

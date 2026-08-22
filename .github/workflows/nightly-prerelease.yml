@@ -18,6 +18,8 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    env:
+      APP_RELEASE_CHANNEL: nightly
     strategy:
       fail-fast: false
       matrix:
@@ -53,15 +55,44 @@ jobs:
           workspaces: ./src-tauri -> target
       - run: npm ci
       - run: npm run tauri -- build ${{ matrix.args }}
+      - name: Package Windows portable ZIP
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force portable | Out-Null
+          Copy-Item src-tauri/target/release/youtube-upload-manager.exe portable/YouTube-Upload-Manager.exe
+          Compress-Archive -Path portable/YouTube-Upload-Manager.exe -DestinationPath portable/YouTube-Upload-Manager-windows-x64-portable.zip
+      - name: Package Linux portable AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p portable
+          appimage="$(find src-tauri/target/release/bundle/appimage -type f -name '*.AppImage' -print -quit)"
+          test -n "$appimage"
+          cp "$appimage" portable/YouTube-Upload-Manager-linux-x64-portable.AppImage
+          chmod +x portable/YouTube-Upload-Manager-linux-x64-portable.AppImage
+      - name: Package macOS portable app ZIP
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p portable
+          app="$(find src-tauri/target -type d -path '*/release/bundle/macos/*.app' -print -quit)"
+          test -n "$app"
+          architecture="${{ matrix.name == 'macOS Apple Silicon' && 'apple-silicon' || 'intel' }}"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "portable/YouTube-Upload-Manager-macos-${architecture}-portable.zip"
       - uses: actions/upload-artifact@v6
         with:
           name: nightly-${{ matrix.name }}
-          path: src-tauri/target/**/release/bundle/**
+          path: |
+            src-tauri/target/**/release/bundle/**
+            portable/**
           if-no-files-found: error
 
   android:
     name: Android universal debug APK
     runs-on: ubuntu-22.04
+    env:
+      APP_RELEASE_CHANNEL: nightly
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -120,6 +151,7 @@ jobs:
       - name: Replace nightly release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
           gh release delete nightly --yes --cleanup-tag || true

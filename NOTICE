@@ -21,3 +21,19 @@ Source notice
 
 The corresponding source for this project is available from the repository in
 which this NOTICE file is distributed.
+
+Bundled FFprobe notice
+----------------------
+
+Desktop release bundles include an FFprobe executable so local container
+metadata can be read without requiring an operator to install FFmpeg. The
+sidecar is obtained at build time from the pinned
+[`eugeneware/ffmpeg-static` b6.1.1 release](https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1).
+The build script verifies the published SHA-256 for the selected Windows,
+Linux, or macOS artifact before it is packaged. The matching upstream FFmpeg
+source is [FFmpeg n6.1.1](https://github.com/FFmpeg/FFmpeg/tree/n6.1.1).
+
+FFprobe is distributed under the GNU General Public License version 3 or
+later. This is compatible with this project's AGPL-3.0-or-later distribution.
+Each desktop bundle carries the license supplied with its selected FFprobe
+artifact. Mobile builds do not package or execute an FFprobe sidecar.

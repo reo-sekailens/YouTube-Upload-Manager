@@ -51,6 +51,23 @@ function formatYoutubeDuration(value?: string) {
   );
 }
 
+function formatLocalDuration(seconds?: number) {
+  if (seconds === undefined || !Number.isFinite(seconds)) return "Not available";
+  const total = Math.max(0, Math.floor(seconds));
+  return [Math.floor(total / 3600), Math.floor((total % 3600) / 60), total % 60]
+    .map((part, index) => index === 0 ? String(part) : String(part).padStart(2, "0"))
+    .filter((part, index) => index > 0 || part !== "0")
+    .join(":") || "0:00";
+}
+
+function formatBytes(bytes?: number) {
+  if (bytes === undefined) return "Not available";
+  if (bytes < 1024) return `${bytes.toLocaleString()} bytes`;
+  const units = ["KB", "MB", "GB", "TB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length);
+  return `${(bytes / 1024 ** index).toFixed(index === 1 ? 0 : 1)} ${units[index - 1]}`;
+}
+
 export function PreIngestDuplicatePanel({
   busy,
   fileCount,
@@ -76,6 +93,7 @@ export function PreIngestDuplicatePanel({
   const [deleteError, setDeleteError] = useState("");
   const [bulkError, setBulkError] = useState("");
   const [confirmation, setConfirmation] = useState("");
+  const [copyStatus, setCopyStatus] = useState("");
   const eligibleOrdinals =
     scan?.files.flatMap((file) =>
       isLocalDeleteEligible(file) ? [file.ordinal] : [],
@@ -90,6 +108,22 @@ export function PreIngestDuplicatePanel({
     eligibleOrdinals.length > 0 &&
     eligibleOrdinals.every((ordinal) => selectedOrdinals.has(ordinal));
   const bulkPhrase = `DELETE ${selectedFiles.length} LOCAL FILE${selectedFiles.length === 1 ? "" : "S"}`;
+  const progressPercent = scan && scan.totalFiles > 0
+    ? Math.min(100, Math.round((scan.completedFiles / scan.totalFiles) * 100))
+    : 0;
+  const progressLog = scan?.activityLog
+    .map((entry) => `${new Date(entry.createdAt).toLocaleTimeString()}${entry.fileName ? ` — ${entry.fileName}` : ""} — ${entry.message}`)
+    .join("\n") ?? "";
+
+  const copyProgressLog = async () => {
+    if (!progressLog) return;
+    try {
+      await navigator.clipboard.writeText(progressLog);
+      setCopyStatus("Copied");
+    } catch {
+      setCopyStatus("Copy unavailable");
+    }
+  };
 
   const clearSingleDelete = () => {
     setDeleteTarget(undefined);
@@ -174,7 +208,7 @@ export function PreIngestDuplicatePanel({
         setBulkProgress({
           completed: deleted,
           total: selectedFiles.length,
-          stage: `Preparing “${file.fileName}”…`,
+          stage: `Using the accepted duplicate review for “${file.fileName}”…`,
         });
         const token = await prepareToken(file, ordinal);
         setBulkProgress({
@@ -211,10 +245,10 @@ export function PreIngestDuplicatePanel({
           <p className="eyebrow">BEFORE INGEST</p>
           <h2 id="pre-ingest-duplicate-heading">Check files for duplicates</h2>
           <p className="section-copy">
-            Fast match is the default: it compares filenames without reading
-            media. Choose deep SHA-256 matching only when you need exact file
-            evidence. Both accept INSV, LRV, and other file types without
-            ingesting or uploading them.
+            Fast match returns filename results immediately, then reads optional
+            media metadata in the background. Choose deep SHA-256 matching only
+            when you need exact file evidence. Both accept INSV, LRV, and other
+            file types without ingesting or uploading them.
           </p>
         </div>
         <div className="pre-ingest-duplicate__actions">
@@ -272,6 +306,32 @@ export function PreIngestDuplicatePanel({
           app closes.
         </span>
       </div>
+      {scan && scan.totalFiles > 0 && (
+        <section className="pre-ingest-duplicate__progress" aria-live="polite">
+          <div>
+            <strong>{scan.mode === "deep" ? "Deep duplicate check" : "Light duplicate check"}</strong>
+            <span>{scan.completedFiles} of {scan.totalFiles} files checked · {progressPercent}%</span>
+          </div>
+          <progress max={scan.totalFiles} value={scan.completedFiles} aria-label={`${scan.completedFiles} of ${scan.totalFiles} files checked`} />
+          <p>{scan.currentFileName ? `Checking ${scan.currentFileName}` : scan.status === "complete" && scan.pendingMetadataFiles > 0 ? `Duplicate check complete. Reading media metadata for ${scan.pendingMetadataFiles} file${scan.pendingMetadataFiles === 1 ? "" : "s"} in the background.` : scan.status === "complete" ? "Duplicate check complete." : "Preparing the next selected file…"}</p>
+          <details className="pre-ingest-duplicate__activity-log">
+            <summary>Activity log ({scan.activityLog.length})</summary>
+            <div>
+              <button className="text-button" disabled={!progressLog} onClick={() => void copyProgressLog()} type="button">Copy log</button>
+              {copyStatus && <span role="status">{copyStatus}</span>}
+            </div>
+            <ol>
+              {scan.activityLog.map((entry, index) => (
+                <li key={`${entry.createdAt}-${entry.fileName ?? "job"}-${index}`}>
+                  <time dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleTimeString()}</time>
+                  {entry.fileName && <strong>{entry.fileName}</strong>}
+                  <span>{entry.message}</span>
+                </li>
+              ))}
+            </ol>
+          </details>
+        </section>
+      )}
       {scan?.youtubeCheckDetail && (
         <p className="pre-ingest-duplicate__notice" role="status">
           {scan.youtubeCheckDetail}
@@ -336,7 +396,7 @@ export function PreIngestDuplicatePanel({
                 )}
                 <div>
                   <strong>{file.fileName}</strong>
-                  <span>{file.sizeBytes.toLocaleString()} bytes</span>
+                  <span>{formatBytes(file.localMetadata.sizeBytes ?? file.sizeBytes)}</span>
                 </div>
                 <b
                   className={
@@ -389,26 +449,33 @@ export function PreIngestDuplicatePanel({
                   className="pre-ingest-duplicate__comparison pre-ingest-duplicate__comparison--remote"
                   aria-label={`Remote title comparison for ${file.fileName}`}
                 >
-                  <section>
-                    <span>Desktop source</span>
+                  <section className="pre-ingest-duplicate__source-metadata">
+                    <span>Local file</span>
                     <strong>{file.fileName}</strong>
-                    <p>Title: {file.fileName}</p>
-                    <p>Length: unavailable before ingest</p>
+                    <p className="pre-ingest-duplicate__comparison-title">Selected desktop source</p>
+                    <dl className="pre-ingest-duplicate__facts">
+                      <div><dt>Type</dt><dd>{file.localMetadata.fileType ?? "Unknown"}</dd></div>
+                      <div><dt>Size</dt><dd>{formatBytes(file.localMetadata.sizeBytes ?? file.sizeBytes)}</dd></div>
+                      <div><dt>Duration</dt><dd>{formatLocalDuration(file.localMetadata.durationSeconds)}</dd></div>
+                      <div><dt>Modified</dt><dd>{file.localMetadata.modifiedAt ? new Date(file.localMetadata.modifiedAt).toLocaleString() : "Not available"}</dd></div>
+                      {file.localMetadata.containerFormat && <div><dt>Container</dt><dd>{file.localMetadata.containerFormat}</dd></div>}
+                      {file.localMetadata.bitRate && <div><dt>Bit rate</dt><dd>{Number(file.localMetadata.bitRate).toLocaleString()} b/s</dd></div>}
+                    </dl>
+                    {(file.localMetadata.metadataFields.length > 0 || file.localMetadata.streams.length > 0) && <details className="pre-ingest-duplicate__full-metadata"><summary>Full container metadata</summary><dl>{file.localMetadata.metadataFields.map((field) => <div key={`container-${field.label}`}><dt>{field.label}</dt><dd>{field.value}</dd></div>)}</dl>{file.localMetadata.streams.map((stream) => <section key={stream.label}><strong>{stream.label}</strong><dl>{stream.fields.map((field) => <div key={`${stream.label}-${field.label}`}><dt>{field.label}</dt><dd>{field.value}</dd></div>)}</dl></section>)}</details>}
                   </section>
                   <section>
-                    <span>YouTube library title</span>
+                    <span>YouTube video</span>
                     {file.uploadedTitleMatches.map((match) => (
-                      <div key={`${match.title}-${match.updatedAt}`}>
+                      <div className="pre-ingest-duplicate__remote-match" key={`${match.title}-${match.updatedAt}`}>
                         <strong>{match.title}</strong>
-                        <p>Length: {formatYoutubeDuration(match.duration)}</p>
-                        <p>Title evidence only — not an exact file hash</p>
+                        <p className="pre-ingest-duplicate__comparison-title">Possible title match — not an exact file hash</p>
+                        <dl className="pre-ingest-duplicate__facts">
+                          <div><dt>Duration</dt><dd>{formatYoutubeDuration(match.duration)}</dd></div>
+                          <div><dt>Visibility</dt><dd>{match.privacyStatus ?? "Unavailable"}</dd></div>
+                        </dl>
                         <details>
-                          <summary>Metadata</summary>
+                          <summary>More YouTube details</summary>
                           <dl>
-                            <div>
-                              <dt>Privacy</dt>
-                              <dd>{match.privacyStatus ?? "Unavailable"}</dd>
-                            </div>
                             <div>
                               <dt>Inventory synced</dt>
                               <dd>
@@ -464,7 +531,8 @@ export function PreIngestDuplicatePanel({
           </h3>
           <p>
             This deletes only the dropped desktop source file. The matching
-            managed upload copy and any YouTube video stay unchanged.
+            managed upload copy and any YouTube video stay unchanged. It reuses
+            the accepted duplicate review and does not hash this file again.
           </p>
           <label htmlFor="local-duplicate-delete-confirmation">
             Type the exact file name to confirm
@@ -490,7 +558,7 @@ export function PreIngestDuplicatePanel({
               onClick={clearSingleDelete}
               type="button"
             >
-              Keep file
+              Cancel deletion
             </button>
             <button
               className="danger-button"
@@ -518,9 +586,10 @@ export function PreIngestDuplicatePanel({
             {selectedFiles.length === 1 ? "" : "s"}
           </h3>
           <p>
-            Each file is revalidated against the persisted duplicate review,
-            hashed before token creation, then hashed again immediately before
-            removal. Type <code>{bulkPhrase}</code> to confirm this batch.
+            The accepted opt-in duplicate review is reused for each selected
+            file. Deletion does not hash the files again; hashing happens only
+            when you run duplicate review. Type <code>{bulkPhrase}</code> to
+            confirm this batch.
           </p>
           <ul className="pre-ingest-duplicate__bulk-selection">
             {selectedFiles.map(({ file, ordinal }) => (
@@ -556,7 +625,7 @@ export function PreIngestDuplicatePanel({
               onClick={closeBulkDelete}
               type="button"
             >
-              Keep selected files
+              Cancel deletion
             </button>
             <button
               className="danger-button"

@@ -10,6 +10,7 @@ import {
   importAsset,
   isTauri,
   loadConnectionSettings,
+  loadCrashRecoveryStatus,
   loadPreflightDuplicateScan,
   loadSnapshot,
   preflightDuplicateFiles,
@@ -21,6 +22,7 @@ import {
   setItemVisibility,
   startQueuedUploads,
   syncChannelInventory,
+  recordWebviewError,
 } from "./lib/local";
 import type {
   DashboardSnapshot,
@@ -42,6 +44,8 @@ import { ManualUploadDefaultsPanel } from "./components/ManualUploadDefaultsPane
 import { UploadTitleDuplicateReview } from "./components/UploadTitleDuplicateReview";
 import { PreIngestDuplicatePanel } from "./components/PreIngestDuplicatePanel";
 import { TransferPanel } from "./components/TransferPanel";
+import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
+import { CrashRecoveryScreen } from "./components/CrashRecoveryScreen";
 import {
   dedupeProgressLabel,
   dedupeProgressStep,
@@ -81,6 +85,7 @@ const workspaceTabs = [
   ["transfer", "Export and import"],
   ["deletion", "Video deletion"],
   ["account", "Connected account"],
+  ["about", "About and support"],
 ] as const;
 type WorkspaceTab = (typeof workspaceTabs)[number][0];
 
@@ -100,6 +105,7 @@ export default function App() {
     [],
   );
   const [dedupePhase, setDedupePhase] = useState<DedupeProgressPhase>("idle");
+  const [libraryRefreshVersion, setLibraryRefreshVersion] = useState(0);
   const [dropActive, setDropActive] = useState(false);
   const [preflightDropActive, setPreflightDropActive] = useState(false);
   const [preflightBusy, setPreflightBusy] = useState(false);
@@ -110,8 +116,16 @@ export default function App() {
   const [connectionSettings, setConnectionSettings] =
     useState<ConnectionSettings>();
   const [setupDismissed, setSetupDismissed] = useState(false);
+  const [crashRecovery, setCrashRecovery] = useState<{
+    crashDetected: boolean;
+    detectedAt?: string;
+    failureKind?: string;
+  }>();
+  const [exitConfirmationOpen, setExitConfirmationOpen] = useState(false);
   const dedupeActivityId = useRef(0);
   const preflightRunId = useRef(0);
+  const recoveryModeRef = useRef(false);
+  recoveryModeRef.current = Boolean(crashRecovery?.crashDetected);
 
   const updateConnection = useCallback((settings: ConnectionSettings) => {
     setConnectionSettings(settings);
@@ -144,6 +158,35 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    let active = true;
+    void loadCrashRecoveryStatus()
+      .then((status) => {
+        if (active) setCrashRecovery(status);
+      })
+      .catch(() => {
+        if (active) setCrashRecovery({ crashDetected: false });
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const enterRecovery = (failureKind: string) => {
+      void recordWebviewError();
+      setCrashRecovery({ crashDetected: true, failureKind });
+    };
+    const onUnhandledRejection = () => enterRecovery("Unhandled promise rejection");
+    const onWebviewError = () => enterRecovery("Webview error");
+    window.addEventListener("error", onWebviewError);
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    return () => {
+      window.removeEventListener("error", onWebviewError);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -204,7 +247,8 @@ export default function App() {
   useEffect(() => {
     if (
       !preflightScan ||
-      ["complete", "cancelled"].includes(preflightScan.status) ||
+      ( ["complete", "cancelled"].includes(preflightScan.status) &&
+        preflightScan.pendingMetadataFiles === 0) ||
       !isTauri
     )
       return;
@@ -420,6 +464,43 @@ export default function App() {
   }, [activeTab, reviewImport, runPreflightDuplicateCheck]);
 
   useEffect(() => {
+    if (!isTauri) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow()
+      .onCloseRequested((event) => {
+        // Recovery is a safe holding screen. Do not trap the operator in it:
+        // closing leaves the persisted crash marker and all resumable work
+        // untouched for the next launch.
+        if (recoveryModeRef.current) return;
+        event.preventDefault();
+        setExitConfirmationOpen(true);
+      })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {
+        // Closing follows the operating system default when the native event is unavailable.
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const confirmExit = useCallback(async () => {
+    try {
+      // `close()` emits the same close-request event that opened this dialog.
+      // Destroy is Tauri's explicit confirmed-close path and bypasses that event.
+      await getCurrentWindow().destroy();
+    } catch {
+      setExitConfirmationOpen(false);
+      setNotice("The app could not close. Your saved queue remains unchanged.");
+    }
+  }, []);
+
+  useEffect(() => {
     if (
       !snapshot.items.some(
         (item) => item.status === "uploading" || item.status === "dispatching",
@@ -590,6 +671,33 @@ export default function App() {
     }
   };
 
+  const refreshYouTubeLibrary = async () => {
+    const channel = snapshot.activeChannel;
+    if (!channel) {
+      setNotice("Connect a YouTube channel before refreshing its library.");
+      return;
+    }
+    setBusy(true);
+    setNotice(`Refreshing ${channel}'s YouTube library…`);
+    try {
+      const synced = await syncChannelInventory();
+      await refresh();
+      updateConnection(await loadConnectionSettings());
+      setLibraryRefreshVersion((version) => version + 1);
+      setNotice(
+        `Library refreshed: ${synced} YouTube video${synced === 1 ? "" : "s"} saved locally for ${channel}.`,
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "The YouTube library could not be refreshed. Your last complete local library was kept.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const runDedupe = async () => {
     const channel = snapshot.activeChannel;
     if (!channel) {
@@ -689,6 +797,16 @@ export default function App() {
     }
   };
 
+  if (crashRecovery?.crashDetected) {
+    return (
+      <CrashRecoveryScreen
+        detectedAt={crashRecovery.detectedAt}
+        failureKind={crashRecovery.failureKind}
+        onContinue={() => setCrashRecovery({ crashDetected: false })}
+      />
+    );
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -705,6 +823,14 @@ export default function App() {
           </div>
         </div>
         <div className="actions">
+          <button
+            className="secondary-action"
+            disabled={!snapshot.activeChannel || busy}
+            onClick={() => void refreshYouTubeLibrary()}
+            type="button"
+          >
+            Refresh library
+          </button>
           <button
             disabled={!snapshot.activeChannel || busy}
             onClick={() => void startUploads()}
@@ -743,6 +869,37 @@ export default function App() {
             />
           </>
         )}
+      {exitConfirmationOpen && (
+        <>
+          <div aria-hidden="true" className="exit-confirmation-backdrop" />
+          <section
+            aria-labelledby="exit-confirmation-heading"
+            aria-modal="true"
+            className="exit-confirmation"
+            role="dialog"
+          >
+            <p className="eyebrow">EXIT APPLICATION</p>
+            <h2 id="exit-confirmation-heading">Exit YouTube Upload Manager?</h2>
+            <p>
+              Your queue and duplicate-review progress are saved locally. Any
+              active upload will be recovered when you open the app again.
+            </p>
+            <div className="exit-confirmation__actions">
+              <button
+                autoFocus
+                className="secondary-action"
+                onClick={() => setExitConfirmationOpen(false)}
+                type="button"
+              >
+                Keep app open
+              </button>
+              <button className="danger-button" onClick={() => void confirmExit()} type="button">
+                Exit app
+              </button>
+            </div>
+          </section>
+        </>
+      )}
       {pendingImportPaths && (
         <UploadIntakeReview
           paths={pendingImportPaths}
@@ -1031,6 +1188,7 @@ export default function App() {
                 activeChannel={snapshot.activeChannel}
                 busy={busy}
                 onNotice={setNotice}
+                refreshVersion={libraryRefreshVersion}
               />
             </section>
           </section>
@@ -1056,6 +1214,16 @@ export default function App() {
             role="tabpanel"
           >
             <ConnectionPanel onConnectionChange={updateConnection} />
+          </section>
+
+          <section
+            aria-labelledby="workspace-tab-button-about"
+            className="workspace-tab"
+            hidden={activeTab !== "about"}
+            id="workspace-tab-about"
+            role="tabpanel"
+          >
+            <DiagnosticsPanel />
           </section>
         </div>
       </div>

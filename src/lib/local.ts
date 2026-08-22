@@ -97,6 +97,51 @@ export async function loadSnapshot(): Promise<DashboardSnapshot> {
   return invoke<DashboardSnapshot>("dashboard_snapshot");
 }
 
+export async function loadDiagnosticReport(): Promise<string> {
+  if (!isTauri) {
+    return `## What happened\n\n<!-- Describe what you saw and the steps to reproduce it. -->\n\n## Diagnostics\n\n- App: browser preview\n- User agent: ${navigator.userAgent}\n`;
+  }
+  return invoke<string>("github_issue_diagnostic_report");
+}
+
+export type ReleaseIdentity = {
+  version: string;
+  channel: "regular" | "nightly";
+  buildProfile: string;
+};
+
+const browserPreviewRelease: ReleaseIdentity = {
+  version: "browser preview",
+  channel: "regular",
+  buildProfile: "preview",
+};
+
+export async function loadReleaseIdentity(): Promise<ReleaseIdentity> {
+  if (!isTauri) return browserPreviewRelease;
+  return invoke<ReleaseIdentity>("app_release_identity");
+}
+
+export type CrashRecoveryStatus = {
+  crashDetected: boolean;
+  detectedAt?: string;
+  failureKind?: string;
+};
+
+export async function loadCrashRecoveryStatus(): Promise<CrashRecoveryStatus> {
+  if (!isTauri) return { crashDetected: false };
+  return invoke<CrashRecoveryStatus>("load_crash_recovery_status");
+}
+
+export async function acknowledgeCrashRecovery(): Promise<void> {
+  if (!isTauri) return;
+  await invoke("acknowledge_crash_recovery");
+}
+
+export async function recordWebviewError(): Promise<void> {
+  if (!isTauri) return;
+  await invoke("record_webview_error");
+}
+
 export async function importAsset(
   path: string,
   settings: ManualUploadSettings,
@@ -164,7 +209,9 @@ export async function preflightDuplicateFiles(
       status: "complete",
       totalFiles: 0,
       completedFiles: 0,
+      pendingMetadataFiles: 0,
       files: [],
+      activityLog: [],
       youtubeTitleChecked: false,
     };
   return invoke<PreIngestDuplicateScan>("start_preflight_duplicate_files", {
@@ -188,7 +235,7 @@ export async function cancelPreflightDuplicateScan(
   return invoke<void>("cancel_preflight_duplicate_scan", { jobId });
 }
 
-/** Revalidates a light or deep local match and returns a short-lived native deletion token. */
+/** Reuses an accepted local duplicate review to return a short-lived native deletion token. */
 export async function preparePreflightLocalDeleteFile(
   jobId: string,
   ordinal: number,
@@ -200,7 +247,7 @@ export async function preparePreflightLocalDeleteFile(
   return invoke<string>("prepare_preflight_local_delete_file", { jobId, ordinal });
 }
 
-/** Permanently deletes one freshly verified desktop source file after exact filename confirmation. */
+/** Permanently deletes one desktop source file after exact filename confirmation, without rehashing it. */
 export async function deletePreflightDuplicateFile(
   token: string,
   confirmation: string,
