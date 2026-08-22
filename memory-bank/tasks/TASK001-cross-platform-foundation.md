@@ -6,7 +6,7 @@
 
 ## Objective
 
-Define and build the first production-shaped version of YouTube Mass Uploader: a local-first native application that runs on the operator's device, securely connects an operator's YouTube channel, batch-uploads videos directly from local storage, inventories channel uploads, identifies duplicate candidates, and lets the operator safely review and delete selected videos.
+Define and build the first production-shaped version of YouTube Mass Uploader: a native application that runs on the operator's device, securely connects an operator's YouTube channel, batch-uploads videos directly from local storage, inventories channel uploads, identifies duplicate candidates, and lets the operator safely review and delete selected videos.
 
 The selected framework is **Tauri 2 with React + Vite**: a shared TypeScript interface runs in Tauri's native webview, while Rust owns all privileged local operations. One codebase targets Windows, macOS, Linux, Android, and iOS. The app has no application-controlled backend or cloud dependency; Google OAuth and YouTube are the sole required network services.
 
@@ -179,7 +179,7 @@ Exit criteria: local/CI success and live-provider certification are reported sep
 | Date | Check | Result |
 | --- | --- | --- |
 | 2026-08-22 | Plan reviewed against current official YouTube upload, resumable upload, inventory, video-details, delete, quota, OAuth, and developer-policy documentation | Task ready; implementation and live-provider validation not started |
-| 2026-08-22 | Architecture revised by user requirement | Tauri 2 + React/Vite local-first application selected; application-controlled remote services explicitly out of scope |
+| 2026-08-22 | Architecture revised by user requirement | Tauri 2 + React/Vite application selected; application-controlled remote services explicitly out of scope |
 | 2026-08-22 | Crash-safe queue requirement | Managed local asset workspace and provider-authoritative resume checkpoints required; no re-drag for existing queued items |
 | 2026-08-22 | Foundation implementation | Tauri/React workspace, local SQLite queue schema, responsive dashboard UI, and managed asset import created; native release executable built successfully after repairing the local Windows SDK. |
 | 2026-08-22 | Import recovery proof | Rust unit test resumes an interrupted managed-media copy, verifies the final byte count and SHA-256 digest, and passes. Browser desktop and 390px mobile UI checks pass without console errors. |

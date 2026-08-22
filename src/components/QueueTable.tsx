@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { UploadItem, UploadVisibility } from "../lib/types";
 import { StatusPill } from "./StatusPill";
 
@@ -22,12 +23,36 @@ function formatEta(item: UploadItem) {
 }
 
 export function QueueTable({ items, busy, onQueue, onVisibilityChange }: QueueTableProps) {
+  const [titleQuery, setTitleQuery] = useState("");
+
   if (items.length === 0) {
     return <p className="queue-table__empty queue-table__empty--state">Your upload queue is empty.</p>;
   }
 
+  const normalizedQuery = titleQuery.trim().toLocaleLowerCase();
+  const matchingItems = normalizedQuery
+    ? items.filter((item) => item.title.toLocaleLowerCase().includes(normalizedQuery))
+    : items;
+
   return (
     <div className="queue-table-wrap queue-table-rail">
+      <div className="queue-table__search">
+        <label htmlFor="upload-queue-title-search">Search video titles</label>
+        <div className="queue-table__search-control">
+          <input
+            id="upload-queue-title-search"
+            onChange={(event) => setTitleQuery(event.target.value)}
+            placeholder="Search titles"
+            type="search"
+            value={titleQuery}
+          />
+          {titleQuery ? (
+            <button className="queue-button" onClick={() => setTitleQuery("")} type="button">
+              Clear search
+            </button>
+          ) : null}
+        </div>
+      </div>
       <table className="queue-table queue-table--rail">
         <thead>
           <tr>
@@ -40,7 +65,7 @@ export function QueueTable({ items, busy, onQueue, onVisibilityChange }: QueueTa
           </tr>
         </thead>
         <tbody className="queue-table__body">
-          {items.map((item) => {
+          {matchingItems.map((item) => {
             const progress = item.totalBytes
               ? Math.min(100, Math.max(0, Math.round((item.confirmedBytes / item.totalBytes) * 100)))
               : 0;
@@ -101,6 +126,13 @@ export function QueueTable({ items, busy, onQueue, onVisibilityChange }: QueueTa
               </tr>
             );
           })}
+          {matchingItems.length === 0 ? (
+            <tr>
+              <td className="queue-table__empty" colSpan={6}>
+                No video titles match “{titleQuery.trim()}”.
+              </td>
+            </tr>
+          ) : null}
         </tbody>
       </table>
     </div>

@@ -7,7 +7,7 @@
 
 ## Engineering constraints
 
-- The app is local-first: do not add an application backend, cloud queue, database, object store, analytics service, or automatic media upload outside Google/YouTube.
+- Do not add an application backend, cloud queue, database, object store, analytics service, or automatic media upload outside Google/YouTube.
 - Keep Google/YouTube refresh and access tokens out of source control, webview bundles, logs, and memory-bank files. Store them through platform secure storage accessed from Rust. An installed-app OAuth client ID is a public identifier, not a client secret.
 - Use PKCE for installed-app OAuth. Desktop may use loopback redirects; Android and iOS must use an approved platform-specific flow because mobile loopback redirects are deprecated.
 - Require least-privilege OAuth scopes. Document every requested scope and its product need before implementation.
@@ -21,9 +21,10 @@
 - The dashboard's channel-gated **Run dedupe** action calls the existing inventory synchronization command and then reloads the snapshot. This is the only manual trigger needed for title-based uploaded-video candidates; queue recovery has no button because it is automatic at app startup.
 - Each manual dedupe run records device-local operator activity: start, channel-inventory synchronization, synchronized count, local normalized-title candidate rebuild, final candidate count, and safe errors. The UI reports only command boundaries exposed by the native layer; it never invents per-video progress, and it explicitly states that dedupe removes no video.
 - Dedupe activity includes an accessible determinate three-step phase bar: inventory synchronization, local candidate rebuild, and review readiness. Its values are phase completion, not a fabricated count or elapsed-time estimate; failure visibly remains incomplete.
-- The desktop CSP permits `frame-src https://www.youtube-nocookie.com` solely for the duplicate-comparison player frames. It does not permit arbitrary frames or broaden OAuth/API connections; individual video embed availability remains controlled by YouTube.
+- The desktop CSP permits `frame-src https://www.youtube.com` solely for the lazy duplicate-comparison player frames. A separate Tauri WebviewWindow opens directly to YouTube for operator sign-in and has no application capability because only `main` is capability-scoped. The app does not access credentials or browser data; individual video embed and third-party-cookie availability remains controlled by YouTube.
 - Duplicate comparison playback uses icon-only buttons with visible browser tooltips and accessible names for shared back 10 seconds, play/pause, and forward 10 seconds. Seeks are dispatched to both player frames and clamp to 0 through 86,400 seconds.
-- OAuth uses the Google-installed-app PKCE loopback flow. When a shared Desktop client cannot complete authorization, the operator can choose a downloaded Google **Desktop** OAuth JSON; Rust validates the `installed` client shape, keeps only its public client ID in SQLite, and retains its optional client secret solely in the OS credential store. The JSON contents, authorization codes, verifiers, and token responses never enter the webview or audit log.
+- OAuth uses the Google-installed-app PKCE loopback flow. Each operator creates a Google Cloud project they control, enables the YouTube Data API, configures the consent screen, creates a Google **Desktop** OAuth client, and imports its downloaded JSON. Rust validates the `installed` client shape, keeps its client ID in SQLite, and retains its optional client secret solely in the OS credential store. The JSON contents, authorization codes, verifiers, and token responses never enter the webview or audit log.
+- First-open setup is a dismissible, local guide that stays visible on later launches until the safe `oauthConfigured` status becomes true. Its only remote actions open fixed Google account or Cloud Console addresses in dedicated unprivileged WebviewWindows; it cannot create or configure a Google resource on the operator's behalf.
 - After launching the system browser, the connection panel polls the native connection receipt once per second until it changes. This resolves the callback outcome even when the platform opener does not resolve promptly.
 - Separate local checks from live certification. A real upload canary needs an authorized non-production-safe destination/account and explicit operator approval.
 - Watched-folder uploads are opt-in and bound to the active channel recorded at enable time. The operator selects private or unlisted visibility at enable time; existing monitors migrate safely to private, and public automatic uploads are rejected. The native app polls every five seconds only while running, treats current supported files as a non-uploading baseline, and requires size plus modification time to remain unchanged across two scans before ingestion.
@@ -34,6 +35,59 @@
 - When the YouTube upload API returns a recognized `quotaExceeded`, `dailyLimitExceeded`, or `uploadLimitExceeded` response, the native queue stores a 24-hour device-local dispatch pause without persisting provider payloads. The affected item returns to `queued`, queued work is not sent during the pause, and the local worker resumes it after expiry or at the next app start.
 - Current and batch upload ETAs are projections of only the latest server-acknowledged transfer rate. Before a confirmed rate exists, the UI says it is calculating rather than inventing a duration. The webview polls a running queue once per second; provider interactions remain native-only.
 - Native file drag-drop supplies filesystem paths directly to the same managed-local import command used by the picker. Both UI and Rust restrict intake to supported video extensions, and the Rust command remains the enforcement boundary.
+- Pre-ingest duplicate checking deliberately uses Tauri's cross-platform dialog
+  and filesystem layers: desktop accepts drag/drop paths, while Android and iOS
+  use the document picker and its platform URI/handle. The native layer streams
+  every selected non-empty file into SHA-256 without creating an upload item or
+  exposing file bytes to the webview. The existing ingest boundary still decides
+  which formats can be copied into the managed upload workspace. The UI tracks
+  each preflight run so a later drop cannot be overwritten by an earlier result;
+  iOS security-scoped file access ends immediately after the streaming hash.
+- Both video intake and pre-ingest duplicate checking request `multiple: true`
+  from the native document picker. A shared result normalizer preserves all
+  returned desktop paths, Android content URIs, and iOS file URIs, while a
+  cancelled picker produces no native operation.
+- Exact desktop pre-ingest matches receive a short-lived opaque native deletion
+  token. The webview only receives that token and a filename; before permanent
+  deletion Rust requires the exact filename, rejects app-managed media paths,
+  re-hashes the source to prevent time-of-check/time-of-use replacement, then
+  records a local audit event without the source path.
+- Cross-device transfer uses a versioned gzip JSON archive with only upload
+  title/file-name/size/SHA-256 metadata and remote YouTube inventory. Imported
+  uploads are explicitly `metadata_only`; they contain no media path and cannot
+  be resumed or dispatched. The archive excludes all tokens, client secrets,
+  source paths, managed media, session URLs, and local audit history, and its
+  compressed and decompressed input limits are both 16 MiB.
+- Pre-ingest duplicate work is dispatched through Tauri's blocking worker pool.
+  This keeps the native event loop responsive while hashing large desktop drops,
+  querying local duplicate records, and optionally refreshing YouTube inventory.
+- Pre-ingest checks are persistent device-local jobs. The default light mode only
+  compares filenames and does not open media; deep mode streams SHA-256 one
+  source at a time, checkpointing after every source and resuming unfinished
+  jobs at launch. Native source locators remain in SQLite and are not exposed
+  to the webview. Remote inventory sync stages all pages and replaces the
+  previous inventory atomically only after success, preserving the last known
+  complete snapshot across a crash or failed network call.
+- Crash recovery is deliberately operation-specific. Managed imports resume from
+  their partial local copy; queued uploads resume only when the protected
+  YouTube resumable-session checkpoint survives and then start at the
+  provider-confirmed byte range. Uploads with no safe checkpoint remain in
+  explicit reconciliation. Watched-folder observations, pre-ingest jobs,
+  inventory staging, and import records are persisted before their work runs.
+  Remote deletion writes an `executing` checkpoint before the DELETE request;
+  a restart changes it to `needs_reconciliation`, requiring a new typed-ID
+  confirmation rather than assuming completion or blindly retrying. Portable
+  archive import is transactional and export is written/synced to a temporary
+  file before publication, never overwriting an existing archive.
+- Queue clearing is cancellation, not destructive cleanup: upload items become
+  `cancelled` while their managed media and resumable evidence remain local;
+  pre-ingest jobs become `cancelled` and workers stop before subsequent files
+  or inventory work; pending/recoverable deletion requests become `cancelled`
+  without contacting YouTube. Each action has a device-local audit receipt.
+- The webview process is presentation-only. Disk streaming, hashing, managed
+  import/recovery, folder scans, SQLite-heavy archive transfer, and all YouTube
+  requests run in dedicated native worker threads. Tauri commands schedule the
+  worker work and return results without occupying the UI command path.
 - Windows taskbar icon source of truth is `src-tauri/icons/icon.png`. Regenerate the
   `.ico` and platform variants with `npx tauri icon src-tauri/icons/icon.png` before
   building an installer; Tauri's Windows bundle embeds `icons/icon.ico`, so updating

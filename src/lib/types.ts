@@ -66,10 +66,46 @@ export type DuplicateCandidate = {
   decision?: "keep" | "dismiss" | "delete_requested";
 };
 
+/** A newly imported local video whose title matches an uploaded channel video. */
+export type UploadTitleDuplicate = {
+  itemId: string;
+  title: string;
+  /** Matching titles from the owner-authorized, freshly synchronized YouTube inventory. */
+  matchedTitles: string[];
+};
+
+export type UploadTitleDuplicateDecision = "ignore" | "skip";
+
+/** A file checked locally before it is imported into the upload workspace. */
+export type PreIngestDuplicateFile = {
+  /** Opaque, short-lived native handle for deleting only this verified desktop source file. */
+  localDeleteToken?: string;
+  fileName: string;
+  sizeBytes: number;
+  localMatches: Array<{ title: string; fileName: string; status: string }>;
+  droppedDuplicateFileNames: string[];
+  uploadedTitleMatches: string[];
+  error?: string;
+};
+
+/** Persisted, device-local pre-ingest work. Source paths never enter the webview. */
+export type PreIngestDuplicateScan = {
+  id: string;
+  mode: "light" | "deep" | string;
+  status: "queued" | "running" | "syncing" | "complete" | string;
+  totalFiles: number;
+  completedFiles: number;
+  files: PreIngestDuplicateFile[];
+  youtubeTitleChecked: boolean;
+  youtubeCheckDetail?: string;
+};
+
 export type DashboardSnapshot = {
   activeChannel?: string;
   items: UploadItem[];
   duplicates: DuplicateCandidate[];
+  /** Title matches held for an explicit operator decision before they can upload. */
+  pendingTitleDuplicates: UploadTitleDuplicate[];
 };
 
 /** Safe, device-local status for the operator-approved watched folder. */
@@ -78,6 +114,9 @@ export type FolderMonitorSettings = {
   folderPath?: string;
   channelName?: string;
   visibility: FolderMonitorVisibility;
+  madeForKids: boolean;
+  playlistId?: string;
+  playlistTitle?: string;
   status: string;
   detail: string;
   lastScanAt?: string;
@@ -86,17 +125,29 @@ export type FolderMonitorSettings = {
 
 /** Safe-to-render metadata. OAuth tokens never enter the webview. */
 export type ConnectionSettings = {
-  clientId?: string;
+  /** The native layer has an operator-imported Desktop OAuth client; its ID is not exposed to the webview. */
+  oauthConfigured?: boolean;
   activeChannel?: string;
   connected: boolean;
   detail?: string;
   secureStoreAvailable?: boolean;
-  /** True only after a fresh native OAuth re-authorization included YouTube deletion scope. */
+  /** True after native OAuth has granted the YouTube deletion scope to this device. */
   deletionAuthorized?: boolean;
+  /** A temporary, local deletion session is active; every video still requires confirmation. */
+  deletionSudoActive?: boolean;
+  deletionSudoExpiresAt?: string;
 };
 
 export type YouTubeConnectionStart = {
   authorizationUrl: string;
+};
+
+/** Safe receipt for a compact cross-device metadata archive. */
+export type PortableArchiveReceipt = {
+  uploadCount: number;
+  remoteVideoCount: number;
+  bytes: number;
+  detail: string;
 };
 
 /** Owner-authorized YouTube inventory metadata, kept local to this device. */

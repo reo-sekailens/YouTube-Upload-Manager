@@ -54,7 +54,7 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
   }, [connecting, onConnectionChange]);
 
   const connect = async () => {
-    if (!isTauri || !settings.clientId) return;
+    if (!isTauri || !settings.oauthConfigured) return;
     setConnecting(true);
     try {
       const { authorizationUrl } = await beginYoutubeConnection();
@@ -144,13 +144,14 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
       </div>
 
       <p className="connection-form__help">
-        This personal build includes its public desktop OAuth client ID. Your
+        Create your own Google Cloud project, enable the YouTube Data API,
+        create a Desktop OAuth client, then import its downloaded JSON here.
         OAuth access and refresh tokens remain in OS-protected storage and
         never reach this screen.
       </p>
       {!settings.connected && (
         <p className="connection-form__help">
-          If Google rejects the built-in client, import your downloaded Desktop OAuth JSON. The file is parsed locally and its client secret is stored only in the operating system credential store.
+          The JSON is parsed locally. Its client secret, when included, is stored only in the operating system credential store.
         </p>
       )}
       {notice && <p className="connection-form__notice" role="status">{notice}</p>}

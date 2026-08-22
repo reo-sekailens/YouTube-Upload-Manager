@@ -4,14 +4,16 @@ import {
   disableFolderMonitor,
   enableFolderMonitor,
   isTauri,
+  listYouTubePlaylists,
   loadFolderMonitorSettings,
   scanFolderMonitorNow,
 } from "../lib/local";
-import type { FolderMonitorSettings, FolderMonitorVisibility } from "../lib/types";
+import type { FolderMonitorSettings, FolderMonitorVisibility, YouTubePlaylist } from "../lib/types";
 
 const unavailable: FolderMonitorSettings = {
   enabled: false,
   visibility: "private",
+  madeForKids: false,
   status: "disabled",
   detail: "Folder monitoring is off.",
 };
@@ -43,6 +45,9 @@ export function FolderMonitorPanel({ activeChannel, onNotice, onQueueRefresh }: 
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [visibility, setVisibility] = useState<FolderMonitorVisibility>("private");
+  const [madeForKids, setMadeForKids] = useState(false);
+  const [playlists, setPlaylists] = useState<YouTubePlaylist[]>([]);
+  const [playlistId, setPlaylistId] = useState("");
   const lastQueueRefreshAt = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -75,13 +80,19 @@ export function FolderMonitorPanel({ activeChannel, onNotice, onQueueRefresh }: 
     };
   }, [activeChannel, onQueueRefresh]);
 
+  useEffect(() => {
+    if (!isTauri || !activeChannel) { setPlaylists([]); return; }
+    void listYouTubePlaylists().then(setPlaylists).catch(() => setPlaylists([]));
+  }, [activeChannel]);
+
   const chooseAndEnable = async () => {
     if (!isTauri || !activeChannel) return;
     setBusy(true);
     try {
       const selected = await open({ directory: true, multiple: false });
       if (typeof selected !== "string") return;
-      const updated = await enableFolderMonitor(selected, visibility);
+      const playlist = playlists.find((candidate) => candidate.id === playlistId);
+      const updated = await enableFolderMonitor(selected, visibility, madeForKids, playlist?.id, playlist?.title);
       setSettings(updated);
       setLoadError("");
       onNotice(`Folder monitoring is enabled for ${updated.channelName ?? activeChannel}. New completed videos will be copied locally, queued, and start uploading as ${updated.visibility} once stable.`);
@@ -149,6 +160,8 @@ export function FolderMonitorPanel({ activeChannel, onNotice, onQueueRefresh }: 
             <div><dt>Folder</dt><dd title={settings.folderPath}>{settings.folderPath ?? "Unavailable"}</dd></div>
             <div><dt>Bound channel</dt><dd>{settings.channelName ?? "Unavailable"}</dd></div>
             <div><dt>Visibility</dt><dd>{settings.visibility}</dd></div>
+            <div><dt>Audience</dt><dd>{settings.madeForKids ? "Made for kids" : "Not made for kids"}</dd></div>
+            <div><dt>Playlist</dt><dd>{settings.playlistTitle ?? "No playlist"}</dd></div>
             <div><dt>Last scan</dt><dd>{formatScanTime(settings.lastScanAt)}</dd></div>
             <div><dt>Last file</dt><dd>{settings.lastFileName ?? "No file processed yet"}</dd></div>
           </dl>
@@ -162,7 +175,7 @@ export function FolderMonitorPanel({ activeChannel, onNotice, onQueueRefresh }: 
         <div className="folder-monitor__disabled">
           <div>
             <p>{activeChannel ? `Ready to bind a folder to ${activeChannel}.` : "Connect a YouTube channel before choosing a folder."}</p>
-            <label className="folder-monitor__visibility"><span>Automatic upload visibility</span><select disabled={!activeChannel || busy} onChange={(event) => setVisibility(event.target.value as FolderMonitorVisibility)} value={visibility}><option value="private">Private</option><option value="unlisted">Unlisted</option></select></label>
+            <div className="folder-monitor__options"><label className="folder-monitor__visibility"><span>Automatic upload visibility</span><select disabled={!activeChannel || busy} onChange={(event) => setVisibility(event.target.value as FolderMonitorVisibility)} value={visibility}><option value="private">Private</option><option value="unlisted">Unlisted</option></select></label><label className="folder-monitor__visibility"><span>Audience</span><select disabled={!activeChannel || busy} onChange={(event) => setMadeForKids(event.target.value === "yes")} value={madeForKids ? "yes" : "no"}><option value="no">Not made for kids</option><option value="yes">Made for kids</option></select></label><label className="folder-monitor__visibility"><span>Add to playlist</span><select disabled={!activeChannel || busy} onChange={(event) => setPlaylistId(event.target.value)} value={playlistId}><option value="">No playlist</option>{playlists.map((playlist) => <option key={playlist.id} value={playlist.id}>{playlist.title}</option>)}</select></label></div>
           </div>
           <button disabled={!isTauri || !activeChannel || busy} onClick={() => void chooseAndEnable()} type="button">{busy ? "Enabling…" : "Choose folder and enable"}</button>
           {!isTauri && <span>Open the signed desktop app to monitor a local folder.</span>}

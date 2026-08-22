@@ -1,6 +1,6 @@
 ---
 title: Terms of Service
-description: Terms for the local-first YouTube Upload Manager application.
+description: Terms for the YouTube Upload Manager application.
 ---
 
 Last updated: 22 August 2026
@@ -11,7 +11,7 @@ not agree, do not use the App.
 
 ## The App and YouTube
 
-The App is a local-first tool that runs on your device. It helps you prepare
+The App runs on your device. It helps you prepare
 uploads, connect an authorized YouTube channel, upload videos directly to
 YouTube, review channel-library data, and review potential duplicates. The App
 is not provided by, endorsed by, sponsored by, or affiliated with YouTube or

@@ -19,7 +19,7 @@ existing separately confirmed deletion workflow.
   whitespace before the marker. Do not use fuzzy or substring matching.
 - Keep title matches at metadata confidence; they are not proof of identical
   media and must never trigger automatic deletion.
-- Preserve local-first storage and the existing YouTube deletion safeguards.
+- Preserve device-local storage and the existing YouTube deletion safeguards.
 
 ## Work items
 

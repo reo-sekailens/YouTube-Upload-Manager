@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { importAsset, isTauri, loadSnapshot, queueItem, setItemVisibility, startQueuedUploads, syncChannelInventory } from "./lib/local";
-import type { DashboardSnapshot, ManualUploadSettings, UploadItem, UploadVisibility } from "./lib/types";
+import { cancelPreflightDuplicateScan, checkUploadTitleDuplicates, clearUploadQueue, deletePreflightDuplicateFile, importAsset, isTauri, loadConnectionSettings, loadPreflightDuplicateScan, loadSnapshot, preflightDuplicateFiles, queueItem, resolveUploadTitleDuplicates, setItemVisibility, startQueuedUploads, syncChannelInventory } from "./lib/local";
+import type { DashboardSnapshot, ManualUploadSettings, PreIngestDuplicateScan, UploadItem, UploadVisibility } from "./lib/types";
 import type { ConnectionSettings } from "./lib/types";
 import { ConnectionPanel } from "./components/ConnectionPanel";
+import { GoogleSetupWizard } from "./components/GoogleSetupWizard";
 import { DeletionReview } from "./components/DeletionReview";
 import { DuplicateReview } from "./components/DuplicateReview";
 import { FolderMonitorPanel } from "./components/FolderMonitorPanel";
@@ -12,11 +13,17 @@ import { QueueTable } from "./components/QueueTable";
 import { UploadProgressSummary } from "./components/UploadProgressSummary";
 import { UploadIntakeReview } from "./components/UploadIntakeReview";
 import { ManualUploadDefaultsPanel } from "./components/ManualUploadDefaultsPanel";
+import { UploadTitleDuplicateReview } from "./components/UploadTitleDuplicateReview";
+import { PreIngestDuplicatePanel } from "./components/PreIngestDuplicatePanel";
+import { TransferPanel } from "./components/TransferPanel";
 import { dedupeProgressLabel, dedupeProgressStep, dedupeProgressStepCount, recordDedupeActivity } from "./lib/dedupe-activity";
 import type { DedupeActivityState, DedupeActivityEntry, DedupeProgressPhase } from "./lib/dedupe-activity";
+import { selectedFilePaths } from "./lib/file-picker";
 
-const emptySnapshot: DashboardSnapshot = { items: [], duplicates: [] };
+const emptySnapshot: DashboardSnapshot = { items: [], duplicates: [], pendingTitleDuplicates: [] };
 const supportedVideoExtensions = new Set(["3g2", "3gp", "avi", "flv", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "webm", "wmv"]);
+const workspaceTabs = [["batch", "Batch uploads"], ["monitor", "Folder monitor"], ["dedupe", "Duplicate review"], ["transfer", "Export and import"], ["deletion", "Video deletion"], ["account", "Connected account"]] as const;
+type WorkspaceTab = typeof workspaceTabs[number][0];
 
 function isSupportedVideoPath(path: string) {
   const extension = path.split(".").pop()?.toLowerCase();
@@ -31,10 +38,19 @@ export default function App() {
   const [dedupeActivity, setDedupeActivity] = useState<DedupeActivityEntry[]>([]);
   const [dedupePhase, setDedupePhase] = useState<DedupeProgressPhase>("idle");
   const [dropActive, setDropActive] = useState(false);
+  const [preflightDropActive, setPreflightDropActive] = useState(false);
+  const [preflightBusy, setPreflightBusy] = useState(false);
+  const [preflightFileCount, setPreflightFileCount] = useState(0);
+  const [preflightScan, setPreflightScan] = useState<PreIngestDuplicateScan>();
   const [pendingImportPaths, setPendingImportPaths] = useState<string[]>();
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("batch");
+  const [connectionSettings, setConnectionSettings] = useState<ConnectionSettings>();
+  const [setupDismissed, setSetupDismissed] = useState(false);
   const dedupeActivityId = useRef(0);
+  const preflightRunId = useRef(0);
 
   const updateConnection = useCallback((settings: ConnectionSettings) => {
+    setConnectionSettings(settings);
     setSnapshot((current) => ({ ...current, activeChannel: settings.activeChannel }));
   }, []);
 
@@ -57,6 +73,16 @@ export default function App() {
     void refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    let active = true;
+    void loadConnectionSettings().then((settings) => {
+      if (active) updateConnection(settings);
+    }).catch(() => {
+      // The account panel retains the actionable local error if settings cannot load.
+    });
+    return () => { active = false; };
+  }, [updateConnection]);
+
   const reviewImport = useCallback((paths: string[]) => {
     const videos = paths.filter(isSupportedVideoPath);
     if (videos.length === 0) {
@@ -65,6 +91,68 @@ export default function App() {
     }
     setPendingImportPaths(videos);
   }, []);
+
+  const runPreflightDuplicateCheck = useCallback(async (paths: string[], mode: "light" | "deep" = "light") => {
+    if (paths.length === 0) return;
+    const runId = preflightRunId.current + 1;
+    preflightRunId.current = runId;
+    setPreflightBusy(true);
+    setPreflightFileCount(paths.length);
+    setPreflightScan(undefined);
+    try {
+      const scan = await preflightDuplicateFiles(paths, mode);
+      if (runId !== preflightRunId.current) return;
+      setPreflightScan(scan);
+      setNotice(mode === "light" ? `Fast filename match started for ${paths.length} file${paths.length === 1 ? "" : "s"}.` : `Deep SHA-256 match started for ${paths.length} file${paths.length === 1 ? "" : "s"}.`);
+    } catch (error) {
+      if (runId !== preflightRunId.current) return;
+      setNotice(error instanceof Error ? error.message : "The selected files could not be checked for duplicates.");
+    } finally { if (runId === preflightRunId.current) setPreflightBusy(false); }
+  }, []);
+
+  useEffect(() => {
+    if (!preflightScan || ["complete", "cancelled"].includes(preflightScan.status) || !isTauri) return;
+    const jobId = preflightScan.id;
+    const interval = window.setInterval(() => {
+      void loadPreflightDuplicateScan(jobId).then((scan) => {
+        if (scan.id !== jobId) return;
+        setPreflightScan(scan);
+        setPreflightFileCount(Math.max(0, scan.totalFiles - scan.completedFiles));
+        if (scan.status === "complete") {
+          const matches = scan.files.filter((file) => file.localMatches.length > 0 || file.droppedDuplicateFileNames.length > 0 || file.uploadedTitleMatches.length > 0).length;
+          setNotice(`${scan.completedFiles} file${scan.completedFiles === 1 ? "" : "s"} checked before ingest. ${matches} need${matches === 1 ? "s" : ""} duplicate review.`);
+        }
+      }).catch(() => { /* A later poll resumes if the app database is briefly busy. */ });
+    }, 450);
+    return () => window.clearInterval(interval);
+  }, [preflightScan]);
+
+  const deleteLocalDuplicate = useCallback(async (token: string, confirmation: string) => {
+    setPreflightBusy(true);
+    try {
+      await deletePreflightDuplicateFile(token, confirmation);
+      setPreflightScan((current) => current && ({ ...current, files: current.files.filter((file) => file.localDeleteToken !== token) }));
+      setNotice(`Deleted “${confirmation}” from this device. Its managed upload copy and YouTube videos were not changed.`);
+    } finally {
+      setPreflightBusy(false);
+    }
+  }, []);
+
+  const cancelPreflight = useCallback(async () => {
+    if (!preflightScan || preflightScan.status === "complete") return;
+    await cancelPreflightDuplicateScan(preflightScan.id);
+    setPreflightScan((current) => current && ({ ...current, status: "cancelled" }));
+    setNotice("The pre-ingest duplicate job was cancelled. No selected file was ingested or uploaded.");
+  }, [preflightScan]);
+
+  const clearUploads = useCallback(async () => {
+    setBusy(true);
+    try {
+      const cleared = await clearUploadQueue();
+      await refresh();
+      setNotice(`${cleared} local upload job${cleared === 1 ? " was" : "s were"} cancelled. Managed media copies were retained.`);
+    } finally { setBusy(false); }
+  }, [refresh]);
 
   const importVideos = useCallback(async (paths: string[], settings: ManualUploadSettings) => {
     setBusy(true);
@@ -87,8 +175,16 @@ export default function App() {
         setNotice(`${importedItems.length} video${importedItems.length === 1 ? "" : "s"} safely imported to this device. Connect YouTube to start uploading them.`);
         return;
       }
+      let duplicateIds = new Set<string>();
+      try {
+        duplicateIds = new Set((await checkUploadTitleDuplicates(importedItems.map((item) => item.id))).map((candidate) => candidate.itemId));
+      } catch (error) {
+        await refresh();
+        setNotice(`Videos were imported safely, but the online YouTube title check could not complete. ${error instanceof Error ? error.message : "Try again before queueing."}`);
+        return;
+      }
       const queueFailures: string[] = [];
-      for (const item of importedItems) {
+      for (const item of importedItems.filter((candidate) => !duplicateIds.has(candidate.id))) {
         try {
           await queueItem(item.id);
         } catch (error) {
@@ -96,7 +192,7 @@ export default function App() {
         }
       }
       let startNotice = "";
-      if (queueFailures.length === 0) {
+      if (queueFailures.length === 0 && importedItems.length > duplicateIds.size) {
         try {
           const started = await startQueuedUploads();
           startNotice = `${started} queued upload${started === 1 ? "" : "s"} started.`;
@@ -105,7 +201,9 @@ export default function App() {
         }
       }
       await refresh();
-      const importNotice = `${importedItems.length} video${importedItems.length === 1 ? "" : "s"} imported and queued locally.`;
+      const importNotice = duplicateIds.size > 0
+        ? `${importedItems.length} video${importedItems.length === 1 ? "" : "s"} imported locally. ${duplicateIds.size} matching title${duplicateIds.size === 1 ? " needs" : "s need"} your decision.`
+        : `${importedItems.length} video${importedItems.length === 1 ? "" : "s"} imported and queued locally.`;
       const failuresNotice = failures.length > 0 || queueFailures.length > 0
         ? ` ${failures.length + queueFailures.length} item${failures.length + queueFailures.length === 1 ? "" : "s"} need attention.`
         : "";
@@ -120,20 +218,29 @@ export default function App() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void getCurrentWindow().onDragDropEvent((event) => {
-      if (event.payload.type === "enter" || event.payload.type === "over") setDropActive(true);
-      else if (event.payload.type === "leave") setDropActive(false);
+      if (event.payload.type === "enter" || event.payload.type === "over") {
+        if (activeTab === "dedupe") setPreflightDropActive(true); else setDropActive(true);
+      }
+      else if (event.payload.type === "leave") {
+        setDropActive(false);
+        setPreflightDropActive(false);
+      }
       else if (event.payload.type === "drop") {
         setDropActive(false);
-        reviewImport(event.payload.paths);
+        setPreflightDropActive(false);
+        if (activeTab === "dedupe") void runPreflightDuplicateCheck(event.payload.paths);
+        else reviewImport(event.payload.paths);
       }
     }).then((stop) => {
       if (disposed) stop(); else unlisten = stop;
+    }).catch(() => {
+      // Mobile uses the native document picker rather than desktop drag-and-drop.
     });
     return () => {
       disposed = true;
       unlisten?.();
     };
-  }, [reviewImport]);
+  }, [activeTab, reviewImport, runPreflightDuplicateCheck]);
 
   useEffect(() => {
     if (!snapshot.items.some((item) => item.status === "uploading" || item.status === "dispatching")) return;
@@ -147,15 +254,49 @@ export default function App() {
       return;
     }
     const selected = await open({ multiple: true, directory: false, filters: [{ name: "Video", extensions: [...supportedVideoExtensions] }] });
-    reviewImport(typeof selected === "string" ? [selected] : selected ?? []);
+    reviewImport(selectedFilePaths(selected));
   };
 
   const queue = async (item: UploadItem) => {
     setBusy(true);
     try {
+      const duplicates = await checkUploadTitleDuplicates([item.id]);
+      if (duplicates.length > 0) {
+        await refresh();
+        setNotice("A matching uploaded title was found. Choose Upload anyway or Skip duplicate below.");
+        return;
+      }
       const updated = await queueItem(item.id);
       setSnapshot((current) => ({ ...current, items: current.items.map((candidate) => candidate.id === updated.id ? updated : candidate) }));
       setNotice(`${updated.fileName} is saved in the local upload queue.`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const chooseFilesForPreflight = async (mode: "light" | "deep") => {
+    if (!isTauri) {
+      setNotice("Run this screen through Tauri to check files before ingest.");
+      return;
+    }
+    const selected = await open({ multiple: true, directory: false, pickerMode: "document", fileAccessMode: "scoped" });
+    void runPreflightDuplicateCheck(selectedFilePaths(selected), mode);
+  };
+
+  const resolveTitleDuplicates = async (itemIds: string[], action: "ignore" | "skip") => {
+    setBusy(true);
+    try {
+      const resolved = await resolveUploadTitleDuplicates(itemIds, action);
+      const ignored = resolved.filter((item) => item.status !== "cancelled");
+      for (const item of ignored) await queueItem(item.id);
+      if (ignored.length > 0) await startQueuedUploads();
+      await refresh();
+      setNotice(action === "ignore"
+        ? `${ignored.length} title-matched video${ignored.length === 1 ? " is" : "s are"} queued to upload.`
+        : `${resolved.length} duplicate video${resolved.length === 1 ? " was" : "s were"} skipped. The local files were not changed.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The duplicate decision could not be saved.");
+      await refresh();
     } finally {
       setBusy(false);
     }
@@ -228,7 +369,7 @@ export default function App() {
         <div className="brand-lockup">
           <img className="brand-mark" src="/favicon.svg" alt="" />
           <div>
-            <p className="eyebrow">LOCAL-FIRST UPLOAD WORKSPACE</p>
+            <p className="eyebrow">UPLOAD WORKSPACE</p>
             <h1>YouTube Upload Manager</h1>
             <p className="subtle">{snapshot.activeChannel ? `Active channel: ${snapshot.activeChannel}` : "Your files stay on this device until you start an upload."}</p>
           </div>
@@ -240,13 +381,30 @@ export default function App() {
       </header>
 
       <p className="notice" role="status"><span aria-hidden="true" />{notice}</p>
+      {connectionSettings && !connectionSettings.oauthConfigured && !setupDismissed && <>
+        <div aria-hidden="true" className="google-setup-backdrop" />
+        <GoogleSetupWizard onConfigured={(settings) => {
+          updateConnection(settings);
+          setSetupDismissed(true);
+          setActiveTab("account");
+          setNotice("Desktop OAuth JSON imported. Connect YouTube when you are ready.");
+        }} onDismiss={() => setSetupDismissed(true)} />
+      </>}
       {pendingImportPaths && <UploadIntakeReview paths={pendingImportPaths} onCancel={() => setPendingImportPaths(undefined)} onConfirm={(settings) => { const paths = pendingImportPaths; setPendingImportPaths(undefined); void importVideos(paths, settings); }} />}
       {!isTauri && <p className="warning">Browser preview mode: managed local file import is available only in the signed Tauri app.</p>}
 
+      <div className="workspace-layout">
+        <nav aria-label="Workspace sections" className="workspace-sidebar" role="tablist">
+          <span className="workspace-sidebar__label">Workspace</span>
+          {workspaceTabs.map(([id, label]) => <button aria-controls={`workspace-tab-${id}`} aria-selected={activeTab === id} className={activeTab === id ? "is-active" : ""} id={`workspace-tab-button-${id}`} key={id} onClick={() => setActiveTab(id)} role="tab" tabIndex={activeTab === id ? 0 : -1} type="button">{label}{id === "dedupe" && dedupeBusy && <span className="workspace-sidebar__activity" aria-label="Duplicate detection in progress" />}</button>)}
+        </nav>
+        <div className="workspace-tabs">
+          <section aria-labelledby="workspace-tab-button-batch" className="workspace-tab" hidden={activeTab !== "batch"} id="workspace-tab-batch" role="tabpanel">
+            <UploadTitleDuplicateReview busy={busy} candidates={snapshot.pendingTitleDuplicates} onResolve={resolveTitleDuplicates} />
       <section className="queue-workspace" aria-labelledby="queue-heading">
         <div className="section-heading">
           <div><p className="eyebrow">PERSISTENT QUEUE</p><h2 id="queue-heading">Your upload queue</h2><p className="section-copy">Every import and upload state is saved locally, so interrupted work can continue where it stopped.</p></div>
-          <span className="item-count">{snapshot.items.length} saved item{snapshot.items.length === 1 ? "" : "s"}</span>
+          <div className="queue-workspace__actions"><span className="item-count">{snapshot.items.length} saved item{snapshot.items.length === 1 ? "" : "s"}</span><button className="text-button" disabled={busy} onClick={() => void clearUploads()} type="button">Clear upload queue</button></div>
         </div>
         <UploadProgressSummary items={snapshot.items} />
         <ManualUploadDefaultsPanel />
@@ -259,11 +417,14 @@ export default function App() {
         </div>
         <QueueTable items={snapshot.items} busy={busy} onQueue={(item) => void queue(item)} onVisibilityChange={(item, visibility) => void changeVisibility(item, visibility)} />
       </section>
+          </section>
 
+          <section aria-labelledby="workspace-tab-button-monitor" className="workspace-tab" hidden={activeTab !== "monitor"} id="workspace-tab-monitor" role="tabpanel">
       <FolderMonitorPanel activeChannel={snapshot.activeChannel} onNotice={setNotice} onQueueRefresh={async () => { await refresh(); }} />
+          </section>
 
-      <div className="workspace-grid">
-      <ConnectionPanel onConnectionChange={updateConnection} />
+          <section aria-labelledby="workspace-tab-button-dedupe" className="workspace-tab" hidden={activeTab !== "dedupe"} id="workspace-tab-dedupe" role="tabpanel">
+      <PreIngestDuplicatePanel busy={preflightBusy} fileCount={preflightFileCount} dropActive={preflightDropActive} onCancel={() => void cancelPreflight()} onChoose={(mode) => void chooseFilesForPreflight(mode)} onDeleteLocalDuplicate={deleteLocalDuplicate} scan={preflightScan} />
       <section className="panel duplicates-panel" aria-labelledby="duplicates-heading">
         <div className="section-heading duplicate-heading">
           <div>
@@ -284,7 +445,13 @@ export default function App() {
             {dedupeBusy ? "Running dedupe…" : "Run dedupe"}
           </button>
         </div>
-        <DuplicateReview candidates={snapshot.duplicates} />
+        <DuplicateReview candidates={snapshot.duplicates} onDeletionComplete={async (videoId, title) => {
+          await refresh();
+          setNotice(`YouTube confirmed permanent deletion of ${videoId} (“${title}”). The local execution receipt was saved.`);
+        }} onBulkDeletionComplete={async (count) => {
+          await refresh();
+          setNotice(`YouTube confirmed permanent deletion of ${count} selected video${count === 1 ? "" : "s"}. Local execution receipts were saved.`);
+        }} />
         {dedupeActivity.length > 0 && (
           <section className="dedupe-activity" aria-labelledby="dedupe-activity-heading">
             <div className="dedupe-activity__heading">
@@ -323,12 +490,24 @@ export default function App() {
           </section>
         )}
       </section>
-      </div>
+          </section>
 
+          <section aria-labelledby="workspace-tab-button-deletion" className="workspace-tab" hidden={activeTab !== "deletion"} id="workspace-tab-deletion" role="tabpanel">
       <section className="panel" aria-labelledby="deletion-heading">
         <div className="section-heading"><div><p className="eyebrow">EXPLICIT LOCAL REVIEW</p><h2 id="deletion-heading">Video removal requests</h2></div></div>
         <DeletionReview activeChannel={snapshot.activeChannel} busy={busy} onNotice={setNotice} />
       </section>
+          </section>
+
+          <section aria-labelledby="workspace-tab-button-transfer" className="workspace-tab" hidden={activeTab !== "transfer"} id="workspace-tab-transfer" role="tabpanel">
+            <TransferPanel onConnectionChange={updateConnection} onNotice={setNotice} />
+          </section>
+
+          <section aria-labelledby="workspace-tab-button-account" className="workspace-tab" hidden={activeTab !== "account"} id="workspace-tab-account" role="tabpanel">
+            <ConnectionPanel onConnectionChange={updateConnection} />
+          </section>
+        </div>
+      </div>
 
       <footer className="app-disclaimer">
         YouTube Upload Manager is an independent project and is not affiliated with, endorsed by, sponsored by, or provided by Google or YouTube. Google and YouTube are trademarks of Google LLC; all other names, logos, and trademarks belong to their respective owners.

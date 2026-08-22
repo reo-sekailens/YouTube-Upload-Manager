@@ -73,6 +73,7 @@ describe("folder monitor settings contract", () => {
     const settings: FolderMonitorSettings = {
       enabled: true,
       visibility: "unlisted",
+      madeForKids: false,
       folderPath: "C:\\Media\\Ready",
       channelName: "Test channel",
       status: "watching",

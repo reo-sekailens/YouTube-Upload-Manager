@@ -9,7 +9,7 @@ Create or update a scoped task file in `memory-bank/tasks/` for non-trivial work
 ## Engineering rules
 
 - Preserve account isolation on each device: every YouTube channel connection, upload batch, inventory record, and audit event must be explicitly scoped.
-- Build a local-first Tauri application: no application API, cloud worker, remote database, object store, or telemetry pipeline may be introduced. Network calls are limited to explicit Google/YouTube operations and operator-selected updates.
+- Build a Tauri application without an application API, cloud worker, remote database, object store, or telemetry pipeline. Network calls are limited to explicit Google/YouTube operations and operator-selected updates.
 - Use official Google/YouTube APIs and installed-app OAuth with PKCE. Access and refresh tokens belong in OS-protected secure storage, never in the webview, plain files, logs, or source control. A distributed OAuth client ID is not a secret.
 - Prefer idempotent operations, resumable uploads, structured errors, rate-limit handling, and append-only audit events.
 - A queued asset must survive a crash or forced close: ingest it into the app's device-local workspace by default, persist encrypted resumable-session checkpoints transactionally, and reconcile with YouTube before any retry. Never ask the operator to drag an existing queued item in again.

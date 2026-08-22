@@ -2,7 +2,7 @@
 
 ## Current state
 
-The repository is newly initialized; no application code has been written yet. The selected shape is a local-first Tauri 2 application using React + Vite for the interface and Rust for privileged local operations. It targets Windows, macOS, Linux, Android, and iOS from one codebase. All application-controlled state stays on the device; Google/YouTube is the only required external service. This document describes required boundaries, not implemented components.
+The repository is newly initialized; no application code has been written yet. The selected shape is a Tauri 2 application using React + Vite for the interface and Rust for privileged local operations. It targets Windows, macOS, Linux, Android, and iOS from one codebase. All application-controlled state stays on the device; Google/YouTube is the only required external service. This document describes required boundaries, not implemented components.
 
 The product is named **YouTube Upload Manager**. It is an independent project,
 not an official Google or YouTube product. Google and YouTube are trademarks of

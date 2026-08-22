@@ -1,13 +1,21 @@
 # YouTube Upload Manager
 
+![YouTube Upload Manager — Upload with confidence](assets/github-repo-header.png)
+
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://v2.tauri.app/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=111827)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Rust](https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: AGPL v3+](https://img.shields.io/badge/License-AGPL%20v3%2B-2f7d32.svg)](LICENSE)
 
-A cross-platform, local-first application for preparing, reviewing, and
-running controlled YouTube upload batches from your own device.
+A straightforward desktop app for uploading videos to your YouTube channel,
+checking for duplicates, and keeping control of your library — all from your
+own device.
+
+No technical setup is needed to get familiar with the app: choose your videos,
+review their upload settings, and approve the actions you want it to take.
+When you are ready to connect YouTube, the app walks you through the one-time
+account setup using a Google Cloud project you control.
 
 The application has no service-side queue, media store, or analytics pipeline.
 Its only network activity is the Google and YouTube operation you explicitly
@@ -35,9 +43,11 @@ authorize and start.
    npm run tauri -- dev
    ```
 
-4. This personal build already includes its public desktop OAuth client ID.
-   Add your Google account as a test user in its Google Cloud project, then
-   connect a YouTube channel you are authorized to manage.
+4. Create a Google Cloud project you control, enable the YouTube Data API,
+   configure its OAuth consent screen, and create a **Desktop app** OAuth
+   client. Download that client's JSON, then import it from the app's
+   connection panel before connecting a YouTube channel you are authorized to
+   manage.
 
 Useful local checks:
 
@@ -88,3 +98,5 @@ project context is maintained in [memory-bank/](memory-bank/README.md).
 ## License
 
 Licensed under the [GNU Affero General Public License v3.0 or later](LICENSE).
+Copyright (C) 2026 Satoshi Katade. See [NOTICE](NOTICE) for the project
+copyright, trademark, and attribution notice.

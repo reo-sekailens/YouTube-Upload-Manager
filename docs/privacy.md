@@ -2,7 +2,7 @@
 
 **Effective date:** 22 August 2026
 
-YouTube Upload Manager is a local-first application for preparing, uploading,
+YouTube Upload Manager is an application for preparing, uploading,
 reviewing, and managing videos in a YouTube channel you authorize. This policy
 explains what the app handles and where that information goes.
 
@@ -22,7 +22,7 @@ includes:
   their names, sizes, and SHA-256 digests;
 - locally synchronized YouTube inventory metadata, duplicate-review records,
   and deletion-review requests; and
-- locally configured public OAuth client ID and connection metadata.
+- operator-imported OAuth client configuration and connection metadata.
 
 The app uses this local data to keep queued videos available after a restart or
 unexpected close, resume an interrupted upload safely, show prior actions, and

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title description">
+  <title id="title">YouTube Upload Manager</title>
+  <desc id="description">A GitHub repository header with an upload-arrow app icon and controlled upload workflow motif.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a1730"/>
+      <stop offset="0.52" stop-color="#123a78"/>
+      <stop offset="1" stop-color="#2463df"/>
+    </linearGradient>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#2c72ff"/>
+      <stop offset="1" stop-color="#1a50bf"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="22" stdDeviation="22" flood-color="#06112a" flood-opacity=".32"/>
+    </filter>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" fill="none" stroke="#fff" stroke-opacity=".075"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#background)"/>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+  <circle cx="1125" cy="72" r="280" fill="#5d91ff" fill-opacity=".14"/>
+  <circle cx="1130" cy="78" r="192" fill="none" stroke="#fff" stroke-opacity=".12" stroke-width="1.5"/>
+  <circle cx="1130" cy="78" r="132" fill="none" stroke="#fff" stroke-opacity=".1" stroke-width="1.5"/>
+  <path d="M550 524C719 429 802 489 907 392c87-81 176-162 373-124" fill="none" stroke="#8fb4ff" stroke-opacity=".28" stroke-width="2"/>
+  <path d="M583 560c154-95 239-35 348-140 90-87 172-224 349-213" fill="none" stroke="#fff" stroke-opacity=".12" stroke-width="2" stroke-dasharray="9 12"/>
+
+  <g filter="url(#shadow)">
+    <rect x="120" y="174" width="272" height="272" rx="68" fill="url(#tile)"/>
+    <rect x="120" y="174" width="272" height="272" rx="68" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="2"/>
+    <path d="M256 241v98m0-98-43 43m43-43 43 43M181 343v30c0 9 7 17 17 17h116c9 0 17-8 17-17v-30" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="22"/>
+  </g>
+
+  <g font-family="Inter, Segoe UI, Arial, sans-serif" fill="#fff">
+    <text x="456" y="286" font-size="67" font-weight="750" letter-spacing="-2.3">YouTube Upload</text>
+    <text x="456" y="362" font-size="67" font-weight="750" letter-spacing="-2.3">Manager</text>
+    <text x="458" y="418" font-size="23" font-weight="400" fill="#d6e4ff">Prepare, review, and run upload batches</text>
+    <text x="458" y="451" font-size="23" font-weight="400" fill="#d6e4ff">from your own device.</text>
+  </g>
+</svg>

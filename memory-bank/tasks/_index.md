@@ -4,7 +4,7 @@ This is the source of truth for planned work. Keep one row per task and link the
 
 | ID | Title | Status | Owner | Dependencies | Notes |
 | --- | --- | --- | --- | --- | --- |
-| [TASK001](TASK001-cross-platform-foundation.md) | Cross-platform local-first foundation | in-progress | unassigned | — | Tauri 2 application foundation, device-local queue, and dashboard implementation underway; Google OAuth and live provider work remain pending. |
+| [TASK001](TASK001-cross-platform-foundation.md) | Cross-platform desktop foundation | in-progress | unassigned | — | Tauri 2 application foundation, device-local queue, and dashboard implementation underway; Google OAuth and live provider work remain pending. |
 | TASK002 | Upload domain contract | proposed | unassigned | TASK001 | Define batch/item/attempt models, lifecycle transitions, idempotency, validation, and audit requirements. |
 | TASK003 | Secure YouTube authorization | proposed | unassigned | TASK001 | Implement least-privilege OAuth, encrypted token handling, connection management, and revocation behavior. |
 | TASK004 | Resumable batch execution | proposed | unassigned | TASK002, TASK003 | Implement validated queueing, rate-limit handling, retry policy, and operator-visible outcomes. |
@@ -28,6 +28,23 @@ This is the source of truth for planned work. Keep one row per task and link the
 | [TASK019](TASK019-product-rename-and-trademark-notice.md) | Product rename and trademark notice | completed | unassigned | TASK001 | Product and repository are named YouTube Upload Manager; local `origin` now points to the renamed GitHub repository. |
 | [TASK020](TASK020-full-width-auto-dispatch-and-quota-resume.md) | Full-width workspace, automatic dispatch, and quota recovery | completed | unassigned | TASK004, TASK008, TASK014 | Full-width dashboard cards, batch auto-dispatch, and persisted daily-limit recovery. |
 | [TASK021](TASK021-native-dropdown-runtime-detection.md) | Native dropdown runtime detection | completed | unassigned | TASK001 | Use Tauri's public runtime capability detector for interactive controls. |
+| [TASK022](TASK022-online-upload-title-checks.md) | Online title checks before upload | in-progress | unassigned | TASK004, TASK005, TASK008 | New intake, batches, queued dispatch, and watched-folder discoveries synchronize the active YouTube inventory and require an explicit upload-or-skip decision for title matches. |
+| [TASK023](TASK023-github-repository-header.md) | GitHub repository header | completed | unassigned | TASK019 | GitHub social-preview assets derive from the canonical upload-arrow icon. |
+| [TASK024](TASK024-operator-owned-google-oauth.md) | Operator-owned Google OAuth client | completed | unassigned | TASK011 | Distributed client removed; each operator imports Desktop OAuth JSON from their own Google Cloud project. |
+| [TASK025](TASK025-lazy-authenticated-youtube-comparison.md) | Lazy authenticated YouTube comparison | completed | unassigned | TASK012, TASK017 | Player frames load only from Play; an unprivileged in-app YouTube account window supports operator sign-in. |
+| [TASK026](TASK026-standard-agpl-license.md) | Standard AGPL license file | completed | unassigned | TASK019 | Repository root contains the canonical GitHub-recognized AGPL-3.0-or-later license text. |
+| [TASK027](TASK027-google-cloud-first-open-setup.md) | First-open Google Cloud setup | completed | unassigned | TASK024 | Unconfigured installs guide an operator through their own Google account, project, API, OAuth client, and JSON import. |
+| [TASK028](TASK028-instant-video-title-search.md) | Instant video-title search | completed | unassigned | TASK014, TASK005, TASK006 | Accessible local title filters now cover upload, duplicate-review, YouTube-library, and deletion-request video lists. |
+| [TASK029](TASK029-pre-ingest-file-duplicate-check.md) | Pre-ingest file duplicate check | completed | unassigned | TASK005, TASK022 | Desktop drag/drop and Android/iOS document picking check any file locally by SHA-256 before ingest. |
+| [TASK030](TASK030-local-duplicate-comparison-and-deletion.md) | Local duplicate comparison and deletion | completed | unassigned | TASK029 | Confirmed desktop-source deletion from an exact pre-ingest SHA-256 match, without changing managed or YouTube copies. |
+| [TASK031](TASK031-cross-platform-multiple-file-picker.md) | Cross-platform multiple-file picker | completed | unassigned | TASK029 | Preserve every selected desktop path or mobile file URI for pre-ingest checks and intake. |
+| [TASK032](TASK032-compact-cross-device-transfer.md) | Compact cross-device transfer | completed | unassigned | TASK005, TASK029 | Gzip archive transfers hash and inventory metadata without media or credentials. |
+| [TASK033](TASK033-background-pre-ingest-batches.md) | Background pre-ingest batches | completed | unassigned | TASK029 | Large desktop drops hash and synchronize away from the UI thread. |
+| [TASK034](TASK034-crash-safe-light-deep-pre-ingest.md) | Crash-safe light and deep pre-ingest matching | completed | unassigned | TASK029, TASK033 | Filename-first matching is default; persistent deep-hash jobs and inventory staging resume safely after interruption. |
+| [TASK035](TASK035-universal-crash-resume.md) | Universal crash-safe operation recovery | completed | unassigned | TASK004, TASK005, TASK008, TASK034 | Persisted recovery boundaries now cover local and remote operations. |
+| [TASK036](TASK036-cancel-and-clear-work.md) | Cancel and clear persisted work | completed | unassigned | TASK035 | Explicit, audited cancellation for upload, dedupe, and deletion queues. |
+| [TASK037](TASK037-native-worker-isolation.md) | Native worker isolation | completed | unassigned | TASK033, TASK035 | Blocking disk, compression, and provider operations run outside the UI command path. |
+| [TASK038](TASK038-windows-installer-worker-isolation.md) | Windows installer after worker isolation | in-progress | unassigned | TASK037 | Package the current native-worker release as a Windows installer. |
 
 ## Status values
 

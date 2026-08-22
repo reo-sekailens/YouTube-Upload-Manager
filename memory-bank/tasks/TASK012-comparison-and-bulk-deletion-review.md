@@ -29,6 +29,9 @@ queue.
 - The removal review supports individual checkboxes, Select all, and a selected
   review queue while retaining per-video typed confirmation and execution
   safeguards.
+- Bulk deletion has a collapsed-by-default activity log that distinguishes
+  videos queued for deletion, the current deletion, completed removals, and a
+  failed item without exposing the operation by default.
 - Type checks, tests, production build, and rendered desktop/mobile UI checks
   pass. Live provider playback/deletion remains unverified.
 
@@ -41,6 +44,9 @@ queue.
   errors. The browser-preview data boundary cannot populate a connected channel,
   inventory, or duplicate candidates, so embedded-player and deletion-selection
   interactions were certified by source behavior and type checks only.
+- Bulk deletion progress and its collapsed activity log were type-checked and
+  rendered in a static browser preview; live YouTube deletion remains
+  unverified.
 
 ## Follow-ups
 

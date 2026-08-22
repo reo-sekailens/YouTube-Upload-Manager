@@ -1,6 +1,6 @@
 # YouTube Upload Manager
 
-YouTube Upload Manager is a local-first application for preparing, reviewing,
+YouTube Upload Manager is an application for preparing, reviewing,
 and running controlled YouTube upload batches from your own device.
 
 ## Your device stays in control
@@ -27,12 +27,13 @@ and running controlled YouTube upload batches from your own device.
 
 ## Google and YouTube account requirement
 
-This personal build already includes its public desktop OAuth client ID. Add
-your Google account as a test user in its Google Cloud project and use a
-YouTube channel you are authorized to manage. The application uses official
-Google OAuth and YouTube Data API operations; it does not bypass YouTube
-policy, quota, ownership, copyright, or account restrictions. Start with a
-non-production test channel before relying on uploads or deletion workflows.
+Create a Google Cloud project you control, enable the YouTube Data API,
+configure its OAuth consent screen, and create a **Desktop app** OAuth client.
+Download that client's JSON and import it from the app's connection panel. The
+application uses official Google OAuth and YouTube Data API operations; it does
+not bypass YouTube policy, quota, ownership, copyright, or account
+restrictions. Start with a non-production test channel before relying on
+uploads or deletion workflows.
 
 ## Independent project and trademarks
 
