@@ -22,3 +22,7 @@ crash marker and all resumable local work must remain intact for the next open.
   normal explicit exit-confirmation behavior.
 - The recovery marker is not acknowledged or removed on close.
 - TypeScript check, 41 native tests, and diff check passed.
+- Updated unsigned Windows x64 NSIS installer built at
+  `src-tauri/target/release/bundle/nsis/YouTube Upload Manager_0.1.9_x64-setup.exe`
+  (26,389,531 bytes; SHA-256
+  `07FCD9B4A6FA0C6AABD0E714A75854ECFEA2214686C4B78F4DFFA92EF466A446`).

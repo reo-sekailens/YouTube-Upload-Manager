@@ -188,6 +188,8 @@ export type RemoteVideo = {
   title: string;
   duration?: string;
   privacyStatus?: string;
+  /** YouTube processing state; only `processed` videos are dedupe evidence. */
+  uploadStatus?: string;
   updatedAt: string;
 };
 

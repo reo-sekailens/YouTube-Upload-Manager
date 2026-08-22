@@ -154,6 +154,13 @@ export async function listYouTubePlaylists(): Promise<YouTubePlaylist[]> {
   return invoke<YouTubePlaylist[]>("list_youtube_playlists");
 }
 
+/** Creates a private playlist for the currently connected YouTube channel. */
+export async function createYouTubePlaylist(title: string): Promise<YouTubePlaylist> {
+  if (!isTauri)
+    throw new Error("Playlist creation is available only in the signed desktop app.");
+  return invoke<YouTubePlaylist>("create_youtube_playlist", { title });
+}
+
 export async function loadManualUploadDefaults(): Promise<ManualUploadDefaults> {
   if (!isTauri) return { madeForKids: false };
   return invoke<ManualUploadDefaults>("load_manual_upload_defaults");

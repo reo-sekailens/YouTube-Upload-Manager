@@ -150,6 +150,15 @@
   webview error, unhandled promise rejection, or React render error). It never
   displays a raw exception message because such messages can contain sensitive
   local or provider data.
+- Every blocking dialog uses a separate sibling backdrop with a lower z-index;
+  dialog content never owns or sits beneath its own dimmer. Playlist creation
+  is an explicit native YouTube operation that makes a private playlist and
+  returns only its safe ID/title for immediate selection in upload review or
+  watched-folder configuration.
+- The ordinary YouTube connection now requests `youtube.force-ssl` in addition
+  to upload and read-only access: private playlist creation requires management
+  permission. Existing device connections must reconnect once before using
+  playlist creation; no playlist is created without an explicit click.
 
 ## Conventions to establish with implementation
 

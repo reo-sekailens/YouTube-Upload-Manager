@@ -66,7 +66,7 @@ export function GoogleSetupWizard({ onConfigured, onDismiss }: GoogleSetupWizard
         <p>{current.detail}</p>
         {step === 0 && <button disabled={!isTauri || busy} onClick={() => void openSetupPage("account")} type="button">Open Google account</button>}
         {step > 0 && step < 5 && <button disabled={!isTauri || busy} onClick={() => void openSetupPage("cloud")} type="button">Open Google Cloud Console</button>}
-        {step === 3 && <p className="google-setup__scope-note">Add `youtube.upload` and `youtube.readonly` under Data Access. `youtube.force-ssl` is requested later only if you choose to use video deletion.</p>}
+        {step === 3 && <p className="google-setup__scope-note">Add `youtube.upload`, `youtube.readonly`, and `youtube.force-ssl` under Data Access. The management scope is used for operator-created private playlists and explicit video deletion.</p>}
         {importing && <button disabled={!isTauri || busy} onClick={() => void importClient()} type="button">{busy ? "Importing…" : "Choose Desktop OAuth JSON"}</button>}
         {!isTauri && <p className="google-setup__preview-note">Open the signed desktop app to launch Google setup and import the JSON.</p>}
         {error && <p className="google-setup__error" role="alert">{error}</p>}

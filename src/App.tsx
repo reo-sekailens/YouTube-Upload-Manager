@@ -901,15 +901,18 @@ export default function App() {
         </>
       )}
       {pendingImportPaths && (
-        <UploadIntakeReview
-          paths={pendingImportPaths}
-          onCancel={() => setPendingImportPaths(undefined)}
-          onConfirm={(settings) => {
-            const paths = pendingImportPaths;
-            setPendingImportPaths(undefined);
-            void importVideos(paths, settings);
-          }}
-        />
+        <>
+          <div aria-hidden="true" className="intake-review-backdrop" />
+          <UploadIntakeReview
+            paths={pendingImportPaths}
+            onCancel={() => setPendingImportPaths(undefined)}
+            onConfirm={(settings) => {
+              const paths = pendingImportPaths;
+              setPendingImportPaths(undefined);
+              void importVideos(paths, settings);
+            }}
+          />
+        </>
       )}
       {!isTauri && (
         <p className="warning">

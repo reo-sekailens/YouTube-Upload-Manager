@@ -216,6 +216,20 @@ describe("manual upload intake settings", () => {
 
     expect(invoke).toHaveBeenCalledWith("import_asset", { path: "C:\\Media\\review.mp4", settings });
   });
+
+  it("creates a playlist only through the native command boundary", async () => {
+    isTauri.mockReturnValue(true);
+    vi.resetModules();
+    const { createYouTubePlaylist } = await import("./local");
+
+    await createYouTubePlaylist("New uploads");
+
+    expect(invoke).toHaveBeenCalledWith("create_youtube_playlist", {
+      title: "New uploads",
+    });
+    isTauri.mockReturnValue(false);
+    vi.resetModules();
+  });
 });
 
 describe("device-wide manual audience default", () => {

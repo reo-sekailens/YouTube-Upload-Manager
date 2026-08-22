@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
-import { listYouTubePlaylists, loadManualUploadDefaults } from "../lib/local";
+import {
+  createYouTubePlaylist,
+  listYouTubePlaylists,
+  loadManualUploadDefaults,
+} from "../lib/local";
 import type {
   ManualUploadSettings,
   UploadVisibility,
@@ -21,6 +25,8 @@ export function UploadIntakeReview({
   const [visibility, setVisibility] = useState<UploadVisibility>("private");
   const [playlists, setPlaylists] = useState<YouTubePlaylist[]>([]);
   const [playlistId, setPlaylistId] = useState("");
+  const [newPlaylistTitle, setNewPlaylistTitle] = useState("");
+  const [creatingPlaylist, setCreatingPlaylist] = useState(false);
   const [deleteSourceAfterUpload, setDeleteSourceAfterUpload] = useState(false);
   const [playlistError, setPlaylistError] = useState("");
 
@@ -49,6 +55,29 @@ export function UploadIntakeReview({
   const selectedPlaylist = playlists.find(
     (playlist) => playlist.id === playlistId,
   );
+  const createPlaylist = async () => {
+    const title = newPlaylistTitle.trim();
+    if (!title) {
+      setPlaylistError("Enter a playlist name first.");
+      return;
+    }
+    setCreatingPlaylist(true);
+    setPlaylistError("");
+    try {
+      const playlist = await createYouTubePlaylist(title);
+      setPlaylists((current) =>
+        [...current, playlist].sort((left, right) => left.title.localeCompare(right.title)),
+      );
+      setPlaylistId(playlist.id);
+      setNewPlaylistTitle("");
+    } catch (error) {
+      setPlaylistError(
+        error instanceof Error ? error.message : "The playlist could not be created.",
+      );
+    } finally {
+      setCreatingPlaylist(false);
+    }
+  };
   return (
     <section
       className="intake-review"
@@ -98,6 +127,29 @@ export function UploadIntakeReview({
           <option value="public">Public</option>
         </select>
       </label>
+      <div className="playlist-create" aria-label="Create a new playlist">
+        <label className="intake-review__field" htmlFor="intake-new-playlist">
+          Create a private playlist
+        </label>
+        <div>
+          <input
+            disabled={creatingPlaylist}
+            id="intake-new-playlist"
+            maxLength={150}
+            onChange={(event) => setNewPlaylistTitle(event.target.value)}
+            placeholder="Playlist name"
+            value={newPlaylistTitle}
+          />
+          <button
+            className="secondary-action"
+            disabled={creatingPlaylist || newPlaylistTitle.trim().length === 0}
+            onClick={() => void createPlaylist()}
+            type="button"
+          >
+            {creatingPlaylist ? "Creating…" : "Create playlist"}
+          </button>
+        </div>
+      </div>
       <label className="intake-review__field">
         Add to playlist
         <select

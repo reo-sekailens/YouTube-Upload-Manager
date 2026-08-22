@@ -1539,6 +1539,15 @@ input:focus-visible {
   font-size: 0.79rem;
   margin: 0;
 }
+.folder-monitor__playlist-create {
+  align-self: end;
+}
+.folder-monitor__playlist-create > label {
+  color: #56667e;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
 .folder-monitor__disabled span {
   color: #7b8799;
   font-size: 0.72rem;
@@ -2021,16 +2030,11 @@ input:focus-visible {
   width: calc(100% - 2rem);
   z-index: 10;
 }
-.intake-review::before {
+.intake-review-backdrop {
   background: rgba(22, 32, 51, 0.32);
-  content: "";
-  height: 100vh;
-  left: 50%;
+  inset: 0;
   position: fixed;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: 100vw;
-  z-index: -1;
+  z-index: 9;
 }
 .intake-review h2 {
   color: #1e2d48;
@@ -2080,6 +2084,32 @@ input:focus-visible {
   border-radius: 0.42rem;
   color: #2d3f5d;
   padding: 0.55rem 0.6rem;
+}
+.playlist-create {
+  background: #f7f9fc;
+  border: 1px solid #dce3ed;
+  border-radius: 0.5rem;
+  display: grid;
+  gap: 0.38rem;
+  padding: 0.68rem;
+}
+.playlist-create > div {
+  display: flex;
+  gap: 0.45rem;
+}
+.playlist-create input {
+  background: #fff;
+  border: 1px solid #ccd6e4;
+  border-radius: 0.42rem;
+  color: #2d3f5d;
+  flex: 1;
+  min-width: 0;
+  padding: 0.55rem 0.6rem;
+}
+.playlist-create button { flex: 0 0 auto; }
+@media (max-width: 640px) {
+  .playlist-create > div { flex-direction: column; }
+  .playlist-create button { width: 100%; }
 }
 .intake-review__error {
   color: #a4413b;

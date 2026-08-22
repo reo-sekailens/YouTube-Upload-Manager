@@ -155,7 +155,9 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           gh release delete nightly --yes --cleanup-tag || true
-          gh release create nightly release-assets/** \
+          mapfile -d '' assets < <(find release-assets -type f -print0)
+          test "${#assets[@]}" -gt 0
+          gh release create nightly "${assets[@]}" \
             --target "$SHA" \
             --title "Nightly build" \
             --notes "Automated pre-release from commit $SHA." \

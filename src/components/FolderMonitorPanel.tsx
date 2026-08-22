@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  createYouTubePlaylist,
   disableFolderMonitor,
   enableFolderMonitor,
   isTauri,
@@ -59,6 +60,8 @@ export function FolderMonitorPanel({
   const [deleteSourceAfterUpload, setDeleteSourceAfterUpload] = useState(false);
   const [playlists, setPlaylists] = useState<YouTubePlaylist[]>([]);
   const [playlistId, setPlaylistId] = useState("");
+  const [newPlaylistTitle, setNewPlaylistTitle] = useState("");
+  const [creatingPlaylist, setCreatingPlaylist] = useState(false);
   const lastQueueRefreshAt = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -139,6 +142,28 @@ export function FolderMonitorPanel({
       );
     } finally {
       setBusy(false);
+    }
+  };
+
+  const createPlaylist = async () => {
+    const title = newPlaylistTitle.trim();
+    if (!title) return;
+    setCreatingPlaylist(true);
+    setLoadError("");
+    try {
+      const playlist = await createYouTubePlaylist(title);
+      setPlaylists((current) =>
+        [...current, playlist].sort((left, right) => left.title.localeCompare(right.title)),
+      );
+      setPlaylistId(playlist.id);
+      setNewPlaylistTitle("");
+      onNotice(`Created private playlist “${playlist.title}” and selected it for this folder.`);
+    } catch (error) {
+      setLoadError(
+        error instanceof Error ? error.message : "The playlist could not be created.",
+      );
+    } finally {
+      setCreatingPlaylist(false);
     }
   };
 
@@ -346,6 +371,27 @@ export function FolderMonitorPanel({
                   ))}
                 </select>
               </label>
+              <div className="playlist-create folder-monitor__playlist-create">
+                <label htmlFor="folder-new-playlist">Create a private playlist</label>
+                <div>
+                  <input
+                    disabled={!activeChannel || busy || creatingPlaylist}
+                    id="folder-new-playlist"
+                    maxLength={150}
+                    onChange={(event) => setNewPlaylistTitle(event.target.value)}
+                    placeholder="Playlist name"
+                    value={newPlaylistTitle}
+                  />
+                  <button
+                    className="secondary-action"
+                    disabled={!activeChannel || busy || creatingPlaylist || newPlaylistTitle.trim().length === 0}
+                    onClick={() => void createPlaylist()}
+                    type="button"
+                  >
+                    {creatingPlaylist ? "Creating…" : "Create playlist"}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
           <button

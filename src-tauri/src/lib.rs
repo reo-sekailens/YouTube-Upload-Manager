@@ -292,6 +292,7 @@ struct RemoteVideo {
     title: String,
     duration: Option<String>,
     privacy_status: Option<String>,
+    upload_status: Option<String>,
     updated_at: String,
 }
 
@@ -328,6 +329,8 @@ struct PortableRemoteVideo {
     title: String,
     duration: Option<String>,
     privacy_status: Option<String>,
+    #[serde(default)]
+    upload_status: Option<String>,
     updated_at: String,
 }
 
@@ -428,6 +431,7 @@ fn database(state: &AppState) -> Result<Connection, String> {
               title TEXT NOT NULL,
               duration TEXT,
               privacy_status TEXT,
+              upload_status TEXT,
               updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS remote_video_sync_staging (
@@ -437,6 +441,7 @@ fn database(state: &AppState) -> Result<Connection, String> {
               title TEXT NOT NULL,
               duration TEXT,
               privacy_status TEXT,
+              upload_status TEXT,
               updated_at TEXT NOT NULL,
               PRIMARY KEY(sync_id, video_id)
             );
@@ -561,6 +566,8 @@ fn database(state: &AppState) -> Result<Connection, String> {
         "ALTER TABLE folder_monitor_settings ADD COLUMN delete_source_after_upload INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE preflight_scan_files ADD COLUMN metadata_json TEXT",
         "ALTER TABLE preflight_scan_files ADD COLUMN metadata_status TEXT NOT NULL DEFAULT 'pending'",
+        "ALTER TABLE remote_videos ADD COLUMN upload_status TEXT",
+        "ALTER TABLE remote_video_sync_staging ADD COLUMN upload_status TEXT",
     ] {
         let _ = connection.execute(migration, []);
     }
@@ -583,10 +590,10 @@ fn export_portable_archive_impl(
         .collect::<Result<Vec<_>, _>>()
         .map_err(user_error)?;
     let remote_videos = connection
-        .prepare("SELECT video_id, channel_name, title, duration, privacy_status, updated_at FROM remote_videos ORDER BY video_id ASC")
+        .prepare("SELECT video_id, channel_name, title, duration, privacy_status, upload_status, updated_at FROM remote_videos ORDER BY video_id ASC")
         .map_err(user_error)?
         .query_map([], |row| Ok(PortableRemoteVideo {
-            video_id: row.get(0)?, channel_name: row.get(1)?, title: row.get(2)?, duration: row.get(3)?, privacy_status: row.get(4)?, updated_at: row.get(5)?,
+            video_id: row.get(0)?, channel_name: row.get(1)?, title: row.get(2)?, duration: row.get(3)?, privacy_status: row.get(4)?, upload_status: row.get(5)?, updated_at: row.get(6)?,
         }))
         .map_err(user_error)?
         .collect::<Result<Vec<_>, _>>()
@@ -674,8 +681,8 @@ fn import_portable_archive_impl(
             return Err("The portable archive contains invalid YouTube inventory metadata.".into());
         }
         transaction.execute(
-            "INSERT INTO remote_videos (video_id, channel_name, title, duration, privacy_status, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(video_id) DO UPDATE SET channel_name = excluded.channel_name, title = excluded.title, duration = excluded.duration, privacy_status = excluded.privacy_status, updated_at = excluded.updated_at",
-            params![video.video_id, video.channel_name, video.title, video.duration, video.privacy_status, video.updated_at],
+            "INSERT INTO remote_videos (video_id, channel_name, title, duration, privacy_status, upload_status, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(video_id) DO UPDATE SET channel_name = excluded.channel_name, title = excluded.title, duration = excluded.duration, privacy_status = excluded.privacy_status, upload_status = excluded.upload_status, updated_at = excluded.updated_at",
+            params![video.video_id, video.channel_name, video.title, video.duration, video.privacy_status, video.upload_status, video.updated_at],
         ).map_err(user_error)?;
     }
     transaction.commit().map_err(user_error)?;
@@ -1631,6 +1638,14 @@ fn valid_playlist_selection(
     }
 }
 
+fn valid_new_playlist_title(title: &str) -> Result<String, String> {
+    let title = title.trim();
+    if title.is_empty() || title.chars().count() > 150 {
+        return Err("Enter a playlist name between 1 and 150 characters.".into());
+    }
+    Ok(title.to_string())
+}
+
 fn establish_upload_session(
     state: &AppState,
     item_id: &str,
@@ -2052,6 +2067,16 @@ fn youtube_inventory_http_error(status: u16) -> String {
     }
 }
 
+fn youtube_playlist_creation_http_error(status: u16) -> String {
+    match status {
+        401 => "YouTube authorization expired or was revoked. Connect YouTube again, then create the playlist.".into(),
+        403 => "Google denied playlist creation. Reconnect YouTube to grant playlist access, then try again.".into(),
+        429 => "YouTube is rate-limiting playlist creation. Wait a little, then try again.".into(),
+        500..=599 => "YouTube is temporarily unavailable. No playlist was confirmed; try again shortly.".into(),
+        _ => "YouTube could not create the playlist. No playlist was confirmed.".into(),
+    }
+}
+
 fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
     let access_token = refreshed_access_token(state)?;
     let channel_response = youtube_json(
@@ -2087,6 +2112,7 @@ fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
         .map_err(user_error)?;
     let mut next_page: Option<String> = None;
     let mut count = 0;
+    let mut processed_count = 0;
     loop {
         let mut query = vec![
             ("part", "contentDetails"),
@@ -2139,7 +2165,13 @@ fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
                 let privacy = video
                     .pointer("/status/privacyStatus")
                     .and_then(|value| value.as_str());
-                connection.execute("INSERT INTO remote_video_sync_staging (sync_id, video_id, channel_name, title, duration, privacy_status, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![&sync_id, video_id, channel_name, title, duration, privacy, now()]).map_err(user_error)?;
+                let upload_status = video
+                    .pointer("/status/uploadStatus")
+                    .and_then(|value| value.as_str());
+                if upload_status == Some("processed") {
+                    processed_count += 1;
+                }
+                connection.execute("INSERT INTO remote_video_sync_staging (sync_id, video_id, channel_name, title, duration, privacy_status, upload_status, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", params![&sync_id, video_id, channel_name, title, duration, privacy, upload_status, now()]).map_err(user_error)?;
                 count += 1;
             }
         }
@@ -2158,7 +2190,7 @@ fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
         .execute("DELETE FROM remote_videos", [])
         .map_err(user_error)?;
     transaction.execute(
-        "INSERT INTO remote_videos (video_id, channel_name, title, duration, privacy_status, updated_at) SELECT video_id, channel_name, title, duration, privacy_status, updated_at FROM remote_video_sync_staging WHERE sync_id = ?1",
+        "INSERT INTO remote_videos (video_id, channel_name, title, duration, privacy_status, upload_status, updated_at) SELECT video_id, channel_name, title, duration, privacy_status, upload_status, updated_at FROM remote_video_sync_staging WHERE sync_id = ?1",
         [&sync_id],
     ).map_err(user_error)?;
     transaction
@@ -2170,7 +2202,7 @@ fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
     transaction.commit().map_err(user_error)?;
     set_connection_detail(
         state,
-        &format!("Synced {count} YouTube video records locally."),
+        &format!("Synced {count} YouTube video records locally; {processed_count} fully processed videos are eligible for duplicate checks."),
         Some((channel_name, channel_id)),
     )?;
     audit_global(
@@ -2330,7 +2362,7 @@ fn find_item(connection: &Connection, id: &str) -> Result<UploadItem, String> {
 fn exact_local_duplicates(connection: &Connection) -> Result<Vec<DuplicateCandidate>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT id, title, digest FROM upload_items WHERE digest IS NOT NULL ORDER BY created_at ASC",
+            "SELECT id, title, digest FROM upload_items WHERE digest IS NOT NULL AND status = 'uploaded' ORDER BY created_at ASC",
         )
         .map_err(user_error)?;
     let rows = statement
@@ -2539,7 +2571,7 @@ fn synced_uploaded_title_exists(
     title: &str,
 ) -> Result<bool, String> {
     let mut statement = connection
-        .prepare("SELECT title FROM remote_videos WHERE channel_name = ?1 ORDER BY video_id ASC")
+        .prepare("SELECT title FROM remote_videos WHERE channel_name = ?1 AND upload_status = 'processed' ORDER BY video_id ASC")
         .map_err(user_error)?;
     let titles = statement
         .query_map([channel_name], |row| row.get::<_, String>(0))
@@ -2557,7 +2589,7 @@ fn matching_uploaded_titles(
     title: &str,
 ) -> Result<Vec<String>, String> {
     let mut statement = connection
-        .prepare("SELECT title FROM remote_videos WHERE channel_name = ?1 ORDER BY video_id ASC")
+        .prepare("SELECT title FROM remote_videos WHERE channel_name = ?1 AND upload_status = 'processed' ORDER BY video_id ASC")
         .map_err(user_error)?;
     let titles = statement
         .query_map([channel_name], |row| row.get::<_, String>(0))
@@ -2576,7 +2608,7 @@ fn matching_uploaded_title_details(
     title: &str,
 ) -> Result<Vec<PreIngestUploadedTitleMatch>, String> {
     let mut statement = connection
-        .prepare("SELECT title, duration, privacy_status, updated_at FROM remote_videos WHERE channel_name = ?1 ORDER BY video_id ASC")
+        .prepare("SELECT title, duration, privacy_status, updated_at FROM remote_videos WHERE channel_name = ?1 AND upload_status = 'processed' ORDER BY video_id ASC")
         .map_err(user_error)?;
     let matches = statement
         .query_map([channel_name], |row| {
@@ -2975,12 +3007,12 @@ fn load_preflight_scan(state: &AppState, job_id: &str) -> Result<PreIngestDuplic
             .unwrap_or_else(|| unavailable_preflight_local_metadata(None));
         let local_matches = if mode == "deep" {
             digest.as_deref().map(|digest| {
-                connection.prepare("SELECT title, file_name, status FROM upload_items WHERE digest = ?1 ORDER BY created_at ASC").map_err(user_error)?
+                connection.prepare("SELECT title, file_name, status FROM upload_items WHERE digest = ?1 AND status = 'uploaded' ORDER BY created_at ASC").map_err(user_error)?
                     .query_map([digest], |row| Ok(PreIngestLocalMatch { title: row.get(0)?, file_name: row.get(1)?, status: row.get(2)? })).map_err(user_error)?
                     .collect::<Result<Vec<_>, _>>().map_err(user_error)
             }).transpose()?.unwrap_or_default()
         } else {
-            connection.prepare("SELECT title, file_name, status FROM upload_items WHERE lower(file_name) = lower(?1) ORDER BY created_at ASC").map_err(user_error)?
+            connection.prepare("SELECT title, file_name, status FROM upload_items WHERE lower(file_name) = lower(?1) AND status = 'uploaded' ORDER BY created_at ASC").map_err(user_error)?
                 .query_map([file_name], |row| Ok(PreIngestLocalMatch { title: row.get(0)?, file_name: row.get(1)?, status: row.get(2)? })).map_err(user_error)?
                 .collect::<Result<Vec<_>, _>>().map_err(user_error)?
         };
@@ -3139,7 +3171,7 @@ fn prepare_preflight_local_delete_target(
             .map(|value| {
                 connection
                     .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM upload_items WHERE digest = ?1)",
+                        "SELECT EXISTS(SELECT 1 FROM upload_items WHERE digest = ?1 AND status = 'uploaded')",
                         [value],
                         |row| row.get::<_, i64>(0),
                     )
@@ -3151,7 +3183,7 @@ fn prepare_preflight_local_delete_target(
     } else {
         connection
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM upload_items WHERE lower(file_name) = lower(?1))",
+                "SELECT EXISTS(SELECT 1 FROM upload_items WHERE lower(file_name) = lower(?1) AND status = 'uploaded')",
                 [&file_name],
                 |row| row.get::<_, i64>(0),
             )
@@ -3289,7 +3321,7 @@ fn uploaded_title_duplicates(
 ) -> Result<Vec<DuplicateCandidate>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT video_id, title FROM remote_videos WHERE channel_name = ?1 ORDER BY video_id ASC",
+            "SELECT video_id, title FROM remote_videos WHERE channel_name = ?1 AND upload_status = 'processed' ORDER BY video_id ASC",
         )
         .map_err(user_error)?;
     let videos = statement
@@ -5030,7 +5062,7 @@ fn begin_oauth_connection(
 fn begin_youtube_connection(state: State<'_, AppState>) -> Result<OAuthStart, String> {
     begin_oauth_connection(
         state,
-        "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly",
+        "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl",
         false,
         OAuthAttemptKind::Connection,
     )
@@ -5249,12 +5281,17 @@ async fn prepare_preflight_local_delete_file(
 }
 
 #[tauri::command]
-fn delete_preflight_duplicate_file(
+async fn delete_preflight_duplicate_file(
     token: String,
     confirmation: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    delete_preflight_duplicate_file_impl(&state, &token, &confirmation)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_preflight_duplicate_file_impl(&state, &token, &confirmation)
+    })
+    .await
+    .map_err(|_| "Local duplicate deletion stopped unexpectedly.".to_string())?
 }
 
 #[tauri::command]
@@ -5321,12 +5358,83 @@ async fn list_youtube_playlists(
         .map_err(|_| "Playlist loading stopped unexpectedly.".to_string())?
 }
 
+fn create_youtube_playlist_impl(
+    state: &AppState,
+    title: String,
+) -> Result<YouTubePlaylist, String> {
+    let title = valid_new_playlist_title(&title)?;
+    let connection = database(state)?;
+    if !connection_settings(&connection)?.connected {
+        return Err("Connect YouTube before creating a playlist.".into());
+    }
+    let access_token = refreshed_access_token(state)?;
+    let response = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|_| "Playlist creation could not be prepared.".to_string())?
+        .post("https://www.googleapis.com/youtube/v3/playlists")
+        .query(&[("part", "id,snippet,status")])
+        .bearer_auth(access_token)
+        .json(&serde_json::json!({
+            "snippet": { "title": title },
+            "status": { "privacyStatus": "private" }
+        }))
+        .send()
+        .map_err(|_| {
+            "YouTube playlist creation could not be reached. Check your connection and try again."
+                .to_string()
+        })?;
+    if !response.status().is_success() {
+        let message = youtube_playlist_creation_http_error(response.status().as_u16());
+        let _ = audit_global(
+            &connection,
+            "youtube_playlist_creation_failed",
+            "YouTube did not confirm private playlist creation.",
+        );
+        return Err(message);
+    }
+    let response: serde_json::Value = response.json().map_err(|_| {
+        "YouTube returned an unreadable playlist response. No playlist was confirmed.".to_string()
+    })?;
+    let id = response
+        .get("id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or_else(|| {
+            "YouTube did not return a usable playlist identity. No playlist was confirmed."
+                .to_string()
+        })?;
+    let playlist = YouTubePlaylist {
+        id: id.to_string(),
+        title,
+    };
+    audit_global(
+        &connection,
+        "youtube_playlist_created",
+        "Created a private YouTube playlist for upload configuration.",
+    )?;
+    Ok(playlist)
+}
+
+#[tauri::command]
+async fn create_youtube_playlist(
+    title: String,
+    state: State<'_, AppState>,
+) -> Result<YouTubePlaylist, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || create_youtube_playlist_impl(&state, title))
+        .await
+        .map_err(|_| "Playlist creation stopped unexpectedly.".to_string())?
+}
+
 fn row_to_remote_video(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteVideo> {
     Ok(RemoteVideo {
         video_id: row.get("video_id")?,
         title: row.get("title")?,
         duration: row.get("duration")?,
         privacy_status: row.get("privacy_status")?,
+        upload_status: row.get("upload_status")?,
         updated_at: row.get("updated_at")?,
     })
 }
@@ -5346,7 +5454,7 @@ fn row_to_deletion_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<Deletion
 fn list_remote_videos(state: State<'_, AppState>) -> Result<Vec<RemoteVideo>, String> {
     let connection = database(&state)?;
     let mut statement = connection
-        .prepare("SELECT video_id, title, duration, privacy_status, updated_at FROM remote_videos ORDER BY updated_at DESC, title ASC")
+        .prepare("SELECT video_id, title, duration, privacy_status, upload_status, updated_at FROM remote_videos ORDER BY updated_at DESC, title ASC")
         .map_err(user_error)?;
     let videos = statement
         .query_map([], row_to_remote_video)
@@ -6057,6 +6165,7 @@ pub fn run() {
             execute_deletion_request,
             import_asset,
             list_youtube_playlists,
+            create_youtube_playlist,
             set_item_visibility,
             set_item_delete_source_after_upload,
             queue_item,
@@ -6524,7 +6633,7 @@ mod tests {
             ("second", "Second copy", "matching-digest"),
             ("third", "Different source", "other-digest"),
         ] {
-            connection.execute("INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES (?1, ?2, ?2, ?2, 1, ?3, 'draft', 1, ?4, ?4)", params![id, title, digest, now()]).unwrap();
+            connection.execute("INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES (?1, ?2, ?2, ?2, 1, ?3, 'uploaded', 1, ?4, ?4)", params![id, title, digest, now()]).unwrap();
         }
 
         let candidates = exact_local_duplicates(&connection).unwrap();
@@ -6535,6 +6644,41 @@ mod tests {
         assert_eq!(candidates[0].right_title, "Second copy");
         assert_eq!(candidates[0].left_video_id, None);
         assert_eq!(candidates[0].right_video_id, None);
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incomplete_uploads_never_provide_duplicate_evidence() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let connection = database(&state).unwrap();
+        for (id, status) in [("draft-copy", "draft"), ("transfer-copy", "uploading")] {
+            connection.execute(
+                "INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES (?1, 'Clip', 'clip.mp4', 'clip.media', 1, 'same-digest', ?2, 1, ?3, ?3)",
+                params![id, status, now()],
+            ).unwrap();
+        }
+        connection.execute(
+            "INSERT INTO remote_videos (video_id, channel_name, title, upload_status, updated_at) VALUES ('processing', 'Channel A', 'Clip', 'uploaded', ?1), ('complete', 'Channel A', 'Clip', 'processed', ?1)",
+            [now()],
+        ).unwrap();
+
+        assert!(exact_local_duplicates(&connection).unwrap().is_empty());
+        assert_eq!(
+            matching_uploaded_titles(&connection, "Channel A", "Clip").unwrap(),
+            vec!["Clip"]
+        );
+        assert!(uploaded_title_duplicates(&connection, "Channel A")
+            .unwrap()
+            .is_empty());
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
@@ -6551,7 +6695,7 @@ mod tests {
         fs::create_dir_all(&state.media_directory).unwrap();
         let connection = database(&state).unwrap();
         for (id, title) in [("first", "First copy"), ("second", "Second copy")] {
-            connection.execute("INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES (?1, ?2, ?2, ?2, 1, 'matching-digest', 'draft', 1, ?3, ?3)", params![id, title, now()]).unwrap();
+            connection.execute("INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES (?1, ?2, ?2, ?2, 1, 'matching-digest', 'uploaded', 1, ?3, ?3)", params![id, title, now()]).unwrap();
         }
         let candidate_id = current_duplicate_candidates(&connection).unwrap()[0]
             .id
@@ -6630,7 +6774,7 @@ mod tests {
             [locator],
         ).unwrap();
         connection.execute(
-            "INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, status, total_bytes, created_at, updated_at) VALUES ('saved', 'Camera original', 'camera-original.insv', 'saved.media', 1, 'draft', 1, ?1, ?1)",
+            "INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, status, total_bytes, created_at, updated_at) VALUES ('saved', 'Camera original', 'camera-original.insv', 'saved.media', 1, 'uploaded', 1, ?1, ?1)",
             [timestamp],
         ).unwrap();
         drop(connection);
@@ -6662,7 +6806,7 @@ mod tests {
             [timestamp.clone()],
         ).unwrap();
         connection.execute(
-            "INSERT INTO remote_videos (video_id, channel_name, title, updated_at) VALUES ('remote-title', 'Channel A', 'VID 20251218 195343 00 005', ?1)",
+            "INSERT INTO remote_videos (video_id, channel_name, title, upload_status, updated_at) VALUES ('remote-title', 'Channel A', 'VID 20251218 195343 00 005', 'processed', ?1)",
             [timestamp.clone()],
         ).unwrap();
         connection.execute(
@@ -6856,7 +7000,7 @@ mod tests {
         };
         let connection = database(&source_state).unwrap();
         connection.execute("INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES ('asset-1', 'Camera clip', 'camera.insv', 'secret-local-path.media', 12, 'digest-1', 'draft', 12, ?1, ?1)", [now()]).unwrap();
-        connection.execute("INSERT INTO remote_videos (video_id, channel_name, title, updated_at) VALUES ('video-1', 'Channel', 'Camera clip', ?1)", [now()]).unwrap();
+        connection.execute("INSERT INTO remote_videos (video_id, channel_name, title, upload_status, updated_at) VALUES ('video-1', 'Channel', 'Camera clip', 'processed', ?1)", [now()]).unwrap();
         let archive = root.join("portable.yumx.gz");
         let exported = export_portable_archive_impl(&source_state, &archive).unwrap();
         let imported = import_portable_archive_impl(&target_state, &archive).unwrap();
@@ -6894,6 +7038,16 @@ mod tests {
                 )
                 .unwrap(),
             1
+        );
+        assert_eq!(
+            target
+                .query_row(
+                    "SELECT upload_status FROM remote_videos WHERE video_id = 'video-1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "processed"
         );
         drop(target);
         drop(connection);
@@ -6969,7 +7123,7 @@ mod tests {
             ("a-suffix", "Channel A", "Launch Video (2)"),
             ("b-exact", "Channel B", "Launch Video"),
         ] {
-            connection.execute("INSERT INTO remote_videos (video_id, channel_name, title, updated_at) VALUES (?1, ?2, ?3, ?4)", params![video_id, channel_name, title, now()]).unwrap();
+            connection.execute("INSERT INTO remote_videos (video_id, channel_name, title, upload_status, updated_at) VALUES (?1, ?2, ?3, 'processed', ?4)", params![video_id, channel_name, title, now()]).unwrap();
         }
 
         let candidates = uploaded_title_duplicates(&connection, "Channel A").unwrap();
@@ -7018,7 +7172,7 @@ mod tests {
             ("different-capture", "Camera import 20251219 204824 00 014"),
         ] {
             connection.execute(
-                "INSERT INTO remote_videos (video_id, channel_name, title, updated_at) VALUES (?1, 'Channel A', ?2, ?3)",
+                "INSERT INTO remote_videos (video_id, channel_name, title, upload_status, updated_at) VALUES (?1, 'Channel A', ?2, 'processed', ?3)",
                 params![video_id, title, now()],
             ).unwrap();
         }
@@ -7156,7 +7310,7 @@ mod tests {
 
         connection
             .execute(
-                "INSERT INTO remote_videos (video_id, channel_name, title, updated_at) VALUES ('remote-title', 'Channel A', 'Already Uploaded', ?1)",
+                "INSERT INTO remote_videos (video_id, channel_name, title, upload_status, updated_at) VALUES ('remote-title', 'Channel A', 'Already Uploaded', 'processed', ?1)",
                 params![now()],
             )
             .unwrap();
@@ -7435,6 +7589,47 @@ mod tests {
         ));
         assert!(!valid_google_client_id("client-secret"));
         assert!(!valid_google_client_id("https://accounts.google.com"));
+    }
+
+    #[test]
+    fn new_playlist_names_are_trimmed_and_bounded() {
+        assert_eq!(valid_new_playlist_title("  Uploads  ").unwrap(), "Uploads");
+        assert!(valid_new_playlist_title("   ").is_err());
+        assert!(valid_new_playlist_title(&"x".repeat(151)).is_err());
+        assert_eq!(
+            valid_new_playlist_title(&"x".repeat(150))
+                .unwrap()
+                .chars()
+                .count(),
+            150
+        );
+    }
+
+    #[test]
+    fn playlist_creation_errors_are_safe_and_actionable() {
+        assert!(youtube_playlist_creation_http_error(403).contains("Reconnect YouTube"));
+        assert!(youtube_playlist_creation_http_error(429).contains("rate-limiting"));
+        assert!(youtube_playlist_creation_http_error(503).contains("temporarily unavailable"));
+        assert!(!youtube_playlist_creation_http_error(418).contains("418"));
+    }
+
+    #[test]
+    fn playlist_creation_requires_an_active_connection_before_any_provider_call() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+
+        assert!(matches!(
+            create_youtube_playlist_impl(&state, "Uploads".into()),
+            Err(message) if message == "Connect YouTube before creating a playlist."
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
