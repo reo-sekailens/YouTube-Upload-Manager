@@ -246,7 +246,7 @@ export function PreIngestDuplicatePanel({
           <h2 id="pre-ingest-duplicate-heading">Check files for duplicates</h2>
           <p className="section-copy">
             Fast match returns filename results immediately, then reads optional
-            media metadata in the background. Choose deep SHA-256 matching only
+            media metadata in the background. Choose deep BLAKE3 matching only
             when you need exact file evidence. Both accept INSV, LRV, and other
             file types without ingesting or uploading them.
           </p>
@@ -421,7 +421,7 @@ export function PreIngestDuplicatePanel({
                     <strong>{file.fileName}</strong>
                     <p>
                       {scan.mode === "deep"
-                        ? "Exact SHA-256 evidence"
+                        ? "Exact BLAKE3 evidence"
                         : "Matching filename evidence"}
                     </p>
                   </section>

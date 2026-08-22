@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   cancelPreflightDuplicateScan,
+  cancelUploadItem,
   checkUploadTitleDuplicates,
   clearUploadQueue,
   deleteUploadedSource,
@@ -230,7 +231,7 @@ export default function App() {
         setNotice(
           mode === "light"
             ? `Fast filename match started for ${paths.length} file${paths.length === 1 ? "" : "s"}.`
-            : `Deep SHA-256 match started for ${paths.length} file${paths.length === 1 ? "" : "s"}.`,
+            : `Deep BLAKE3 match started for ${paths.length} file${paths.length === 1 ? "" : "s"}.`,
         );
       } catch (error) {
         if (runId !== preflightRunId.current) return;
@@ -333,8 +334,19 @@ export default function App() {
       const cleared = await clearUploadQueue();
       await refresh();
       setNotice(
-        `${cleared} local upload job${cleared === 1 ? " was" : "s were"} cancelled. Managed media copies were retained.`,
+        `${cleared} local upload job${cleared === 1 ? " was" : "s were"} removed from the queue. Media copies were retained.`,
       );
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh]);
+
+  const cancelUpload = useCallback(async (item: UploadItem) => {
+    setBusy(true);
+    try {
+      await cancelUploadItem(item.id);
+      await refresh();
+      setNotice(`Removed “${item.title}” from the upload queue. Media was retained.`);
     } finally {
       setBusy(false);
     }
@@ -1040,6 +1052,7 @@ export default function App() {
                 items={snapshot.items}
                 busy={busy}
                 onQueue={(item) => void queue(item)}
+                onCancel={(item) => void cancelUpload(item)}
                 onVisibilityChange={(item, visibility) =>
                   void changeVisibility(item, visibility)
                 }

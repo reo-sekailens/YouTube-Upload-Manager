@@ -31,10 +31,10 @@ authorize and start.
   quota pause recovery, and safe startup reconciliation.
 - Optional watched-folder intake for private or unlisted videos only, with
   stable-file checks, channel binding, and duplicate withholding.
-- Duplicate review with local SHA-256 evidence, synchronized uploaded-title
+- Duplicate review with local BLAKE3 evidence, synchronized uploaded-title
   evidence, lazy YouTube comparison players, search, and audited decisions.
 - Pre-ingest checks for arbitrary files including `.insv` and `.lrv`: desktop
-  drops default to fast filename matching, while deep SHA-256 matching is
+  drops default to fast filename matching, while deep BLAKE3 matching is
   opt-in and checkpointed per file.
 - Desktop builds bundle FFprobe for local video-container metadata, including
   duration, tags, and stream details. No separate FFmpeg install is needed;

@@ -191,14 +191,16 @@ describe("persisted-work cancellation commands", () => {
   beforeEach(() => { invoke.mockReset(); });
 
   it("keeps queue and job cancellation decisions in the native layer", async () => {
-    const { cancelPreflightDuplicateScan, clearDeletionRequests, clearUploadQueue } = await import("./local");
+    const { cancelPreflightDuplicateScan, cancelUploadItem, clearDeletionRequests, clearUploadQueue } = await import("./local");
     await cancelPreflightDuplicateScan("scan-1");
     await clearUploadQueue();
+    await cancelUploadItem("upload-1");
     await clearDeletionRequests();
 
     expect(invoke).toHaveBeenNthCalledWith(1, "cancel_preflight_duplicate_scan", { jobId: "scan-1" });
     expect(invoke).toHaveBeenNthCalledWith(2, "clear_upload_queue");
-    expect(invoke).toHaveBeenNthCalledWith(3, "clear_deletion_requests");
+    expect(invoke).toHaveBeenNthCalledWith(3, "cancel_upload_item", { id: "upload-1" });
+    expect(invoke).toHaveBeenNthCalledWith(4, "clear_deletion_requests");
   });
 });
 

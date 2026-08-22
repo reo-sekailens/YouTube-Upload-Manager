@@ -25,14 +25,14 @@ Google LLC; other marks belong to their respective owners.
 - **Account connection:** the authorized YouTube identity and its credential reference; scoped to an operator or tenant when multi-user support exists.
 - **Upload batch:** operator-owned group of proposed uploads with a review and execution state.
 - **Upload item:** one source asset plus its requested metadata, idempotency identity, lifecycle state, and provider video reference once known.
-- **Local asset:** a device-local, immutable imported copy with byte size, SHA-256 digest, import state, and optional original source locator. It remains available when the app restarts or an external source moves.
+- **Local asset:** a device-local, immutable imported copy with byte size, BLAKE3 digest, import state, and optional original source locator. It remains available when the app restarts or an external source moves.
 - **Execution attempt:** an append-only record of a specific provider interaction, retry decision, response reference, redacted error details, and durable resume checkpoint.
 - **Resume checkpoint:** encrypted resumable session URI, total byte length, provider-confirmed byte offset, request metadata fingerprint, and checkpoint time. It is updated transactionally after each acknowledged range.
 - **Inventory video:** an account-scoped projection of an operator-owned YouTube video and its last synchronization state.
 - **Duplicate candidate:** an explainable comparison between records with an evidence tier and an operator decision; never an automatic deletion instruction.
 - **Deletion request:** immutable selected video IDs, confirmation context, execution results, and audit receipt.
 - **Watched-folder authorization:** one operator-selected device-local directory, the channel scope approved to receive its new files, enabled state, scan receipts, and last result. Existing files form a baseline; only later additions or changed replacements can become candidates.
-- **Folder observation:** channel-scoped path, size, modification key, processing state, optional SHA-256 digest, and canonical upload-item link used to make polling idempotent across restarts.
+- **Folder observation:** channel-scoped path, size, modification key, processing state, optional BLAKE3 digest, and canonical upload-item link used to make polling idempotent across restarts.
 
 ## Lifecycle baseline
 
@@ -53,10 +53,13 @@ Watched-folder automation is a deliberate recurring approval rather than an
 unreviewed publishing path. The operator chooses private or unlisted visibility
 when enabling the monitor; public visibility is unavailable. The local worker
 scans direct child files only while the app runs, requires an unchanged
-signature across consecutive scans, imports accepted media into managed storage,
-withholds local-digest and last-synchronized-title matches for review, and
+signature across consecutive scans, hashes and references accepted media in
+place without creating a managed-media copy, withholds local-digest and
+last-synchronized-title matches for review, and
 dispatches only the persisted private or unlisted resumable uploader. A
-connection mismatch pauses before network use.
+connection mismatch pauses before network use. The watched source must remain
+available and unchanged until YouTube confirms the upload; if it moves or
+changes, the item fails safely rather than uploading a replacement.
 
 Completed manual intake batches are queued and dispatch automatically whenever
 their approved channel is connected. If YouTube reports its daily upload limit,
@@ -66,7 +69,7 @@ or on the next launch. The pause stores no provider response body or credential.
 
 Duplicate detection remains an explicit operator action. **Run dedupe** first
 synchronizes the active channel's owner-authorized upload inventory, then
-rebuilds local SHA-256 and uploaded-title candidates for review. It never
+rebuilds local BLAKE3 and uploaded-title candidates for review. It never
 creates or executes a deletion request.
 
 The product display name is **YouTube Upload Manager**. Its Tauri identifier

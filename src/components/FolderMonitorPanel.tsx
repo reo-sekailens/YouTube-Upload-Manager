@@ -272,11 +272,11 @@ export function FolderMonitorPanel({
           {settings.enabled ? settings.visibility : visibility}.
         </strong>
         <span>
-          Enabling this is recurring approval to copy supported files added
-          after enabling into the app’s managed workspace and upload them to the
-          bound YouTube channel. Every supported direct-child file is accepted
-          automatically once it remains unchanged across two scans. Originals
-          remain unless automatic source cleanup is explicitly enabled below.
+          Enabling this is recurring approval to upload supported files directly
+          from this folder to the bound YouTube channel. No full app copy is
+          made. Every supported direct-child file is accepted automatically once
+          it remains unchanged across two scans. Keep each source available and
+          unchanged until YouTube confirms it; optional cleanup runs only then.
         </span>
       </div>
 
@@ -312,6 +312,10 @@ export function FolderMonitorPanel({
               </dd>
             </div>
             <div>
+              <dt>Transfer source</dt>
+              <dd>Watched file in place</dd>
+            </div>
+            <div>
               <dt>Playlist</dt>
               <dd>{settings.playlistTitle ?? "No playlist"}</dd>
             </div>
@@ -342,7 +346,7 @@ export function FolderMonitorPanel({
               <div className="folder-monitor__activity-column">
                 <h4>Uploading now</h4>
                 {uploadingFiles.length === 0 ? (
-                  <p className="folder-monitor__activity-empty">No files are currently being copied or uploaded.</p>
+                  <p className="folder-monitor__activity-empty">No files are currently being uploaded.</p>
                 ) : (
                   <ul className="folder-monitor__activity-list">
                     {uploadingFiles.map((file) => {
@@ -532,10 +536,11 @@ export function FolderMonitorPanel({
       <p className="folder-monitor__footnote">
         The monitor scans direct child files only. Every supported file must
         still stop changing before it is accepted; files over YouTube’s 256 GB
-        or 12-hour limits are rejected before copying. A matching local
-        SHA-256 record or title in the last synced YouTube library is not
-        uploaded automatically. Source cleanup re-hashes the original after a
-        confirmed upload and never deletes the managed app copy.
+        or 12-hour limits are rejected before upload. A matching local
+        BLAKE3 record or title in the last synced YouTube library is not
+        uploaded automatically. Watched files are used in place, so keep each
+        one unchanged and available until YouTube confirms it. Source cleanup
+        re-hashes the original and runs only after that confirmation.
       </p>
     </section>
   );

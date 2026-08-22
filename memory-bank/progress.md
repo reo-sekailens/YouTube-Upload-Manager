@@ -1,5 +1,35 @@
 # Progress
 
+## 2026-08-23 — Upload queue clearing
+
+- **Clear upload queue** now cancels every unfinished saved upload and removes
+  it from the dashboard rather than leaving it visibly stuck as a saved item.
+- Each unfinished upload now has its own **Remove** or **Cancel upload** action.
+  An active upload stops at the next chunk checkpoint; local media and resumable
+  evidence remain intact, and completed uploads are not removable this way.
+
+## 2026-08-23 — BLAKE3 local content hashing
+
+- New local content hashes use the official optimized BLAKE3 Rust crate for
+  streamed deep dedupe, managed-copy verification, watched-folder verification,
+  source-cleanup revalidation, and portable duplicate metadata.
+- The native content hash remains deterministic and exact-match safe across
+  desktop and mobile. SHA-256 remains limited to the Google OAuth PKCE
+  challenge and external artifact-verification records where the protocol or
+  publisher specifies it.
+
+## 2026-08-23 — Watched-folder direct-source transfer
+
+- Watched-folder intake now streams SHA-256 verification from the stable source
+  and queues that source in place. It does not create a full managed-media copy
+  or partial copy.
+- The worker rechecks size and modification signature after hashing. The source
+  must remain available and unchanged until YouTube confirms the upload; a
+  missing or changed source fails safely rather than uploading a replacement.
+- Folder-monitor copy describes this boundary and identifies **Watched file in
+  place** as the transfer source. Post-confirmation source cleanup remains a
+  separate opt-in.
+
 ## Current verified state — 2026-08-22
 
 - Repository initialized with Git metadata and an initial `.gitattributes` file.

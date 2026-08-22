@@ -1864,7 +1864,7 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<(), String> {
         )
         .map_err(|_| "This upload is no longer eligible to run.".to_string())?;
     if !Path::new(&workspace_path).is_file() {
-        return Err("The managed local media file is missing; this upload cannot continue.".into());
+        return Err("The upload media file is missing; watched-folder sources must remain available until YouTube confirms the upload.".into());
     }
     if channel_name.is_some() {
         let active_channel_id = connection_settings(&connection)?.active_channel_id;
@@ -3553,7 +3553,7 @@ fn copy_and_digest(source: &Path, destination_partial: &Path) -> Result<(u64, St
         .append(true)
         .open(destination_partial)
         .map_err(user_error)?;
-    let mut hasher = Sha256::new();
+    let mut hasher = blake3::Hasher::new();
     // Keep large streaming buffers on the heap. In release builds these helpers can
     // inline into native startup reconciliation, whose Windows GUI thread has a
     // comparatively small stack.
@@ -3581,7 +3581,7 @@ fn copy_and_digest(source: &Path, destination_partial: &Path) -> Result<(u64, St
         copied += bytes as u64;
     }
     output.sync_all().map_err(user_error)?;
-    Ok((copied, format!("{:x}", hasher.finalize())))
+    Ok((copied, hasher.finalize().to_hex().to_string()))
 }
 
 fn digest_file(path: &Path) -> Result<(u64, String), String> {
@@ -3590,7 +3590,7 @@ fn digest_file(path: &Path) -> Result<(u64, String), String> {
 }
 
 fn digest_reader(reader: &mut impl Read) -> Result<(u64, String), String> {
-    let mut hasher = Sha256::new();
+    let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     let mut bytes_read = 0_u64;
     loop {
@@ -3601,7 +3601,7 @@ fn digest_reader(reader: &mut impl Read) -> Result<(u64, String), String> {
         hasher.update(&buffer[..bytes]);
         bytes_read += bytes as u64;
     }
-    Ok((bytes_read, format!("{:x}", hasher.finalize())))
+    Ok((bytes_read, hasher.finalize().to_hex().to_string()))
 }
 
 fn preflight_file_name(path: &FilePath) -> String {
@@ -4289,7 +4289,7 @@ fn queue_monitored_item(
 }
 
 fn ingest_stable_monitored_file(
-    state: &AppState,
+    _state: &AppState,
     connection: &Connection,
     folder_path: &str,
     channel_name: &str,
@@ -4336,16 +4336,18 @@ fn ingest_stable_monitored_file(
         None,
         Some(&item_id),
     )?;
-    let partial_path = state.media_directory.join(format!("{item_id}.partial"));
-    let workspace_path = state.media_directory.join(format!("{item_id}.media"));
-    let (copied, digest) = copy_and_digest(&file.path, &partial_path)?;
+    // Watched-folder uploads intentionally retain a reference to the operator's
+    // source file instead of creating a second full-sized managed-media copy.
+    // Hashing is still streamed locally so the persisted duplicate evidence is
+    // identical to an imported asset, and the signature is checked again below
+    // before a queue record is ever created.
+    let (hashed_bytes, digest) = digest_file(&file.path)?;
     let current_metadata = fs::metadata(&file.path).map_err(user_error)?;
     let (current_size, current_modified) = monitored_file_signature(&current_metadata)?;
-    if copied != file.size_bytes
+    if hashed_bytes != file.size_bytes
         || current_size != file.size_bytes
         || current_modified != file.modified_key
     {
-        let _ = fs::remove_file(&partial_path);
         let changed_file = MonitoredFile {
             path: file.path.clone(),
             file_name: file.file_name.clone(),
@@ -4375,7 +4377,6 @@ fn ingest_stable_monitored_file(
         .optional()
         .map_err(user_error)?;
     if let Some((existing_id, existing_status)) = existing {
-        let _ = fs::remove_file(&partial_path);
         let outcome = if matches!(existing_status.as_str(), "draft" | "queued") {
             queue_monitored_item(
                 connection,
@@ -4415,7 +4416,7 @@ fn ingest_stable_monitored_file(
     let timestamp = now();
     connection
         .execute(
-            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, source_path, workspace_path, partial_path, size_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'importing', ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, 'Importing stable watched file into device-local workspace')",
+            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, source_path, workspace_path, size_bytes, digest, imported_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?7, 'draft', ?7, ?9, ?10, ?11, ?12, ?13, ?14, ?14, 'Watched source verified in place; keep it unchanged and available until YouTube confirms the upload')",
             params![
                 item_id,
                 title,
@@ -4423,9 +4424,8 @@ fn ingest_stable_monitored_file(
                 channel_name,
                 channel_id,
                 file.path.to_string_lossy(),
-                workspace_path.to_string_lossy(),
-                partial_path.to_string_lossy(),
                 file.size_bytes as i64,
+                digest,
                 visibility,
                 made_for_kids as i64,
                 delete_source_after_upload as i64,
@@ -4438,16 +4438,8 @@ fn ingest_stable_monitored_file(
     audit(
         connection,
         &item_id,
-        "folder_monitor_import_started",
-        "Stable watched file is being copied into managed local storage",
-    )?;
-    finish_import(
-        connection,
-        &item_id,
-        &file.path,
-        &partial_path,
-        &workspace_path,
-        file.size_bytes,
+        "folder_monitor_source_referenced",
+        "Stable watched file was verified in place without creating a managed-media copy",
     )?;
     let outcome =
         queue_monitored_item(connection, &item_id, folder_path, channel_name, visibility)?;
@@ -5206,7 +5198,7 @@ async fn process_existing_folder_files(
 fn dashboard_snapshot(state: State<'_, AppState>) -> Result<DashboardSnapshot, String> {
     let connection = database(&state)?;
     let mut statement = connection
-        .prepare("SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, delete_source_after_upload, source_delete_status, updated_at FROM upload_items ORDER BY updated_at DESC")
+        .prepare("SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, delete_source_after_upload, source_delete_status, updated_at FROM upload_items WHERE status != 'cancelled' ORDER BY updated_at DESC")
         .map_err(user_error)?;
     let items = statement
         .query_map([], row_to_upload_item)
@@ -6297,7 +6289,7 @@ fn queue_item(id: String, state: State<'_, AppState>) -> Result<UploadItem, Stri
 fn clear_upload_queue(state: State<'_, AppState>) -> Result<usize, String> {
     let connection = database(&state)?;
     let changed = connection.execute(
-        "UPDATE upload_items SET status = 'cancelled', detail = 'Operator cancelled this local upload job. The managed media copy and any resumable evidence were retained; an in-flight request stops at its next checkpoint.', updated_at = ?1 WHERE status IN ('draft', 'queued', 'dispatching', 'uploading', 'needs_reconciliation')",
+        "UPDATE upload_items SET status = 'cancelled', detail = 'Operator removed this local upload job from the queue. The media and resumable evidence were retained; an in-flight request stops at its next checkpoint.', updated_at = ?1 WHERE status IN ('importing', 'draft', 'queued', 'dispatching', 'uploading', 'needs_reconciliation', 'failed')",
         [now()],
     ).map_err(user_error)?;
     if changed > 0 {
@@ -6308,6 +6300,27 @@ fn clear_upload_queue(state: State<'_, AppState>) -> Result<usize, String> {
         )?;
     }
     Ok(changed)
+}
+
+#[tauri::command]
+fn cancel_upload_item(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let connection = database(&state)?;
+    let changed = connection
+        .execute(
+            "UPDATE upload_items SET status = 'cancelled', detail = 'Operator removed this local upload job from the queue. The media and resumable evidence were retained; an in-flight request stops at its next checkpoint.', updated_at = ?1 WHERE id = ?2 AND status IN ('importing', 'draft', 'queued', 'dispatching', 'uploading', 'needs_reconciliation', 'failed')",
+            params![now(), id],
+        )
+        .map_err(user_error)?;
+    if changed == 0 {
+        return Err("This upload is already completed or no longer in the queue.".into());
+    }
+    audit(
+        &connection,
+        &id,
+        "upload_item_cancelled",
+        "Operator removed this individual upload from the local queue",
+    )?;
+    Ok(())
 }
 
 fn reconcile_queue_impl(state: &AppState) -> Result<Vec<UploadItem>, String> {
@@ -6458,7 +6471,7 @@ fn reconcile_queue_impl(state: &AppState) -> Result<Vec<UploadItem>, String> {
     }
 
     let mut all = connection
-        .prepare("SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, delete_source_after_upload, source_delete_status, updated_at FROM upload_items ORDER BY updated_at DESC")
+        .prepare("SELECT id, title, file_name, size_bytes, digest, status, confirmed_bytes, total_bytes, video_id, detail, visibility, made_for_kids, playlist_id, playlist_title, upload_started_at, transfer_bytes_per_second, delete_source_after_upload, source_delete_status, updated_at FROM upload_items WHERE status != 'cancelled' ORDER BY updated_at DESC")
         .map_err(user_error)?;
     let items = all
         .query_map([], row_to_upload_item)
@@ -6569,6 +6582,7 @@ pub fn run() {
             delete_uploaded_source,
             queue_item,
             clear_upload_queue,
+            cancel_upload_item,
             reconcile_queue,
             exit_application
         ])
@@ -6768,7 +6782,7 @@ mod tests {
         let contents = b"confirmed-upload-source";
         fs::write(&source, contents).unwrap();
         fs::write(&managed, contents).unwrap();
-        let digest = format!("{:x}", Sha256::digest(contents));
+        let digest = blake3::hash(contents).to_hex().to_string();
         let connection = database(&state).unwrap();
         connection.execute(
             "INSERT INTO upload_items (id, title, file_name, source_path, workspace_path, size_bytes, digest, status, total_bytes, delete_source_after_upload, source_delete_status, created_at, updated_at) VALUES ('uploaded', 'Uploaded', 'camera-original.insv', ?1, ?2, ?3, ?4, 'uploaded', ?3, 1, 'pending', ?5, ?5)",
@@ -6810,7 +6824,7 @@ mod tests {
         let managed = state.media_directory.join("changed.media");
         fs::write(&source, b"changed-after-import").unwrap();
         fs::write(&managed, b"original-import").unwrap();
-        let digest = format!("{:x}", Sha256::digest(b"original-import"));
+        let digest = blake3::hash(b"original-import").to_hex().to_string();
         let connection = database(&state).unwrap();
         connection.execute(
             "INSERT INTO upload_items (id, title, file_name, source_path, workspace_path, size_bytes, digest, status, total_bytes, delete_source_after_upload, source_delete_status, created_at, updated_at) VALUES ('changed', 'Changed', 'changed-source.mp4', ?1, ?2, 15, ?3, 'uploaded', 15, 1, 'pending', ?4, ?4)",
@@ -7032,7 +7046,7 @@ mod tests {
         fs::write(&partial, &data[..1_100_000]).unwrap();
 
         let (copied, digest) = copy_and_digest(&source, &partial).unwrap();
-        let expected = format!("{:x}", Sha256::digest(&data));
+        let expected = blake3::hash(&data).to_hex().to_string();
 
         assert_eq!(copied, data.len() as u64);
         assert_eq!(digest, expected);
@@ -7156,7 +7170,9 @@ mod tests {
         };
         let first = root.join("camera-original.insv");
         fs::write(&first, b"proprietary-camera-payload").unwrap();
-        let digest = format!("{:x}", Sha256::digest(b"proprietary-camera-payload"));
+        let digest = blake3::hash(b"proprietary-camera-payload")
+            .to_hex()
+            .to_string();
         let connection = database(&state).unwrap();
         connection.execute("INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES ('saved', 'Camera original', 'camera-original.insv', 'saved.media', 26, ?1, 'draft', 26, ?2, ?2)", params![digest, now()]).unwrap();
         let (size_bytes, actual_digest) = digest_file(&first).unwrap();
@@ -7718,6 +7734,34 @@ mod tests {
                 .unwrap(),
             "queued"
         );
+        let (source_path, workspace_path, partial_path): (String, String, Option<String>) =
+            connection
+                .query_row(
+                    "SELECT source_path, workspace_path, partial_path FROM upload_items",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+        assert_eq!(
+            source_path,
+            watched.join("already-there.mp4").to_string_lossy()
+        );
+        assert_eq!(workspace_path, source_path);
+        assert!(partial_path.is_none());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_events WHERE kind = 'folder_monitor_source_referenced'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert!(fs::read_dir(&state.media_directory)
+            .unwrap()
+            .next()
+            .is_none());
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
@@ -8176,7 +8220,7 @@ mod tests {
                 .iter()
                 .find(|item| item.id == "finished-import")
                 .and_then(|item| item.digest.as_deref()),
-            Some(format!("{:x}", Sha256::digest(b"managed-video")).as_str())
+            Some(blake3::hash(b"managed-video").to_hex().as_str())
         );
 
         let connection = database(&state).unwrap();
@@ -8259,7 +8303,7 @@ mod tests {
         assert!(!partial.exists());
         assert_eq!(
             item.digest.as_deref(),
-            Some(format!("{:x}", Sha256::digest(contents)).as_str())
+            Some(blake3::hash(contents).to_hex().as_str())
         );
         fs::remove_dir_all(root).unwrap();
     }

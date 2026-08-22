@@ -14,7 +14,7 @@
 - Treat upload retries as an idempotency problem. Persist an item identity and provider response before retrying; surface ambiguous outcomes for operator review rather than silently starting a new upload.
 - Validate source type, size, and required metadata before queuing. Enforce provider quota and backoff behavior in the execution layer.
 - Redact request headers, tokens, local file paths, and sensitive provider payloads from logs and errors shown to operators.
-- At import, copy each queued source into an app-managed, device-local workspace and verify its SHA-256 digest. This is the default on every platform so a crash, source-file move, revoked picker handle, or app relaunch never requires the operator to drag the item in again. Desktop “reference in place” may be offered only as an explicitly less-resilient opt-in.
+- At import, copy each queued source into an app-managed, device-local workspace and verify its BLAKE3 digest. This is the default on every platform so a crash, source-file move, revoked picker handle, or app relaunch never requires the operator to drag the item in again. Watched-folder intake is the explicit less-resilient reference-in-place exception.
 - Persist the encrypted resumable session URI, total length, metadata fingerprint, and provider-confirmed byte range transactionally after every acknowledgment. On launch, query the session using an empty range request; use the returned `308` range or completed response as the sole resume authority. A `404` session expiry or an ambiguous result enters reconciliation and requires a verified match or operator-approved retry; it must not blindly create a potential duplicate.
 - Native setup runs local queue reconciliation before the dashboard loads. Completed managed imports are size-checked and re-digested, resumable partial imports continue from their saved source, `dispatching` claims return to `queued`, and interrupted `uploading` items enter `needs_reconciliation` without any automatic provider request or fresh upload session.
 - Streaming copy and digest helpers keep their 1 MiB buffers on the heap. Release inlining previously moved a fixed-size buffer into `reconcile_queue_impl`'s Windows GUI-thread frame and caused startup exception `0xc00000fd`; a 512 KiB-stack regression now protects the packaged startup path.
@@ -27,10 +27,10 @@
 - First-open setup is a dismissible, local guide that stays visible on later launches until the safe `oauthConfigured` status becomes true. Its only remote actions open fixed Google account or Cloud Console addresses in dedicated unprivileged WebviewWindows; it cannot create or configure a Google resource on the operator's behalf.
 - After launching the system browser, the connection panel polls the native connection receipt once per second until it changes. This resolves the callback outcome even when the platform opener does not resolve promptly.
 - Separate local checks from live certification. A real upload canary needs an authorized non-production-safe destination/account and explicit operator approval.
-- Watched-folder uploads are opt-in and bound to the active channel recorded at enable time. The operator selects private or unlisted visibility at enable time; public automatic uploads are rejected. The native app polls every five seconds only while running and sends every direct-child supported file—whether already present or newly added—through the same size-plus-modification-time two-scan stability gate before intake.
+- Watched-folder uploads are opt-in and bound to the active channel recorded at enable time. The operator selects private or unlisted visibility at enable time; public automatic uploads are rejected. The native app polls every five seconds only while running and sends every direct-child supported file—whether already present or newly added—through the same size-plus-modification-time two-scan stability gate before intake. Watched-folder intake hashes and references the source file in place; it does not create a second managed-media copy. The source must remain unchanged and available through provider confirmation.
 - Native intake rejects a file before managed copying or queue creation when it exceeds YouTube's published 256 GB maximum or its detected duration exceeds 12 hours. Desktop derives duration through the bundled hidden FFprobe sidecar with ISO-BMFF fallback; Android and iOS use the ISO-BMFF path available without a sidecar. Manual partial-import notices retain the actionable limit reason, while watched-folder observations are marked rejected rather than retried indefinitely.
-- Existing persisted baseline observations migrate to the ordinary observed state during a scan, so older monitor configurations also resume automatic intake without an operator-only **Process existing files** action. Stable files still use current-inventory duplicate checks, managed copy, resumable queue, and source-cleanup safeguards before dispatch.
-- Every upload path uses one native light-dedupe gate: manual single-file and batch intake, queued retries/resumes, and watched folders. It re-syncs processed YouTube titles before dispatch, compares normalized separators/duplicate-copy suffixes/capture sequences, and also compares other titles in the same local batch or active channel queue. A watched-folder light match is withheld before managed copying. Potential false positives remain an explicit, persisted Upload anyway decision; failed synchronization blocks dispatch rather than uploading blind.
+- Existing persisted baseline observations migrate to the ordinary observed state during a scan, so older monitor configurations also resume automatic intake without an operator-only **Process existing files** action. Stable files still use current-inventory duplicate checks, direct source reference, resumable queue, and source-cleanup safeguards before dispatch.
+- Every upload path uses one native light-dedupe gate: manual single-file and batch intake, queued retries/resumes, and watched folders. It re-syncs processed YouTube titles before dispatch, compares normalized separators/duplicate-copy suffixes/capture sequences, and also compares other titles in the same local batch or active channel queue. A watched-folder light match is withheld before source hashing and queue creation. Potential false positives remain an explicit, persisted Upload anyway choice; failed synchronization blocks dispatch rather than uploading blind.
 - Unless the operator separately selects automatic source cleanup before queueing, an uploaded item exposes its original-file delete confirmation only after YouTube has confirmed the upload. The native command requires the exact filename, requires the `uploaded` state, rechecks the external source digest, and never deletes managed media or the YouTube video.
 - Manual watched-folder scans persist a `scanning` receipt and continue on a native worker, so the webview immediately releases its controls. Queue refreshes are best-effort presentation updates and never hold folder-monitor controls busy; native scan failure is retained as a safe retryable monitor status.
 - A confirmed workspace exit invokes a dedicated native `AppHandle::exit(0)`
@@ -38,7 +38,7 @@
   which the webview intercepts to show its confirmation; recovery mode leaves
   that normal interception disabled so the window can close without clearing
   the crash marker.
-- Folder discovery is non-recursive and ignores directories, symlinks, hidden files, temporary/download names, zero-byte files, and unsupported extensions. Accepted files still pass through the managed local copy and SHA-256 ledger before the existing private resumable uploader can start. A match in the last synchronized channel-title inventory, including a trailing `(2)` or higher variant, is conservatively withheld from automatic upload for review.
+- Folder discovery is non-recursive and ignores directories, symlinks, hidden files, temporary/download names, zero-byte files, and unsupported extensions. Accepted files stream into the BLAKE3 ledger from their stable watched source before the existing private resumable uploader can start. A match in the last synchronized channel-title inventory, including a trailing `(2)` or higher variant, is conservatively withheld from automatic upload for review.
 - Monitor configuration, observations, dispatch claims, and channel-scoped audit context are device-local SQLite records. Disable stops discovery without deleting source media, managed copies, or already queued work; no daemon, cloud scheduler, or telemetry service is introduced.
 - Manual upload visibility is a per-item device-local value constrained to `private`, `unlisted`, or `public`, with `private` as the migration and import default. It can change only before queueing, is audited, and is sent only in the native resumable-session metadata. Watched-folder items remain private or unlisted only.
 - Completed manual intake batches queue and begin their saved native upload work immediately when the selected YouTube channel is connected; without a connection the managed copies remain safe local drafts until the operator connects. Watched-folder files follow the same automatic dispatch after their two-scan stability gate.
@@ -48,7 +48,7 @@
 - Pre-ingest duplicate checking deliberately uses Tauri's cross-platform dialog
   and filesystem layers: desktop accepts drag/drop paths, while Android and iOS
   use the document picker and its platform URI/handle. The native layer streams
-  every selected non-empty file into SHA-256 without creating an upload item or
+  every selected non-empty file into BLAKE3 without creating an upload item or
   exposing file bytes to the webview. The existing ingest boundary still decides
   which formats can be copied into the managed upload workspace. The UI tracks
   each preflight run so a later drop cannot be overwritten by an earlier result;
@@ -68,7 +68,7 @@
   channel's match before issuing a token; title evidence never deletes a file
   automatically.
 - Cross-device transfer uses a versioned gzip JSON archive with only upload
-  title/file-name/size/SHA-256 metadata and remote YouTube inventory. Imported
+  title/file-name/size/BLAKE3 metadata and remote YouTube inventory. Imported
   uploads are explicitly `metadata_only`; they contain no media path and cannot
   be resumed or dispatched. The archive excludes all tokens, client secrets,
   source paths, managed media, session URLs, and local audit history, and its
@@ -81,7 +81,7 @@
   on a separate native worker; result reloads reuse that persisted metadata and
   never relaunch FFprobe. It retains basic filesystem facts and a small
   ISO-BMFF duration-header read while enrichment is pending. Deep mode streams
-  SHA-256 one source at a time, checkpointing after every source and resuming
+  BLAKE3 one source at a time, checkpointing after every source and resuming
   unfinished jobs at launch. Native source locators remain in SQLite and are
   not exposed to the webview. Remote inventory sync stages all pages and
   replaces the previous inventory atomically only after success, preserving the

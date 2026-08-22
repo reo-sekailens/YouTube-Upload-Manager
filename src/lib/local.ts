@@ -194,6 +194,11 @@ export async function clearUploadQueue(): Promise<number> {
   return invoke<number>("clear_upload_queue");
 }
 
+/** Removes one unfinished upload from the visible queue without deleting media. */
+export async function cancelUploadItem(id: string): Promise<void> {
+  return invoke<void>("cancel_upload_item", { id });
+}
+
 /** Synchronizes the connected channel's inventory, then returns title matches for these local items. */
 export async function checkUploadTitleDuplicates(
   itemIds: string[],
@@ -216,7 +221,7 @@ export async function reAuditIgnoredDuplicateCandidates(): Promise<number> {
   return invoke<number>("re_audit_ignored_duplicate_candidates");
 }
 
-/** Starts a crash-resumable pre-ingest job. Light compares filenames; deep streams SHA-256 locally. */
+/** Starts a crash-resumable pre-ingest job. Light compares filenames; deep streams BLAKE3 locally. */
 export async function preflightDuplicateFiles(
   paths: string[],
   mode: "light" | "deep" = "light",

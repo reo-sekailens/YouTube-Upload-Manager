@@ -6,6 +6,7 @@ interface QueueTableProps {
   items: UploadItem[];
   busy: boolean;
   onQueue: (item: UploadItem) => void;
+  onCancel: (item: UploadItem) => void;
   onVisibilityChange: (item: UploadItem, visibility: UploadVisibility) => void;
   onDeleteSourceAfterUploadChange: (item: UploadItem, enabled: boolean) => void;
   onDeleteUploadedSource: (item: UploadItem, confirmation: string) => void;
@@ -33,6 +34,7 @@ export function QueueTable({
   items,
   busy,
   onQueue,
+  onCancel,
   onVisibilityChange,
   onDeleteSourceAfterUploadChange,
   onDeleteUploadedSource,
@@ -146,7 +148,7 @@ export function QueueTable({
                   className="queue-table__identity"
                   data-label="Local identity"
                 >
-                  <span className="queue-table__digest-label">SHA-256</span>
+                  <span className="queue-table__digest-label">BLAKE3</span>
                   <code className="queue-table__digest">
                     {item.digest
                       ? `${item.digest.slice(0, 12)}…`
@@ -233,14 +235,24 @@ export function QueueTable({
                 <td className="queue-table__action" data-label="Action">
                   <div className="queue-table__actions">
                     {item.status === "draft" ? (
-                      <button
-                        className="queue-button"
-                        disabled={busy}
-                        onClick={() => onQueue(item)}
-                        type="button"
-                      >
-                        Add to queue
-                      </button>
+                      <>
+                        <button
+                          className="queue-button"
+                          disabled={busy}
+                          onClick={() => onQueue(item)}
+                          type="button"
+                        >
+                          Add to queue
+                        </button>
+                        <button
+                          className="danger-button queue-button"
+                          disabled={busy}
+                          onClick={() => onCancel(item)}
+                          type="button"
+                        >
+                          Remove
+                        </button>
+                      </>
                     ) : (
                       item.status === "uploaded" && !item.deleteSourceAfterUpload && !item.sourceDeleteStatus ? (
                         <button
@@ -251,9 +263,16 @@ export function QueueTable({
                         >
                           Delete original…
                         </button>
-                      ) : (
-                        <span className="queue-table__saved">Saved locally</span>
-                      )
+                      ) : ["queued", "dispatching", "uploading", "needs_reconciliation", "failed", "importing"].includes(item.status) ? (
+                        <button
+                          className="danger-button queue-button"
+                          disabled={busy}
+                          onClick={() => onCancel(item)}
+                          type="button"
+                        >
+                          {item.status === "uploading" ? "Cancel upload" : "Remove"}
+                        </button>
+                      ) : <span className="queue-table__saved">Saved locally</span>
                     )}
                   </div>
                 </td>
