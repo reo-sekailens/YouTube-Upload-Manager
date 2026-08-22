@@ -5,6 +5,7 @@ import {
   cancelPreflightDuplicateScan,
   checkUploadTitleDuplicates,
   clearUploadQueue,
+  exitApplication,
   deletePreflightDuplicateFile,
   ignoreDuplicateCandidate,
   importAsset,
@@ -491,11 +492,9 @@ export default function App() {
 
   const confirmExit = useCallback(async () => {
     try {
-      // `close()` emits the same close-request event that opened this dialog.
-      // Destroy is Tauri's explicit confirmed-close path and bypasses that event.
-      await getCurrentWindow().destroy();
-    } catch {
       setExitConfirmationOpen(false);
+      await exitApplication();
+    } catch {
       setNotice("The app could not close. Your saved queue remains unchanged.");
     }
   }, []);

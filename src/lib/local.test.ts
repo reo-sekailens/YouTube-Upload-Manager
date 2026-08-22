@@ -75,6 +75,27 @@ describe("folder monitor commands", () => {
   });
 });
 
+describe("confirmed application exit", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    isTauri.mockReturnValue(true);
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    isTauri.mockReturnValue(false);
+    vi.resetModules();
+  });
+
+  it("uses the native application exit boundary after confirmation", async () => {
+    const { exitApplication } = await import("./local");
+
+    await exitApplication();
+
+    expect(invoke).toHaveBeenCalledWith("exit_application");
+  });
+});
+
 describe("duplicate scan command", () => {
   beforeEach(() => {
     invoke.mockReset();

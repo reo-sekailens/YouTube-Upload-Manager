@@ -23,6 +23,13 @@ import type {
 // application capability contract and can leave interactive controls disabled.
 export const isTauri = detectTauri();
 
+/** Ends the native app only after the UI has completed its exit confirmation. */
+export async function exitApplication(): Promise<void> {
+  if (!isTauri)
+    throw new Error("App exit is available only in the signed desktop app.");
+  await invoke("exit_application");
+}
+
 const youtubeAccountBrowserLabel = "youtube-account-browser";
 const youtubeAccountBrowserUrl = "https://www.youtube.com/";
 const googleSetupBrowserUrls = {

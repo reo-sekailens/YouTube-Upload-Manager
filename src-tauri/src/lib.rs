@@ -6327,6 +6327,14 @@ async fn reconcile_queue(state: State<'_, AppState>) -> Result<Vec<UploadItem>, 
         .map_err(|_| "Queue recovery stopped unexpectedly.".to_string())?
 }
 
+/// Ends the native application after the webview has received an explicit
+/// operator confirmation. This does not issue a window-close request, so the
+/// ordinary close-confirmation listener cannot intercept it a second time.
+#[tauri::command]
+fn exit_application(app: AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -6392,7 +6400,8 @@ pub fn run() {
             set_item_delete_source_after_upload,
             queue_item,
             clear_upload_queue,
-            reconcile_queue
+            reconcile_queue,
+            exit_application
         ])
         .run(tauri::generate_context!())
         .expect("error while running local application");
