@@ -19,6 +19,10 @@ the downloaded JSON on their device before connecting a channel.
   webview or audit log.
 - Existing connected devices retain their saved local configuration; a fresh
   installation requires an operator-imported client before it can connect.
+- Channel-verification HTTP failures now retain a safe, actionable category in
+  the local connection detail and diagnostics audit. In particular, a `403`
+  identifies a Google Cloud project where YouTube Data API access is denied
+  instead of the previous generic callback failure.
 
 ## Evidence
 

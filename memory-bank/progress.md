@@ -1,5 +1,27 @@
 # Progress
 
+## 2026-08-23 — Production certification execution started
+
+- TASK085 now has a versioned feature-and-surface certification matrix and a
+  static security findings report. The release is not production-certified:
+  six source-backed security remediations, live Google/YouTube canaries, signed
+  artifact smoke checks, and non-Windows platform evidence remain open.
+- Manual uploads now bind to the active immutable channel at queue time and
+  dispatch pauses when that reviewed channel is not active. Ordinary OAuth
+  consent no longer requests the YouTube deletion scope. Deletion consent now
+  uses a separate OS-protected credential that is channel-bound and cleared on
+  expiry, disable, disconnect, or a new ordinary connection.
+- FFprobe stdout is now capped while it is read, before parsing or unbounded
+  process-output accumulation. Persisted library/deletion UI queries now begin
+  using immutable active-channel IDs; archive scoping remains open in TASK088.
+
+## 2026-08-23 — Whole-product certification planned
+
+- TASK085 establishes a single feature-and-surface matrix for UI, native,
+  packaged-platform, and live Google/YouTube certification. It requires every
+  implemented workflow to have evidence or an explicit blocker and prohibits
+  treating browser or fixture checks as proof of native or provider behavior.
+
 ## 2026-08-23 — Folder-monitor metadata handoff
 
 - Bounded desktop FFprobe fallback to 15 seconds and prefer fast container duration metadata before it. This removes an unbounded pre-queue operation that could leave a watched file in `processing`.
@@ -170,3 +192,37 @@ Execute [TASK001](tasks/TASK001-cross-platform-foundation.md), beginning with th
 
 - Extended the native pre-upload title gate to same-batch and active local-queue matches, plus pre-copy watched-folder matching.
 - Verified locally: 51 Rust tests, 35 frontend tests, and production web build pass.
+
+# 2026-08-23 — Certification security remediation
+
+- Manual uploads now bind to the immutable active channel at queue time and
+  pause safely if the active channel changes before dispatch.
+- Watched-folder uploads revalidate their persisted source signature before
+  requesting provider access; a changed source is cancelled locally with an
+  audit receipt. Focused Rust regressions passed. These are local safeguards,
+  not live YouTube certification.
+
+# 2026-08-23 — Channel-isolated local certification
+
+- Completed inventory snapshots, remote-title dedupe, exact-local duplicate
+  review, deletion requests, and dashboard queue visibility are scoped to the
+  active immutable channel ID. Snapshot replacement preserves other channel
+  data while changing only the refreshed channel's records. Focused Rust
+  isolation tests pass; live multi-channel YouTube verification remains pending.
+
+# 2026-08-23 — Race-safe local deletion staging
+
+- Reviewed external sources are atomically staged to a unique sibling path
+  before final validation and deletion. Local duplicate deletion retains its
+  reviewed file signature and verifies it both before and after staging, so a
+  changed or replacement file is not deleted. Focused Rust safety tests pass;
+  installed-app filesystem behavior remains to be certified.
+
+# 2026-08-23 — Installed Windows artifact smoke
+
+- The fresh unsigned x64 NSIS installer installed into a scoped local
+  certification directory, launched its native Tauri window, rendered the
+  workspace plus confirmed-exit modal, and exited safely. The executable uses
+  the normal device-local application profile, so this is a packaged runtime
+  smoke check only; it does not certify a clean profile, signing, or provider
+  operations.

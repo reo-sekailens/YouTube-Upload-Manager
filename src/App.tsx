@@ -97,6 +97,12 @@ function isSupportedVideoPath(path: string) {
   return extension !== undefined && supportedVideoExtensions.has(extension);
 }
 
+function operatorErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  return fallback;
+}
+
 export default function App() {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(emptySnapshot);
   const [notice, setNotice] = useState(
@@ -723,9 +729,10 @@ export default function App() {
       );
     } catch (error) {
       setNotice(
-        error instanceof Error
-          ? error.message
-          : "The YouTube library could not be refreshed. Your last complete local library was kept.",
+        operatorErrorMessage(
+          error,
+          "The YouTube library could not be refreshed. Your last complete local library was kept.",
+        ),
       );
     } finally {
       setBusy(false);
