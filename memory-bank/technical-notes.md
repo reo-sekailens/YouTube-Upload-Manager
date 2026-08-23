@@ -31,6 +31,12 @@
   `reconcile_queue_impl`'s Windows GUI-thread frame and caused startup exception
   `0xc00000fd`; a 512 KiB-stack regression protects the packaged startup path.
 - The dashboard's channel-gated **Run dedupe** action calls the existing inventory synchronization command and then reloads the snapshot. This is the only manual trigger needed for title-based uploaded-video candidates; queue recovery has no button because it is automatic at app startup.
+- Browser-rendered large-list surfaces mount 32 records per page. A dedicated
+  local-only interaction harness runs the real Batch queue against 10,000
+  synthetic in-memory rows, measures request-to-painted search and clear
+  responses after the deferred value resolves, and records Long Tasks API
+  entries within each sample. Its evidence is browser-only and must not be
+  promoted to packaged WebView2 or live-provider proof.
 - Each manual dedupe run records device-local operator activity: start, channel-inventory synchronization, synchronized count, local normalized-title candidate rebuild, final candidate count, and safe errors. The UI reports only command boundaries exposed by the native layer; it never invents per-video progress, and it explicitly states that dedupe removes no video.
 - Dedupe activity includes an accessible determinate three-step phase bar: inventory synchronization, local candidate rebuild, and review readiness. Its values are phase completion, not a fabricated count or elapsed-time estimate; failure visibly remains incomplete.
 - The desktop CSP permits `frame-src https://www.youtube.com` solely for the lazy duplicate-comparison player frames. A separate Tauri WebviewWindow opens directly to YouTube for operator sign-in and has no application capability because only `main` is capability-scoped. The app does not access credentials or browser data; individual video embed and third-party-cookie availability remains controlled by YouTube.

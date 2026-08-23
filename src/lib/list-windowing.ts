@@ -1,4 +1,4 @@
-export const DEFAULT_DATA_WINDOW_SIZE = 48;
+export const DEFAULT_DATA_WINDOW_SIZE = 32;
 
 export type DataWindow<T> = {
   items: T[];

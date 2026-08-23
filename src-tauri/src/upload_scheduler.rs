@@ -11,6 +11,9 @@ pub(crate) struct UploadCandidate {
     pub(crate) item_id: String,
     pub(crate) volume_id: String,
     pub(crate) volume_limit: usize,
+    /// A saved YouTube resumable session has provider-confirmed work already
+    /// in flight, so it must consume available capacity before a new upload.
+    pub(crate) resume_from_youtube_session: bool,
 }
 
 #[derive(Default)]
@@ -130,6 +133,10 @@ fn select_fair_candidates(
     slots: usize,
     last_selected_volume: Option<&str>,
 ) -> Vec<UploadCandidate> {
+    // Keep recovered sessions at the front of every volume queue. Stable sort
+    // preserves FIFO order among recoveries and among brand-new uploads.
+    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+    candidates.sort_by_key(|candidate| !candidate.resume_from_youtube_session);
     let mut queues = Vec::<(String, VecDeque<UploadCandidate>)>::new();
     let mut queue_index = HashMap::<String, usize>::new();
     for candidate in candidates {
@@ -154,12 +161,26 @@ fn select_fair_candidates(
     let mut selected = Vec::with_capacity(slots);
     let mut selected_by_volume = HashMap::<String, usize>::new();
     while selected.len() < slots {
+        // Do not start a new upload while a resumable session can still be
+        // dispatched. A recovery blocked by its per-volume limit does not
+        // waste unrelated capacity on other volumes.
+        let resumable_recovery_available = queues.iter().any(|(volume_id, queue)| {
+            queue.front().is_some_and(|candidate| {
+                candidate.resume_from_youtube_session
+                    && active_by_volume.get(volume_id).copied().unwrap_or(0)
+                        + selected_by_volume.get(volume_id).copied().unwrap_or(0)
+                        < candidate.volume_limit
+            })
+        });
         let mut made_progress = false;
         for (volume_id, queue) in &mut queues {
             if selected.len() == slots {
                 break;
             }
             let Some(next) = queue.front() else { continue };
+            if resumable_recovery_available && !next.resume_from_youtube_session {
+                continue;
+            }
             let active = active_by_volume.get(volume_id).copied().unwrap_or(0)
                 + selected_by_volume.get(volume_id).copied().unwrap_or(0);
             if active >= next.volume_limit {
@@ -198,6 +219,14 @@ mod tests {
             item_id: id.into(),
             volume_id: volume.into(),
             volume_limit: limit,
+            resume_from_youtube_session: false,
+        }
+    }
+
+    fn resumable_candidate(id: &str, volume: &str, limit: usize) -> UploadCandidate {
+        UploadCandidate {
+            resume_from_youtube_session: true,
+            ..candidate(id, volume, limit)
         }
     }
 
@@ -412,6 +441,21 @@ mod tests {
         assert_eq!(second[0].item_id, "b");
         let third = scheduler.select_fair(candidates()).unwrap();
         assert_eq!(third[0].item_id, "a");
+    }
+
+    #[test]
+    fn resumable_sessions_are_selected_before_new_uploads() {
+        let scheduler = UploadScheduler::new(2);
+        let selected = scheduler
+            .select_fair([
+                candidate("new-a", "volume-a", 2),
+                candidate("new-b", "volume-b", 2),
+                resumable_candidate("resume-a", "volume-a", 2),
+            ])
+            .unwrap();
+        assert_eq!(selected[0].item_id, "resume-a");
+        assert!(selected[0].resume_from_youtube_session);
+        assert_eq!(selected[1].item_id, "new-a");
     }
 
     #[test]

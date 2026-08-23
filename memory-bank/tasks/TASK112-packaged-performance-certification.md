@@ -97,3 +97,26 @@ for each actually exercised platform.
   harness, and measured empty-versus-interrupted startup remain pending. This
   validate-only result is script/safety-contract evidence, not packaged timing
   or recovery certification.
+
+## Browser interaction certification slice
+
+- A separate local Chromium runner now mounts the real Batch `QueueTable` with
+  10,000 synthetic in-memory upload records, performs five untimed warm-up
+  pairs, then measures 40 actual search inputs and 40 actual clear-button
+  clicks through the React event path. Each receipt waits for the deferred
+  result and two animation frames and records interaction-local Long Tasks API
+  evidence. It never opens SQLite, an operator profile, media, secure storage,
+  or a provider connection.
+- The shared client-side data window is 32 records rather than 48. The narrower
+  window removed observed 50-56 ms clear-result render tasks while preserving
+  pagination, complete result counts, and a bounded real-data view.
+- Windows Edge 151 evidence on a 1416x1108 viewport passed: 40 searches had
+  p50/p95/max 44/87/91 ms; 40 Batch clears had 42/85/96 ms; all 80 chronological
+  samples mounted at most 32 rows; maximum interaction long task was 0 ms; and
+  runtime errors were zero. JSON SHA-256 is
+  `D108AB1207285E04C7FD046A4DE25321357D44245CCA7E1806D194A81917236F`;
+  screenshot SHA-256 is
+  `35822003D9DC703FDCC024818BC91678E9B17C158C9AE5A4D0612C48666ED3DF`.
+- This closes the local browser interaction-response slice only. It does not
+  substitute for packaged startup, WebView2, signed production, or live Google
+  and YouTube evidence.

@@ -1894,6 +1894,13 @@ fn stored_upload_session(item_id: &str) -> Result<Option<String>, String> {
     }
 }
 
+fn clear_upload_session(item_id: &str) -> Result<(), String> {
+    match upload_session_entry(item_id)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(user_error(error)),
+    }
+}
+
 fn mark_upload_state(
     state: &AppState,
     item_id: &str,
@@ -2449,6 +2456,11 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<bool, String> {
                 uri
             }
             None => {
+                // This session has reached a terminal provider state. Retain
+                // the local item for explicit review, but remove the session
+                // from the recovery lane so it cannot repeatedly preempt a
+                // genuinely resumable upload.
+                clear_upload_session(item_id)?;
                 mark_upload_state(
                     state,
                     item_id,
@@ -6889,6 +6901,7 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
             "YouTube's daily upload limit was reached. Saved uploads will resume automatically after {pause_until}."
         ));
     }
+    recover_resumable_uploads_for_active_channel(&mut connection, active_channel_id)?;
     let active_jobs = connection
         .prepare(
             "SELECT id, workspace_path FROM upload_items WHERE status IN ('dispatching', 'uploading')",
@@ -6931,10 +6944,17 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
                 limit
             }
         };
+        // A resumable-session URL is the only authoritative way to find a
+        // partially accepted YouTube upload. YouTube does not expose
+        // incomplete resumable sessions in the regular video library, so the
+        // worker will query this exact provider session before any bytes are
+        // sent and before newly queued uploads are allowed to take capacity.
+        let resume_from_youtube_session = stored_upload_session(&item_id)?.is_some();
         candidates.push(upload_scheduler::UploadCandidate {
             item_id,
             volume_id,
             volume_limit: limit,
+            resume_from_youtube_session,
         });
     }
     let selected = scheduler.select_fair(candidates)?;
@@ -6999,6 +7019,54 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
         spawn_worker(move || run_queued_upload(worker_state, item_id));
     }
     Ok(total)
+}
+
+/// Returns interrupted transfers with a persisted YouTube resumable-session
+/// URL to the shared queue. Every intake path (single file, batch, folder, and
+/// watched folder) uses `upload_items`, so this recovery pass deliberately has
+/// no intake-specific branch.
+fn recover_resumable_uploads_for_active_channel(
+    connection: &mut Connection,
+    active_channel_id: &str,
+) -> Result<usize, String> {
+    let item_ids = connection
+        .prepare(
+            "SELECT id FROM upload_items WHERE status = 'needs_reconciliation' AND channel_id = ?1 ORDER BY updated_at ASC LIMIT 256",
+        )
+        .map_err(user_error)?
+        .query_map([active_channel_id], |row| row.get::<_, String>(0))
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?;
+    let mut resumable_ids = Vec::new();
+    for id in item_ids {
+        if stored_upload_session(&id)?.is_some() {
+            resumable_ids.push(id);
+        }
+    }
+    if resumable_ids.is_empty() {
+        return Ok(0);
+    }
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(user_error)?;
+    let timestamp = now();
+    for id in &resumable_ids {
+        transaction
+            .execute(
+                "UPDATE upload_items SET status = 'queued', detail = 'Interrupted upload is prioritized for YouTube resumable-session verification.', updated_at = ?1 WHERE id = ?2 AND status = 'needs_reconciliation'",
+                params![&timestamp, id],
+            )
+            .map_err(user_error)?;
+        audit(
+            &transaction,
+            id,
+            "youtube_resumable_recovery_prioritized",
+            "Interrupted upload returned to the priority recovery lane before new uploads",
+        )?;
+    }
+    transaction.commit().map_err(user_error)?;
+    Ok(resumable_ids.len())
 }
 
 /// A successful connection or library refresh makes recovered queue entries
@@ -7966,6 +8034,16 @@ async fn sync_channel_inventory(state: State<'_, AppState>) -> Result<usize, Str
     })
     .await
     .map_err(|_| "YouTube inventory synchronization stopped unexpectedly.".to_string())?
+}
+
+/// Claims and starts queued uploads when capacity is available.
+///
+/// This is intentionally a native command because the webview uses it after
+/// startup and an explicit library refresh. Keeping the claim in native code
+/// preserves the durable scheduler's single-worker and per-volume limits.
+#[tauri::command]
+fn resume_queued_uploads(state: State<'_, AppState>) -> Result<usize, String> {
+    start_queued_uploads_impl(state.inner())
 }
 
 #[tauri::command]
@@ -9275,6 +9353,7 @@ pub fn run() {
                     cancel_youtube_connection,
                     disconnect_youtube,
                     sync_channel_inventory,
+                    resume_queued_uploads,
                     check_upload_title_duplicates,
                     ignore_duplicate_candidate,
                     re_audit_ignored_duplicate_candidates,
@@ -12602,6 +12681,7 @@ mod tests {
                 item_id: "next".into(),
                 volume_id: "volume-a".into(),
                 volume_limit: 1,
+                resume_from_youtube_session: false,
             }])
             .unwrap();
         assert_eq!(selected.len(), 1);

@@ -42,7 +42,7 @@ describe("large-list component rendering", () => {
       />,
     );
 
-    expect(countAttribute(markup, "data-queue-record")).toBe(48);
+    expect(countAttribute(markup, "data-queue-record")).toBe(32);
     expect(countAttribute(markup, "data-queue-record")).toBeLessThan(100);
   });
 
@@ -61,7 +61,7 @@ describe("large-list component rendering", () => {
       <DuplicateReview candidates={candidates} onIgnore={() => undefined} />,
     );
 
-    expect(countAttribute(markup, "data-duplicate-record")).toBe(48);
+    expect(countAttribute(markup, "data-duplicate-record")).toBe(32);
     expect(countAttribute(markup, "data-duplicate-record")).toBeLessThan(100);
   });
 
@@ -108,8 +108,8 @@ describe("large-list component rendering", () => {
       "data-preflight-activity-record",
     );
 
-    expect(resultCount).toBe(48);
-    expect(activityCount).toBe(48);
+    expect(resultCount).toBe(32);
+    expect(activityCount).toBe(32);
     expect(resultCount + activityCount).toBeLessThan(100);
   });
 
@@ -150,8 +150,8 @@ describe("large-list component rendering", () => {
       "data-deletion-request-record",
     );
 
-    expect(inventoryCount).toBe(48);
-    expect(requestCount).toBe(48);
+    expect(inventoryCount).toBe(32);
+    expect(requestCount).toBe(32);
     expect(inventoryCount + requestCount).toBeLessThan(100);
   });
 });

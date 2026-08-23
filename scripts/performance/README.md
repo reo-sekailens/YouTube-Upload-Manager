@@ -115,6 +115,29 @@ context. It intentionally excludes tokens, OAuth responses, channel IDs,
 source paths, filenames, media bytes, and provider payloads. Treat the JSON as
 the machine-readable record and the Markdown as the reviewable handoff.
 
+## Browser interaction certification
+
+The independent interaction runner exercises the real React `QueueTable` in a
+local Chromium process without touching an operator profile:
+
+```powershell
+node scripts/performance/measure-browser-interactions.mjs `
+  --output I:\certification\browser-interactions.json
+```
+
+It creates 10,000 synthetic in-memory upload records, performs five untimed
+warm-up pairs, then records 40 actual input/search interactions and 40 actual
+click/clear interactions. Every request waits for the deferred result and two
+animation frames, records Long Tasks API entries only within that interaction,
+and retains the complete chronological population. The run fails unless both
+p95 response times are below 100 ms, no interaction contains a long task over
+50 ms, the queue mounts at most 32 records, no runtime error occurs, and the
+redacted/local-only contract passes. A screenshot is saved beside the JSON.
+
+This is Chromium-rendered interaction evidence, not packaged WebView2 startup,
+native command, signed-production, or live-provider evidence. The explicit
+output path must be absolute and should remain outside the repository.
+
 ## Validation and limitations
 
 Check the runner before a baseline:

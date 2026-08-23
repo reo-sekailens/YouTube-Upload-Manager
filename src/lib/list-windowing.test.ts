@@ -9,7 +9,7 @@ describe("windowItems", () => {
     expect(result.items).toHaveLength(DEFAULT_DATA_WINDOW_SIZE);
     expect(result.items.length).toBeLessThan(100);
     expect(result.total).toBe(10_000);
-    expect(result.pageCount).toBe(209);
+    expect(result.pageCount).toBe(313);
   });
 
   it("clamps stale pages after a search narrows the result set", () => {
@@ -26,8 +26,8 @@ describe("windowItems", () => {
     const first = windowItems(fixture, 1);
     const second = windowItems(fixture, 2);
 
-    expect(first.items.at(-1)).toBe(47);
-    expect(second.items.at(0)).toBe(48);
-    expect(new Set([...first.items, ...second.items])).toHaveLength(96);
+    expect(first.items.at(-1)).toBe(31);
+    expect(second.items.at(0)).toBe(32);
+    expect(new Set([...first.items, ...second.items])).toHaveLength(64);
   });
 });
