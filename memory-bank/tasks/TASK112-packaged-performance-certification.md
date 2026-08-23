@@ -2,7 +2,7 @@
 
 ## Status
 
-proposed
+in_progress
 
 ## Objective
 
@@ -29,10 +29,12 @@ evidence.
 
 ## Acceptance criteria
 
-- The completed report compares TASK103 and final p50/p95 results on equivalent
-  hardware/profile fixtures and explains material variance.
-- Cold and warm startup meet the final TASK102 target; a simulated interrupted
-  256 GB fixture size does not materially affect first safe-shell time.
+- The completed report compares TASK103 and final p50/p95 results only when
+  hardware, storage headroom, fixture, WebView isolation, and milestone
+  semantics are equivalent, and explains material variance where they are not.
+- Cold and warm startup are reported with an actual acknowledged safe-shell
+  milestone; a simulated interrupted 256 GB fixture size does not materially
+  affect first safe-shell time.
 - Settled idle, large-list responsiveness, upload throughput, bounded memory,
   query, event, and worker/process budgets all pass.
 - Current frontend/native suites, recovery fixtures, and packaged Windows smoke
@@ -93,10 +95,28 @@ for each actually exercised platform.
   focused launcher/bundle-baseline test file passed 3/3. Its launcher regression
   asserts the Node executable, installed Tauri CLI path, complete argument and
   environment propagation, plus the absence of `npm.cmd` and shell execution.
-- Native feature compilation, seed-template execution with the real packaged
-  harness, and measured empty-versus-interrupted startup remain pending. This
-  validate-only result is script/safety-contract evidence, not packaged timing
-  or recovery certification.
+- The authoritative unsigned instrumented package is
+  `youtube-upload-manager-performance-harness.exe`, 20,034,048 bytes, SHA-256
+  `6CEC897CFE1D83FE7B4F73452974E7ACD7668C4158BF234086DCB7CE4163CB2D`.
+  Its unsigned NSIS installer is 26,685,288 bytes, SHA-256
+  `04D7E400EAB5146756AA40697A90DEE3C07F99CB56933F105310A3DAC4BB1D59`.
+- The authoritative empty-profile report contains two reversed 40-run blocks,
+  five untimed warmups per mode, 80 measured cold and 80 measured warm launches,
+  nearest-rank statistics, raw chronological receipts, and zero removed
+  outliers. The JSON SHA-256 is
+  `7C21E5DE0BEA98ED9B583B7A994208C5209E903CE6927D08CF0A11E91F98F90E`.
+- On the healthy-headroom `I:` SATA HDD, empty-profile safe-shell paint was
+  2,970/3,286 ms cold and 158/406 ms warm (p50/p95); native readiness was
+  1,865/2,321 ms and 503/743 ms; first Batch paint was 4,103/4,378 ms and
+  967/1,198 ms. All six settled-idle deltas were zero in every run. Cold and
+  warm SQLite statement counts were exactly 109 and 23 respectively.
+- The package was `NotSigned` and used the compile-time isolated performance
+  profile. This closes the instrumented unsigned-package slice only, not a
+  standard unsigned production install, signed production, or live provider.
+- **Final interrupted report placeholder:** add the authoritative
+  `interrupted-256gb` JSON/Markdown paths, hashes, p50/p95 safe-shell/native/
+  Batch timings, integrity/cardinality receipts, idle counters, and the
+  empty-versus-interrupted materiality calculation after the final run seals.
 
 ## Browser interaction certification slice
 
@@ -120,3 +140,23 @@ for each actually exercised platform.
 - This closes the local browser interaction-response slice only. It does not
   substitute for packaged startup, WebView2, signed production, or live Google
   and YouTube evidence.
+
+## Certification state
+
+- Local source/build: passed — 75/75 frontend tests; 127 native tests, zero
+  failed, five ignored release-only benchmarks; 6/6 FFprobe tests; frontend
+  bundle gate at 230,478 B raw / 71,657 B gzip and CSS at 38,470 B.
+- Local browser: passed for the 10,000-row Batch interaction slice only.
+- Unsigned instrumented Windows package: empty-profile startup and settled idle
+  passed; interrupted-profile result is pending insertion above.
+- Standard unsigned Windows production package/install: **pending**. Record
+  executable, installer, portable ZIP, FFprobe, and license hashes plus an
+  installed smoke receipt after the final ordinary build.
+- Signed Windows production: unavailable; no local code-signing certificate.
+- macOS, Linux, Android, and iOS packaged runtime: unavailable on this host.
+- Live Google OAuth/YouTube: not exercised; no approved non-production canary
+  account/client was supplied.
+- Equivalent healthy-headroom NVMe comparison: unavailable. The historical
+  reference used a non-equivalent first-Batch marker and storage/WebView profile,
+  while the only local NVMe volume failed the 10%-free-space rule. No 50%
+  startup or NVMe copy-speed claim is made from those incomparable samples.

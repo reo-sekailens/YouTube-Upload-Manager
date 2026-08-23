@@ -1,5 +1,33 @@
 # Progress
 
+## 2026-08-23 — Performance implementation complete; final package certification active
+
+- TASK103 through TASK111 are complete. The final integrated checks passed
+  75/75 frontend tests, 127 native tests with zero failures and five ignored
+  release-only benchmarks, 6/6 FFprobe preparation tests, and the deterministic
+  frontend/query/worker gates. Initial assets are 230,478 B JavaScript raw,
+  71,657 B JavaScript gzip, and 38,470 B CSS raw.
+- The authoritative unsigned performance package measured 80 cold and 80 warm
+  empty-profile launches in two reversed blocks on a healthy-headroom `I:` SATA
+  HDD. Safe-shell paint was 2,970/3,286 ms cold and 158/406 ms warm p50/p95;
+  first Batch paint was 4,103/4,378 ms and 967/1,198 ms. All six settled-idle
+  delta counters were zero in all 160 launches.
+- The real Batch browser fixture passed 40 searches at 44/87 ms p50/p95 and 40
+  clear interactions at 42/85 ms with 10,000 synthetic rows, at most 32 mounted
+  records, zero interaction Long Tasks, and zero runtime errors.
+- Healthy-HDD copy evidence rejected the 8 MiB and 1 MiB sequential-scan copy
+  candidates. The production copy path uses the fastest tested safe
+  non-regressing variant, 1 MiB standard opens, while preserving final
+  `sync_all`, resume reconstruction, cancellation, and bounded scheduling.
+- TASK102 and TASK112 remain in progress until the authoritative interrupted
+  profile and final ordinary unsigned production package/install/smoke receipts
+  are added. Signed production, non-Windows packages, live Google/YouTube, and
+  equivalent healthy-headroom NVMe evidence remain unavailable and are not
+  inferred from local or instrumented-package success. The historical startup
+  marker/storage/WebView semantics are non-equivalent, so no 50% claim is made.
+- Consolidated evidence:
+  `memory-bank/certification/performance-certification-2026-08-23.md`.
+
 ## 2026-08-23 — Production certification execution started
 
 - TASK085 now has a versioned feature-and-surface certification matrix and a
@@ -431,3 +459,18 @@ Execute [TASK001](tasks/TASK001-cross-platform-foundation.md), beginning with th
 - This is local TypeScript, Rust, SQLite, and fixture evidence only. No live
   YouTube inventory, OAuth account, provider pagination, packaged timing, or
   production throughput is claimed; TASK112 owns those certification layers.
+
+# 2026-08-23 — No-copy source-reference intake and legacy media cleanup
+
+- TASK113 completed. The implemented boundary changes manual picker,
+  drag/drop, and watched-folder intake to retain original-source references
+  rather than new app-managed `.media` or `.partial` copies; there is no
+  managed-copy fallback.
+- Source availability and unchanged-byte validation become required before
+  resumable dispatch/recovery. Startup must first classify database queue
+  safety, then may remove only legacy managed-media files that no live queued,
+  uploading, or reconciling job references.
+- Verified locally: `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`,
+  `cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1`
+  (125 passed, 0 failed, 5 ignored), and `git diff --check` passed. This is not
+  installed-launch cleanup evidence or live-provider upload certification.

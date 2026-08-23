@@ -85,7 +85,7 @@ bank architecture/technical documentation.
 
 - `cargo check --manifest-path src-tauri/Cargo.toml --lib` passed after the
   extraction cutover in 7.75 seconds.
-- The frozen post-TASK108/TASK109 integrated native suite passed 122 tests with
+- The final integrated performance-harness native suite passed 127 tests with
   0 failures and 5 intentionally ignored release-only benchmarks. This includes
   all nine media-runtime fixtures after the copy-resume fixture moved beside its
   owner.
@@ -98,10 +98,14 @@ bank architecture/technical documentation.
   177.561 ms, p95 205.575 ms, 360.439 MiB/s, and 163.47% of its pooled-streaming
   reference. This is upload-loop evidence only; it is not packaged startup or
   installer evidence.
+- The final production copy path was narrowed after TASK110's healthy-HDD
+  comparison to a 1 MiB heap buffer with standard opens, while the independent
+  read-only digest path retains its 8 MiB sequential strategy. The module seam,
+  final `sync_all`, cancellation, resume, and bounded scheduling are unchanged.
 
 ## Follow-up boundaries
 
-- TASK110 still owns a fresh quiet-window copy/hash distribution and portable/
-  installer FFprobe artifact inspection. TASK112 owns packaged startup,
-  recovery, installer, and portable certification. Neither boundary is claimed
-  by this source/module task.
+- TASK110 owns the retained healthy-HDD copy decision and unsigned harness
+  sidecar provenance. TASK112 owns standard unsigned-production, signed,
+  recovery, installer, portable, and provider certification; none is inferred
+  from source/module extraction.

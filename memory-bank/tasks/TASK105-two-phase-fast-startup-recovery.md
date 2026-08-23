@@ -58,13 +58,17 @@ fixtures prove parity.
 - Startup returns connection, crash, channel-scoped dashboard, and readiness
   state in one envelope from one SQLite connection. Queue dispatch additionally
   filters by the active immutable channel ID.
-- Focused native startup tests passed 6/6. The full native suite passed 91 tests
-  with 5 intentionally ignored, including the 512 KiB stack regression. The
-  performance-harness startup tests passed 6/6.
-- Type checking, the production frontend build, all 50 frontend tests, and the
+- Focused native startup tests passed 6/6. The final native performance-harness
+  suite passed 127 tests with zero failures and five intentionally ignored,
+  including the 512 KiB stack regression.
+- Type checking, the production frontend build, all 75 frontend tests, and the
   frontend payload budget passed. Browser-preview QA proved safe-first and
   crash-first rendering, recovery unlock, one active lazy workspace, and zero
   console warnings/errors.
-- Current signed/packaged Tauri startup and a large interrupted packaged profile
-  remain certification work under TASK112; browser-preview evidence is not a
-  substitute for that boundary.
+- The authoritative unsigned packaged empty-profile harness recorded the actual
+  shell receipt before allowing deferred startup completion. Across 80 cold and
+  80 warm runs, safe-shell paint was 2,970/3,286 ms cold and 158/406 ms warm
+  (p50/p95); native readiness was 1,865/2,321 ms and 503/743 ms; first Batch
+  paint was 4,103/4,378 ms and 967/1,198 ms. The final interrupted packaged
+  comparison remains TASK112 evidence. Signed production and live-provider
+  behavior are not inferred.

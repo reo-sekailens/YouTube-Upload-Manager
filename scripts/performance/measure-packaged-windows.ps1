@@ -55,7 +55,7 @@ $idleMinimumMilliseconds = 1900
 $idleMaximumMilliseconds = 2200
 $minimumFreeBytes = [int64](20GB)
 $measurementBlockCount = 2
-$cleanupTimeoutMilliseconds = 15000
+$cleanupTimeoutMilliseconds = 30000
 $cleanupInitialDelayMilliseconds = 50
 $cleanupMaximumDelayMilliseconds = 1000
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-in_progress
+completed
 
 ## Objective
 
@@ -49,7 +49,7 @@ TASK103.
 scripts/prepare-ffprobe.mjs, Tauri build hooks/configuration, native media probe,
 ingest/hash/copy scheduler, packaging workflow, and media fixtures.
 
-## Evidence to date
+## Evidence
 
 - `scripts/prepare-ffprobe.mjs` now streams checksum verification, pins binary
   and license digests, writes an identity-bound provenance receipt, selects one
@@ -60,8 +60,6 @@ ingest/hash/copy scheduler, packaging workflow, and media fixtures.
   provenance invalidation, and checksum-failure artifact safety; 6/6 passed.
 - On the reference Windows cache, first receipt creation took about 4.5 s and a
   verified receipt reuse took 0.66 s including npm startup.
-- Runtime FFprobe scheduling/probe-cache work and final installer/portable
-  artifact inspection were previously open.
 - Runtime media work now has one shared scheduler with two FFprobe slots and one
   copy/hash reader per source volume. Active upload volumes take probe priority,
   foreground/background reads yield in bounded intervals, and waits/processes
@@ -92,13 +90,12 @@ ingest/hash/copy scheduler, packaging workflow, and media fixtures.
   than a BLAKE3 regression: BLAKE3 remained stable at p50 41.713 ms / p95
   48.740 ms, while durable copy-plus-BLAKE3 reached p50 929.784 ms / p95
   1,871.217 ms against the frozen 335.852/368.178 ms reference.
-- The safe production candidate increases the heap-backed copy buffer from
-  1 MiB to 8 MiB and applies Windows `FILE_FLAG_SEQUENTIAL_SCAN` to source,
-  partial replay, and append handles. It retains the final `sync_all`, exact
-  partial length/digest reconstruction, per-volume admission, upload yielding,
-  and cancellation checks. A coordinated C:-volume release rerun improved to
-  p50 624.299 ms / p95 897.986 ms: 32.9% and 52.0% better than the regressed
-  run, but still 85.9% and 143.9% above the frozen acceptance reference.
+- A healthy-headroom 40-pair run on the `I:` SATA HDD rejected the 8 MiB plus
+  sequential-scan copy candidate: it regressed 3.70% at p50 and 18.61% at p95
+  against the simultaneously paired 1 MiB standard-open reference. A focused
+  40-pair follow-up also rejected 1 MiB plus sequential scan at +3.79%/+10.35%.
+  The production copy path therefore uses the fastest tested safe,
+  non-regressing variant: a 1 MiB heap buffer with standard opens.
 - Release-only phase diagnostics then isolated the remaining variance. The
   64 MiB stream/write/hash phase measured p50 74.891 ms / p95 278.429 ms,
   while the required durable `sync_all` measured p50 934.431 ms / p95
@@ -114,6 +111,12 @@ ingest/hash/copy scheduler, packaging workflow, and media fixtures.
   timing types/functions are `cfg(test)` release-benchmark instrumentation;
   the production monomorph records no timestamps and exposes no diagnostic
   fields.
+- The corrected copy path retains final `sync_all`, exact partial
+  length/digest reconstruction, scheduler admission/yielding, cancellation,
+  and resume behavior. Across the retained healthy-HDD evidence, all 80 copies
+  in each paired campaign completed `sync_all`, copied exactly 67,108,864
+  bytes, and matched one BLAKE3 digest; the separate interruption case reopened
+  at full size and matched the source digest.
 - Native first-run setup now installs the current schema directly only when
   `user_version = 0` and `sqlite_schema` proves there are no user tables. Any
   unversioned database with existing user data keeps the full transactional v0
@@ -132,7 +135,17 @@ ingest/hash/copy scheduler, packaging workflow, and media fixtures.
   `cargo test --manifest-path src-tauri/Cargo.toml --features performance-harness`
   passed using the shared F: target/temp cache: 127 passed, 0 failed, 5 ignored.
   This is local native correctness evidence, not packaged startup proof.
-- This task remains `in_progress`. Fresh installer/portable extraction and
-  target-architecture inspection remain required under TASK112. The copy/hash
-  gate additionally needs one durable rerun with healthy volume headroom; the
-  near-full-volume result is diagnostic evidence, not an accepted regression.
+- The authoritative unsigned Windows performance package contains the x64
+  FFprobe PE (`3A7E2DC003DC2CD1472827E4C7C4F056AE1AE0AE7C5BBC580C99B49827351BA4`,
+  82,668,032 bytes) and license
+  (`8CEB4B9EE5ADEDDE47B31E975C1D90C73AD27B6B165A1DCD80C7C545EB65B903`,
+  35,147 bytes). Standard portable/installer readback remains a TASK112
+  production-artifact boundary rather than reopening the runtime task.
+- Healthy-headroom NVMe throughput remains unverified because the only local
+  NVMe volume did not satisfy the 10%-free-space rule. The earlier near-full
+  C: samples are diagnostic only; no equivalent-NVMe speed claim is made.
+- Retained reports:
+  `I:\YouTube-Upload-Manager-TASK110-durable-copy-20260823\REPORT.md`
+  (SHA-256 `4331EF3590A2AE8F8285B9D1D4CBCFBF74E32ED6BA85BDBD210059C152FFC1E6`)
+  and `I:\YouTube-Upload-Manager-TASK110-durable-copy-20260823\hdd-1mib-sequential-followup\FOLLOWUP-REPORT.md`
+  (SHA-256 `BF60C1C2C280E364998A8D82EE9575A313BE37B430052C9A4072F4618C4FC3A1`).

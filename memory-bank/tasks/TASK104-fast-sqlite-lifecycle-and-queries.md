@@ -54,14 +54,14 @@ of the implementation; native migration/query tests.
   busy timeout, and composite/partial hot-path indexes.
 - A current-schema hot open executes exactly one required `foreign_keys` pragma
   and zero `CREATE`, `ALTER`, `table_info`, or `journal_mode` transitions.
-- The 10,000-record dashboard/dedupe release fixture improved from a frozen
-  177,330.510 ms single sample to 140.579 ms p50 / 156.155 ms p95 over seven
-  samples, about 1,135 times faster.
+- The final 10,000-record dashboard/dedupe release fixture improved from a
+  frozen 177,330.510 ms single sample to 137.866 ms p50 / 149.679 ms p95 over
+  seven samples, about 1,185 times faster at the p95 comparison.
 - Remote-title matching now groups deterministic signatures instead of
   comparing all pairs; local title evidence remains channel-scoped. Inventory
   staging, preflight creation, and multi-item queue claims use prepared short
   transactions.
-- Full native library validation passed 85 tests with 5 release-only benchmarks
-  intentionally ignored. Migration preservation/future-version rejection,
+- Final integrated native validation passed 127 tests with zero failures and
+  five release-only benchmarks intentionally ignored. Migration preservation/future-version rejection,
   WAL/foreign keys/busy contention, 10,000-row EXPLAIN plans, claim atomicity,
   title evidence, and channel isolation are covered.

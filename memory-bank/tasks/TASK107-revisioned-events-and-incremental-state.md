@@ -81,17 +81,16 @@ controllers, bridge types, and recovery tests.
 
 ## Evidence
 
-- `cargo test --lib`: 103 passed, 0 failed, 5 ignored. After the final explicit
-  worker-lifecycle seam, `cargo test state_events::tests --lib` passed 4/4,
-  `cargo test quota --lib` passed 1/1, and the original daily-limit persistence
-  regression passed 1/1.
-- `cargo check --lib`: passed; one pre-existing unused helper warning remains.
-- `npm test -- --run`: 59 passed, 0 failed, including 7 event-contract tests,
+- Final integrated native evidence passed 127 tests, failed zero, and ignored
+  five release-only benchmarks. The focused state-event, quota-lifecycle, and
+  daily-limit persistence regressions remain included.
+- `cargo check --lib` passed.
+- `npm test -- --run`: 75 passed, 0 failed, including the event-contract tests,
   listener/catch-up ordering, cross-workspace isolation, and native budget
   parser coverage.
 - `npm run check`, `npm run build`, and
   `npm run performance:frontend:check`: passed. The initial production
-  JavaScript is 230,549 bytes (225.15 KiB) raw / 71,624 bytes (69.95 KiB)
+  JavaScript is 230,478 bytes raw / 71,657 bytes
   gzip against budgets of 240,640 / 71,680 bytes; initial CSS is 38,470 bytes
   against a 40,960-byte budget.
 - `npm run performance:native:check -- --configuration-only`: passed with one
@@ -104,9 +103,13 @@ controllers, bridge types, and recovery tests.
   Folder monitor workspace rendered and switched tabs with no console warning
   or error. Screenshot:
   `output/task107-event-driven-folder-workspace.png`.
+- The authoritative unsigned packaged empty-profile run contains 80 cold and
+  80 warm launches. Every run recorded zero settled-idle periodic invokes,
+  database opens, SQLite statements, event messages, worker threads, and
+  FFprobe processes during the bounded two-second idle window.
 
 ## Follow-ups
 
-- TASK112 owns fresh signed/packaged idle CPU, wakeup, invoke-rate, and active
-  transfer p50/p95 certification. No provider or packaged-runtime speed claim
-  is inferred from these local source, unit, build, and preview checks.
+- TASK112 owns final interrupted-profile, standard unsigned-production,
+  signed-production, and live-provider certification. The instrumented unsigned
+  package closes the settled-idle counter slice only.

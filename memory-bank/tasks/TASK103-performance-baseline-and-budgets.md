@@ -2,7 +2,7 @@
 
 ## Status
 
-in_progress
+completed
 
 ## Objective
 
@@ -57,10 +57,23 @@ None.
 - `scripts/performance/frontend-baseline.mjs` and
   `tests/performance-baseline.test.ts` produce deterministic local bundle
   reports and explicit budgets.
-- The packaged runner, native counters, React commit/long-task markers, local
-  mock upload benchmark, deterministic CI gates, and cached FFprobe comparison
-  must all pass before this task moves to completed.
+- The final Windows runner records two reversed 40-run blocks plus five untimed
+  warmups, nearest-rank p50/p90/p95/max, raw chronological receipts, isolated
+  WebView2 profiles, storage headroom/provenance, SQLite integrity/cardinality,
+  and all six settled-idle deltas. No outlier is removed.
 - `src-tauri/src/upload_performance_benchmarks.rs` passed a seven-session
   loopback `308 Range` benchmark for file-read, current-shaped, and pooled
   streaming modes. The tracked baseline records its redacted p50/p95 and copy/
   memory characteristics; TASK108 owns the final throughput gate.
+- The final optimized local checks passed 75/75 frontend tests, 127 native
+  tests with zero failures and five ignored release-only benchmarks, 6/6
+  FFprobe tests, and deterministic bundle/query/worker gates. TASK108's upload
+  fixture passed at 204.516/239.985 ms p50/p95 and 2.0429x its pooled-streaming
+  reference.
+- `memory-bank/certification/performance-certification-2026-08-23.md` records
+  the authoritative unsigned packaged empty-profile and browser interaction
+  results. TASK112 owns the final interrupted and production-package boundary.
+- The historical startup reference remains retained, but it used a different
+  first-Batch marker, shared/low-headroom storage conditions, and non-equivalent
+  WebView profile semantics. It is therefore descriptive baseline evidence,
+  not a valid denominator for the provisional 50% target.

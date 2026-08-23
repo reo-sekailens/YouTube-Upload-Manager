@@ -53,14 +53,17 @@ configuration, and component/browser performance tests.
 - Only the active workspace mounts. Feature components and feature CSS are lazy
   chunks; dialog, opener, and window APIs load only for their interactions. The
   mixed static/dynamic opener warning is gone.
-- Queue, duplicate, deletion, preflight, and activity surfaces page at 48
-  records. SSR component fixtures prove 48 rendered records per surface (96
-  where two lists coexist) from 10,000 inputs while retaining explicit
+- Queue, duplicate, deletion, preflight, and activity surfaces page at 32
+  records. Component and browser fixtures prove at most 32 rendered records per
+  single list from 10,000 inputs while retaining explicit
   all-results selection semantics.
-- Initial production assets pass the fixed TASK103 gates: 227,210 B JavaScript
-  raw, 70,741 B JavaScript gzip, and 38,470 B CSS raw.
-- Frontend validation passed 48 tests, typecheck, and warning-free production
+- Initial production assets pass the fixed TASK103 gates: 230,478 B JavaScript
+  raw, 71,657 B JavaScript gzip, and 38,470 B CSS raw.
+- Frontend validation passed 75 tests, typecheck, and warning-free production
   build. In-app Browser QA at `http://127.0.0.1:1420/` proved one active
   tabpanel, inactive Batch DOM removal, lazy Duplicate/Transfer rendering,
-  keyboard selection/focus movement, and zero console warnings/errors. Signed
-  packaged-Tauri validation remains part of TASK112.
+  keyboard selection/focus movement, and zero console warnings/errors.
+- The final local-browser 10,000-row Batch run measured 40 searches at 44/87 ms
+  p50/p95 and 40 clear interactions at 42/85 ms, mounted at most 32 rows, and
+  recorded zero interaction Long Tasks and runtime errors. This is browser
+  evidence; signed packaged-Tauri validation remains part of TASK112.

@@ -95,8 +95,8 @@ folders, batch bridge commands, persistence indexes, and scale fixtures.
   than 100 rows. Separate regressions prove that compact status, bounded pages,
   and expanded metadata use independent commands.
 - Native `cargo check --manifest-path src-tauri/Cargo.toml --lib` passed at the
-  integrated TASK109 checkpoint. The final frozen-tree `cargo test --lib`
-  passed **122 tests**, with zero failures and five release-only benchmarks
+  integrated TASK109 checkpoint. The final performance-harness `cargo test`
+  passed **127 tests**, with zero failures and five release-only benchmarks
   ignored. The first attempt had stopped before tests on a TASK111 benchmark
   import; its owner repaired that compile-only seam before the passing run.
 - Native golden regressions cover exact titles, trailing `(2)`
@@ -118,8 +118,8 @@ folders, batch bridge commands, persistence indexes, and scale fixtures.
 
 ## Follow-ups
 
-- Capture the paged preflight panel and lazy metadata expansion in the rendered
-  app because the result-loading interaction changed.
+- Paged Batch rendering is covered by the final 10,000-row browser harness;
+  populated preflight deep-metadata expansion remains a rendered-app follow-up.
 - TASK112 owns packaged startup/operation timing and any explicitly approved
   non-production Google/YouTube canary. Local fixture results are not packaged
   or live-provider certification.

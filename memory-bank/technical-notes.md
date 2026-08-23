@@ -14,9 +14,9 @@
 - Treat upload retries as an idempotency problem. Persist an item identity and provider response before retrying; surface ambiguous outcomes for operator review rather than silently starting a new upload.
 - Validate source type, size, and required metadata before queuing. Enforce provider quota and backoff behavior in the execution layer.
 - Redact request headers, tokens, local file paths, and sensitive provider payloads from logs and errors shown to operators.
-- At import, copy each queued source into an app-managed, device-local workspace and verify its BLAKE3 digest. This is the default on every platform so a crash, source-file move, revoked picker handle, or app relaunch never requires the operator to drag the item in again. Watched-folder intake is the explicit less-resilient reference-in-place exception.
+- At manual and watched-folder intake, persist an original device-local source reference with its stable signature and BLAKE3 digest; do not create an app-managed `.media` or `.partial` copy or a copy fallback. Before dispatch or resumable recovery, revalidate that original source. If it moved, is unavailable, or changed, fail safely/reconcile rather than uploading replacement bytes. This trades the former guarantee against source moves/deletion for bounded device storage.
 - Persist the encrypted resumable session URI, total length, metadata fingerprint, and provider-confirmed byte range transactionally after every acknowledgment. On launch, query the session using an empty range request; use the returned `308` range or completed response as the sole resume authority. A `404` session expiry or an ambiguous result enters reconciliation and requires a verified match or operator-approved retry; it must not blindly create a potential duplicate.
-- Native setup is deliberately database-only: it initializes/migrates SQLite once, returns `dispatching` claims to `queued`, marks interrupted uploads and deletions for reconciliation, and resets durable local-job markers in one immediate transaction. It performs no media read, FFprobe, network request, or secure-session lookup. React renders a safe shell first; after two animation frames, one bounded coordinator resumes managed imports, secure resumable-session resolution, watched hashes, and preflight work. Upload controls and native dispatch remain fenced until both phases complete and the active immutable channel matches.
+- Native setup is deliberately database-only: it initializes/migrates SQLite once, returns `dispatching` claims to `queued`, marks interrupted uploads and deletions for reconciliation, and resets durable local-job markers in one immediate transaction. It performs no media read, FFprobe, network request, secure-session lookup, or destructive media cleanup during this classification. React renders a safe shell first; after two animation frames, one bounded coordinator resumes source-reference validation, secure resumable-session resolution, watched hashes, preflight work, and legacy cleanup. Cleanup migrates legacy items to a surviving source path or marks unavailable-source items failed before deleting owned `.media` and `.partial` files. Upload controls and native dispatch remain fenced until both phases complete and the active immutable channel matches.
 - TASK112's `interrupted-256gb` packaged fixture exists only behind the native
   `performance-harness` feature plus a separate seed-only environment gate. An
   untimed process commits one channel-less `uploading` row declaring
@@ -26,7 +26,10 @@
   the ordinary database-only classification. Regular builds ignore the fixture
   variables. Clone/template deletion requires the marker and verified
   containment beneath the disposable root.
-- Streaming copy and digest helpers keep their 8 MiB buffers on the heap.
+- Streaming buffers stay on the heap. The independent read-only digest path
+  uses an 8 MiB sequential-read buffer; the legacy resumable copy path uses a
+  1 MiB buffer with standard opens after healthy-HDD paired evidence rejected
+  both tested sequential-scan copy variants.
   Release inlining previously moved a fixed-size buffer into
   `reconcile_queue_impl`'s Windows GUI-thread frame and caused startup exception
   `0xc00000fd`; a 512 KiB-stack regression protects the packaged startup path.
@@ -37,6 +40,17 @@
   responses after the deferred value resolves, and records Long Tasks API
   entries within each sample. Its evidence is browser-only and must not be
   promoted to packaged WebView2 or live-provider proof.
+- The safe shell remains mounted until its real DOM marker has painted across
+  two animation frames and the native performance recorder acknowledges the
+  `safe_shell_paint` milestone. Deferred startup completion is invoked only
+  after that receipt; unknown/rejected milestone calls fail the harness rather
+  than silently producing a missing timing.
+- The authoritative unsigned empty-profile package uses two reversed 40-run
+  blocks, five untimed warmups, isolated WebView2 data per clone, nearest-rank
+  percentiles, raw chronological receipts, and no outlier removal. All 160
+  measured launches recorded zero deltas for periodic invokes, database opens,
+  SQLite statements, event messages, worker threads, and FFprobe processes in
+  the bounded two-second settled-idle window.
 - Each manual dedupe run records device-local operator activity: start, channel-inventory synchronization, synchronized count, local normalized-title candidate rebuild, final candidate count, and safe errors. The UI reports only command boundaries exposed by the native layer; it never invents per-video progress, and it explicitly states that dedupe removes no video.
 - Dedupe activity includes an accessible determinate three-step phase bar: inventory synchronization, local candidate rebuild, and review readiness. Its values are phase completion, not a fabricated count or elapsed-time estimate; failure visibly remains incomplete.
 - The desktop CSP permits `frame-src https://www.youtube.com` solely for the lazy duplicate-comparison player frames. A separate Tauri WebviewWindow opens directly to YouTube for operator sign-in and has no application capability because only `main` is capability-scoped. The app does not access credentials or browser data; individual video embed and third-party-cookie availability remains controlled by YouTube.
@@ -60,20 +74,21 @@
 - Desktop watched-folder duration validation prefers the fast ISO-BMFF header path and uses bundled FFprobe only as a 15-second bounded fallback. A stalled or unsupported probe cannot hold the persistent observation in `processing`; it is terminated and the normal light-gated queue handoff continues.
 - Native media work now uses one shared device-local scheduler: at most two FFprobe processes run at once, and at most one copy/hash reader runs per detected source volume. Active uploads register their source volume; new probes wait behind that upload and foreground/background readers yield in short bounded intervals so media enrichment cannot monopolize the upload disk. Probe and read waits observe cancellation, FFprobe is killed on cancellation or timeout, and watched-hash cancellation reuses one SQLite connection with checks throttled to 250 ms rather than opening a database per chunk.
 - Upload-limit validation uses a duration-only FFprobe request capped at 64 KiB. Rich pre-ingest metadata is capped at 2 MiB and is reused for duration only when the canonical path, byte length, and nanosecond modification key still match. The bounded 256-entry in-memory cache coalesces matching in-flight probes and does not permanently cache spawn, timeout, or cancellation failures. ISO-BMFF remains the zero-process fast path, and startup classification/recovery never enters the probe path.
-- Managed imports retain resumable single-pass copy-plus-BLAKE3 behavior with a
-  heap-backed 8 MiB copy buffer and Windows sequential-scan hints; watched
-  snapshots and standalone hashes use the same heap-backed buffer size.
-  Platform clone/offload was not selected because it
-  would require a separate digest pass and would weaken the transactional
-  partial-copy checkpoint; fresh quiet-window copy/hash evidence is still
-  required before TASK110 closes.
+- Legacy managed-copy handling exists only to classify and reclaim old
+  app-created `.media`/`.partial` files safely. New intake streams BLAKE3 from
+  the original reference; no platform clone, reflink, hard-link, or full-copy
+  fallback is used. Cleanup never blindly removes a legacy file before the
+  database proves that no live job references it.
 - Release-only copy phase diagnostics keep their fields/functions under
   `cfg(test)`. On the near-full C: volume, user-space stream/write/hash was p50
   74.891 ms while the required `sync_all` was p50 934.431 ms. The durable flush
   remains mandatory: neither omitting it nor pre-extending a partial file is
   compatible with trusting byte length and digest reconstruction after a crash.
-  TASK110 therefore retains the safe 8 MiB/sequential improvement but remains
-  open for a healthy-headroom durable rerun against the frozen gate.
+  Healthy-headroom paired evidence later rejected 8 MiB/sequential copy at
+  +3.70%/+18.61% p50/p95 and 1 MiB/sequential copy at +3.79%/+10.35% versus
+  their paired 1 MiB standard-open references. Production uses the fastest
+  tested safe non-regressing variant, 1 MiB standard opens, while retaining
+  `sync_all`, resume reconstruction, cancellation, and scheduler admission.
 - The stabilized media hot path is isolated in `media_runtime`: it exclusively
   owns source-volume reader/process admission, active-upload priority guards,
   copy/hash primitives, ISO-BMFF duration parsing, FFprobe lifecycle, and the
@@ -89,7 +104,7 @@
   build ran out of disk before link and is invalid evidence, so Cargo.toml
   remains unchanged and packaged measurements remain assigned to TASK112.
 - After the TASK111 cutover and the concurrent TASK108/TASK109 seams settled,
-  the frozen integrated native suite passed 122 tests with zero failures and
+  the final integrated performance-harness native suite passed 127 tests with zero failures and
   five intentionally ignored release-only benchmarks. This is source/native
   behavior evidence, not packaged startup, installer, or live-provider proof.
 - Nightly Windows portable packaging now includes the prepared `ffprobe.exe` and `ffprobe-license.txt`, verifies the sidecar PE machine is x64, and verifies all three portable ZIP entries. Mobile configs continue to null desktop sidecar/resources. Fresh installer and portable extraction inspection remains a packaged-certification boundary rather than a source/config claim.
@@ -104,9 +119,9 @@
   that normal interception disabled so the window can close without clearing
   the crash marker.
 - Folder discovery is non-recursive and ignores directories, symlinks, hidden files, temporary/download names, zero-byte files, and unsupported extensions. Accepted files pass the persisted light title gate before the private/unlisted resumable uploader can start; a separate native BLAKE3 worker verifies the stable watched source concurrently. A match in the last synchronized channel-title inventory, including a trailing `(2)` or higher variant, is conservatively withheld from automatic upload for review.
-- Monitor configuration, observations, dispatch claims, and channel-scoped audit context are device-local SQLite records. Disable stops discovery without deleting source media, managed copies, or already queued work; no daemon, cloud scheduler, or telemetry service is introduced.
+- Monitor configuration, observations, dispatch claims, and channel-scoped audit context are device-local SQLite records. Disable stops discovery without deleting source media or already queued work; legacy managed-media cleanup remains startup queue-safety gated. No daemon, cloud scheduler, or telemetry service is introduced.
 - Manual upload visibility is a per-item device-local value constrained to `private`, `unlisted`, or `public`, with `private` as the migration and import default. It can change only before queueing, is audited, and is sent only in the native resumable-session metadata. Watched-folder items remain private or unlisted only.
-- Completed manual intake batches queue and begin their saved native upload work immediately when the selected YouTube channel is connected; without a connection the managed copies remain safe local drafts until the operator connects. Watched-folder files follow the same automatic dispatch after their two-scan stability gate.
+- Completed manual intake batches queue and begin their saved native upload work immediately when the selected YouTube channel is connected; without a connection their original references remain queued only while the source stays available and unchanged. Watched-folder files follow the same automatic dispatch after their two-scan stability gate.
 - When the YouTube upload API returns a recognized `quotaExceeded`, `dailyLimitExceeded`, or `uploadLimitExceeded` response, the native queue stores a 24-hour per-channel device-local dispatch pause without persisting provider payloads. The affected item returns to `queued`; one conditional worker waits until the saved deadline and exits after resuming or when no pause remains.
 - Current and batch upload ETAs are projections of only the latest server-acknowledged transfer rate. Before a confirmed rate exists, the UI says it is calculating rather than inventing a duration. Every provider-confirmed range remains durable, while a fixed 100 ms native window coalesces the latest upload state into a compact revisioned event; the webview does not poll the dashboard.
 - Schema v2 appends safe channel-scoped mutations to `state_changes`. The event
@@ -115,7 +130,7 @@
   channels are filtered and repeated entity progress is coalesced. Cursor gaps,
   reloads, and process restarts recover from SQLite; a channel mismatch is
   rejected before any entity payload enters the active projection.
-- Native file drag-drop supplies filesystem paths directly to the same managed-local import command used by the picker. Both UI and Rust restrict intake to supported video extensions, and the Rust command remains the enforcement boundary.
+- Native file drag-drop supplies filesystem paths directly to the same reference-in-place intake command used by the picker. Both UI and Rust restrict intake to supported video extensions, and the Rust command remains the enforcement boundary.
 - Pre-ingest duplicate checking deliberately uses Tauri's cross-platform dialog
   and filesystem layers: desktop accepts drag/drop paths, while Android and iOS
   use the document picker and its platform URI/handle. The native layer streams
@@ -159,11 +174,13 @@
   not exposed to the webview. Remote inventory sync stages all pages and
   replaces the previous inventory atomically only after success, preserving the
   last known complete snapshot across a crash or failed network call.
-- Crash recovery is deliberately operation-specific. Managed imports resume from
-  their partial local copy; queued uploads resume only when the protected
-  YouTube resumable-session checkpoint survives and then start at the
-  provider-confirmed byte range. Uploads with no safe checkpoint remain in
-  explicit reconciliation. Watched-folder observations, pre-ingest jobs,
+- Crash recovery is deliberately operation-specific. Queued uploads resume only
+  when the original source reference revalidates and the protected YouTube
+  resumable-session checkpoint survives, then start at the provider-confirmed
+  byte range. An unavailable/changed source or missing safe checkpoint remains
+  in explicit reconciliation. Startup cleans legacy `.media`/`.partial` files
+  only after the database classification proves that no live job references
+  them. Watched-folder observations, pre-ingest jobs,
   inventory staging, and import records are persisted before their work runs.
   Remote deletion writes an `executing` checkpoint before the DELETE request;
   a restart changes it to `needs_reconciliation`, requiring a new typed-ID
@@ -171,7 +188,7 @@
   archive import is transactional and export is written/synced to a temporary
   file before publication, never overwriting an existing archive.
 - Queue clearing is cancellation, not destructive cleanup: upload items become
-  `cancelled` while their managed media and resumable evidence remain local;
+  `cancelled` while their original-source reference and resumable evidence remain local;
   pre-ingest jobs become `cancelled` and workers stop before subsequent files
   or inventory work; pending/recoverable deletion requests become `cancelled`
   without contacting YouTube. Each action has a device-local audit receipt.

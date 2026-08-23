@@ -88,7 +88,7 @@ post-processing persistence, local mock provider, and concurrency tests.
 
 ## Evidence
 
-- The final frozen integrated native suite passed **122 tests**, failed zero,
+- The final integrated native performance-harness suite passed **127 tests**, failed zero,
   and ignored five release-only benchmarks. It includes lazy startup, token
   expiry/singleflight/invalidation, mock `308` and interruption, late
   cancellation, cleanup retry, successive fair handoff, rejected over-capacity
@@ -115,6 +115,6 @@ post-processing persistence, local mock provider, and concurrency tests.
 
 ## Follow-ups
 
-- TASK112 owns signed/packaged transfer measurements and an explicitly approved
+- TASK112 owns standard/signed packaged transfer measurements and an explicitly approved
   non-production Google/YouTube canary. The local benchmark does not establish
   internet, provider-processing, quota, or production-channel throughput.
