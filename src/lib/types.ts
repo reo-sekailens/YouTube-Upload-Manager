@@ -222,6 +222,10 @@ export type FolderMonitorSettings = {
 export type FolderMonitorFileActivity = {
   /** Opaque local identifier used only to requeue this already-authorized job. */
   itemId?: string;
+  /** YouTube ID is present only for a watched item that completed an upload. */
+  videoId?: string;
+  /** The active channel's authenticated YouTube inventory still contains this ID. */
+  liveConfirmed: boolean;
   fileName: string;
   observationState: string;
   sizeBytes: number;
