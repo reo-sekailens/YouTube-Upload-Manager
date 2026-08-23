@@ -80,23 +80,23 @@ export function UploadIntakeReview({
   };
   return (
     <section
-      className="intake-review"
+      className="fixed top-1/2 left-1/2 z-10 grid w-[calc(100%-2rem)] max-w-[34rem] -translate-x-1/2 -translate-y-1/2 gap-3.5 rounded-xl border border-[#bfcfe7] bg-white p-5 shadow-[0_18px_42px_rgba(27,50,83,0.18)]"
       aria-labelledby="intake-review-heading"
       role="dialog"
       aria-modal="true"
     >
-      <p className="eyebrow">REQUIRED BEFORE IMPORT</p>
-      <h2 id="intake-review-heading">
+      <p className="mb-0 text-[0.67rem] font-bold tracking-[0.1em] text-[#68748a] uppercase">REQUIRED BEFORE IMPORT</p>
+      <h2 className="-mt-1.5 mb-0 text-[1.15rem] text-[#1e2d48]" id="intake-review-heading">
         Review {paths.length} video{paths.length === 1 ? "" : "s"}
       </h2>
-      <p>
+      <p className="-mt-1 mb-0 text-[0.78rem] leading-snug text-[#617086]">
         These choices apply to this drop before the files are copied into this
         device’s managed workspace.
       </p>
-      <fieldset>
-        <legend>Made for Kids</legend>
-        <label>
-          <input
+      <fieldset className="grid gap-2 rounded-lg border border-[#dce3ed] p-3">
+        <legend className="px-1 text-[0.78rem] font-bold text-[#344a67]">Made for Kids</legend>
+        <label className="flex items-center gap-2 text-[0.78rem] text-[#4e5f78]">
+          <input className="accent-[#2463df]"
             checked={madeForKids === true}
             name="made-for-kids"
             onChange={() => setMadeForKids(true)}
@@ -104,8 +104,8 @@ export function UploadIntakeReview({
           />{" "}
           Yes, made for kids
         </label>
-        <label>
-          <input
+        <label className="flex items-center gap-2 text-[0.78rem] text-[#4e5f78]">
+          <input className="accent-[#2463df]"
             checked={madeForKids === false}
             name="made-for-kids"
             onChange={() => setMadeForKids(false)}
@@ -114,9 +114,9 @@ export function UploadIntakeReview({
           No, not made for kids
         </label>
       </fieldset>
-      <label className="intake-review__field">
+      <label className="grid gap-1 text-[0.78rem] font-bold text-[#344a67]">
         Visibility
-        <select
+        <select className="rounded-md border border-[#ccd6e4] bg-white px-2.5 py-2 text-[#2d3f5d] focus:border-[#2463df] focus:outline-3 focus:outline-[#2d68e8]/15"
           onChange={(event) =>
             setVisibility(event.target.value as UploadVisibility)
           }
@@ -127,12 +127,12 @@ export function UploadIntakeReview({
           <option value="public">Public</option>
         </select>
       </label>
-      <div className="playlist-create" aria-label="Create a new playlist">
-        <label className="intake-review__field" htmlFor="intake-new-playlist">
+      <div className="grid gap-1 rounded-lg border border-[#dce3ed] bg-[#f7f9fc] p-3" aria-label="Create a new playlist">
+        <label className="grid gap-1 text-[0.78rem] font-bold text-[#344a67]" htmlFor="intake-new-playlist">
           Create a private playlist
         </label>
-        <div>
-          <input
+        <div className="flex gap-2 max-sm:flex-col">
+          <input className="min-w-0 flex-1 rounded-md border border-[#ccd6e4] bg-white px-2.5 py-2 text-[#2d3f5d] focus:border-[#2463df] focus:outline-3 focus:outline-[#2d68e8]/15"
             disabled={creatingPlaylist}
             id="intake-new-playlist"
             maxLength={150}
@@ -141,7 +141,7 @@ export function UploadIntakeReview({
             value={newPlaylistTitle}
           />
           <button
-            className="secondary-action"
+            className="shrink-0 rounded-md border border-[#cbd3df] bg-white px-3 py-2 text-[0.79rem] font-[680] text-[#34405a] hover:bg-[#f0f3f7] disabled:cursor-not-allowed disabled:opacity-50 max-sm:w-full"
             disabled={creatingPlaylist || newPlaylistTitle.trim().length === 0}
             onClick={() => void createPlaylist()}
             type="button"
@@ -150,9 +150,9 @@ export function UploadIntakeReview({
           </button>
         </div>
       </div>
-      <label className="intake-review__field">
+      <label className="grid gap-1 text-[0.78rem] font-bold text-[#344a67]">
         Add to playlist
-        <select
+        <select className="rounded-md border border-[#ccd6e4] bg-white px-2.5 py-2 text-[#2d3f5d] focus:border-[#2463df] focus:outline-3 focus:outline-[#2d68e8]/15"
           onChange={(event) => setPlaylistId(event.target.value)}
           value={playlistId}
         >
@@ -164,8 +164,8 @@ export function UploadIntakeReview({
           ))}
         </select>
       </label>
-      <label className="intake-review__field intake-review__source-cleanup">
-        <input
+      <label className="flex items-start gap-1.5 text-[0.78rem] leading-snug font-semibold text-[#344a67]">
+        <input className="mt-0.5 shrink-0 accent-[#2463df]"
           checked={deleteSourceAfterUpload}
           onChange={(event) => setDeleteSourceAfterUpload(event.target.checked)}
           type="checkbox"
@@ -173,12 +173,13 @@ export function UploadIntakeReview({
         Delete each original source file only after YouTube confirms its upload.
         The managed app copy is retained.
       </label>
-      {playlistError && <p className="intake-review__error">{playlistError}</p>}
-      <footer>
-        <button className="secondary-action" onClick={onCancel} type="button">
+      {playlistError && <p className="m-0 text-[0.72rem] text-[#a4413b]">{playlistError}</p>}
+      <footer className="flex flex-wrap justify-end gap-2">
+        <button className="rounded-md border border-[#cbd3df] bg-white px-3 py-2 text-[0.79rem] font-[680] text-[#34405a] hover:bg-[#f0f3f7]" onClick={onCancel} type="button">
           Cancel drop
         </button>
         <button
+          className="rounded-md border border-[#2463df] bg-[#2463df] px-3 py-2 text-[0.79rem] font-[680] text-white hover:border-[#1b54c6] hover:bg-[#1b54c6] disabled:cursor-not-allowed disabled:opacity-50"
           disabled={madeForKids === undefined}
           onClick={() =>
             onConfirm({

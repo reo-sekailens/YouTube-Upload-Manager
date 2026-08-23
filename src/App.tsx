@@ -58,6 +58,17 @@ const emptySnapshot: DashboardSnapshot = {
   pendingTitleDuplicates: [],
 };
 const pluralS = (count: number) => (count === 1 ? "" : "s");
+const secondaryButtonClass = "ui-button-secondary";
+const primaryButtonClass = "ui-button-primary";
+const eyebrowClass = "ui-eyebrow";
+const appShellClass = "ui-shell";
+const topbarClass = "ui-topbar";
+const brandLockupClass = "ui-brand-lockup";
+const titleClass = "ui-title";
+const subtleClass = "ui-subtle";
+const panelClass = "ui-panel";
+const sectionHeadingClass = "ui-section-heading";
+const actionRowClass = "ui-action-row";
 const workspaceTabs = [
   ["batch", "Batch uploads"],
   ["monitor", "Folder monitor"],
@@ -161,7 +172,7 @@ const RevisionedStateBridge = lazy(
 
 function WorkspacePending() {
   return (
-    <p className="workspace-loading" role="status">
+    <p className="m-0 text-sm text-muted" role="status">
       Loading workspace…
     </p>
   );
@@ -179,29 +190,29 @@ function SafeStartupShell({
     readiness?.detail ??
     "Checking saved device-local work before upload controls are enabled.";
   return (
-    <main className="app-shell" data-performance-shell="holding">
-      <header className="topbar">
-        <div className="brand-lockup">
-          <img className="brand-mark" src="/favicon.svg" alt="" />
+    <main className={appShellClass} data-performance-shell="holding">
+      <header className={topbarClass}>
+        <div className={brandLockupClass}>
+          <img className="ui-brand-mark" src="/favicon.svg" alt="" />
           <div>
-            <p className="eyebrow">SAFE STARTUP</p>
-            <h1>YouTube Upload Manager</h1>
-            <p className="subtle">Your saved work remains on this device.</p>
+            <p className={eyebrowClass}>SAFE STARTUP</p>
+            <h1 className={titleClass}>YouTube Upload Manager</h1>
+            <p className={subtleClass}>Your saved work remains on this device.</p>
           </div>
         </div>
       </header>
       <section
         aria-busy={!failure}
         aria-live="polite"
-        className="panel"
+        className="ui-safe-panel"
         role="status"
       >
-        <p className="eyebrow">
+        <p className={eyebrowClass}>
           {failure ? "STARTUP NEEDS ATTENTION" : "RECOVERING LOCAL WORK"}
         </p>
         <h2>{failure ? "The workspace is still locked" : "Preparing your workspace…"}</h2>
         <p>{detail}</p>
-        <p className="subtle">
+        <p className={subtleClass}>
           Upload and queue actions stay unavailable until interrupted work has
           been safely classified.
         </p>
@@ -1008,7 +1019,7 @@ export default function App({
 
   if (crashRecovery?.crashDetected) {
     return (
-      <Suspense fallback={<main className="crash-recovery" role="status" />}>
+      <Suspense fallback={<main className="ui-loading" role="status" />}>
         <i data-performance-shell="recovery" hidden />
         <CrashRecoveryScreen
           detectedAt={crashRecovery.detectedAt}
@@ -1029,7 +1040,7 @@ export default function App({
   }
 
   return (
-    <main className="app-shell">
+    <main className={appShellClass}>
       {isTauri && connectionSettings?.activeChannelId && (
         <Suspense fallback={null}>
           <RevisionedStateBridge
@@ -1048,22 +1059,22 @@ export default function App({
           />
         </Suspense>
       )}
-      <header className="topbar">
-        <div className="brand-lockup">
-          <img className="brand-mark" src="/favicon.svg" alt="" />
+      <header className={topbarClass}>
+        <div className={brandLockupClass}>
+          <img className="ui-brand-mark" src="/favicon.svg" alt="" />
           <div>
-            <p className="eyebrow">UPLOAD WORKSPACE</p>
-            <h1>YouTube Upload Manager</h1>
-            <p className="subtle">
+            <p className={eyebrowClass}>UPLOAD WORKSPACE</p>
+            <h1 className={titleClass}>YouTube Upload Manager</h1>
+            <p className={subtleClass}>
               {snapshot.activeChannel
                 ? `Active channel: ${snapshot.activeChannel}`
                 : "Your files stay on this device until you start an upload."}
             </p>
           </div>
         </div>
-        <div className="actions">
+        <div className="flex flex-wrap justify-end gap-2">
           <button
-            className="secondary-action"
+            className={secondaryButtonClass}
             disabled={!snapshot.activeChannel || busy}
             onClick={() => void refreshYouTubeLibrary()}
             type="button"
@@ -1071,7 +1082,7 @@ export default function App({
             Refresh library
           </button>
           <button
-            className="import-button"
+            className={primaryButtonClass}
             disabled={busy}
             onClick={() => void addVideo()}
           >
@@ -1080,15 +1091,15 @@ export default function App({
         </div>
       </header>
 
-      <p className="notice" role="status">
-        <span aria-hidden="true" />
+      <p className="ui-notice" role="status">
+        <span aria-hidden="true" className="ui-notice-dot" />
         {notice}
       </p>
       {connectionSettings &&
         !connectionSettings.oauthConfigured &&
         !setupDismissed && (
           <>
-            <div aria-hidden="true" className="google-setup-backdrop" />
+            <div aria-hidden="true" className="ui-backdrop z-[19]" />
             <Suspense fallback={<WorkspacePending />}>
               <GoogleSetupWizard
                 onOpenConnectedAccount={() => {
@@ -1105,29 +1116,29 @@ export default function App({
         )}
       {exitConfirmationOpen && (
         <>
-          <div aria-hidden="true" className="exit-confirmation-backdrop" />
+          <div aria-hidden="true" className="ui-backdrop z-[29]" />
           <section
             aria-labelledby="exit-confirmation-heading"
             aria-modal="true"
-            className="exit-confirmation"
+            className="ui-exit-dialog"
             role="dialog"
           >
-            <p className="eyebrow">EXIT APPLICATION</p>
-            <h2 id="exit-confirmation-heading">Exit YouTube Upload Manager?</h2>
-            <p>
+            <p className={eyebrowClass}>EXIT APPLICATION</p>
+            <h2 className="ui-card-heading" id="exit-confirmation-heading">Exit YouTube Upload Manager?</h2>
+            <p className="ui-modal-copy">
               Your queue and duplicate-review progress are saved locally. Any
               active upload will be recovered when you open the app again.
             </p>
-            <div className="exit-confirmation__actions">
+            <div className="ui-modal-actions">
               <button
                 autoFocus
-                className="secondary-action"
+                className={secondaryButtonClass}
                 onClick={() => setExitConfirmationOpen(false)}
                 type="button"
               >
                 Keep app open
               </button>
-              <button className="danger-button" onClick={() => void confirmExit()} type="button">
+              <button className="ui-danger-button" onClick={() => void confirmExit()} type="button">
                 Exit app
               </button>
             </div>
@@ -1136,7 +1147,7 @@ export default function App({
       )}
       {pendingImportPaths && (
         <>
-          <div aria-hidden="true" className="intake-review-backdrop" />
+          <div aria-hidden="true" className="ui-backdrop z-[9] bg-slate-950/30" />
           <Suspense fallback={<WorkspacePending />}>
             <UploadIntakeReview
               paths={pendingImportPaths}
@@ -1151,24 +1162,24 @@ export default function App({
         </>
       )}
       {!isTauri && (
-        <p className="warning">
+        <p className="ui-warning">
           Browser preview mode: managed local file import is available only in
           the signed Tauri app.
         </p>
       )}
 
-      <div className="workspace-layout">
+      <div className="ui-workspace-layout">
         <nav
           aria-label="Workspace sections"
-          className="workspace-sidebar"
+          className="ui-sidebar"
           role="tablist"
         >
-          <span className="workspace-sidebar__label">Workspace</span>
+          <span className="ui-sidebar-label">Workspace</span>
           {workspaceTabs.map(([id, label]) => (
             <button
               aria-controls={`workspace-tab-${id}`}
               aria-selected={activeTab === id}
-              className={activeTab === id ? "is-active" : ""}
+              className={`ui-sidebar-tab ${activeTab === id ? "ui-sidebar-tab-active" : ""}`}
               id={`workspace-tab-button-${id}`}
               key={id}
               onClick={() => setActiveTab(id)}
@@ -1180,19 +1191,18 @@ export default function App({
               {label}
               {id === "dedupe" && dedupeBusy && (
                 <span
-                  className="workspace-sidebar__activity"
+                  className="size-1.5 animate-pulse rounded-full bg-current"
                   aria-label="Duplicate detection in progress"
                 />
               )}
             </button>
           ))}
         </nav>
-        <div className="workspace-tabs">
+        <div className="min-w-0">
           <Suspense
             fallback={
               <section
                 aria-labelledby={`workspace-tab-button-${activeTab}`}
-                className="workspace-tab"
                 id={`workspace-tab-${activeTab}`}
                 role="tabpanel"
                 tabIndex={0}
@@ -1203,7 +1213,6 @@ export default function App({
           >
           <section
             aria-labelledby={`workspace-tab-button-${activeTab}`}
-            className="workspace-tab"
             data-performance-batch-content={
               activeTab === "batch" ? "ready" : undefined
             }
@@ -1219,25 +1228,25 @@ export default function App({
               onResolve={resolveTitleDuplicates}
             />
             <section
-              className="queue-workspace"
+              className="ui-queue-panel"
               aria-labelledby="queue-heading"
             >
-              <div className="section-heading">
+              <div className={`${sectionHeadingClass} mb-4`}>
                 <div>
-                  <p className="eyebrow">PERSISTENT QUEUE</p>
-                  <h2 id="queue-heading">Your upload queue</h2>
-                  <p className="section-copy">
+                  <p className={eyebrowClass}>PERSISTENT QUEUE</p>
+                  <h2 className="ui-card-heading" id="queue-heading">Your upload queue</h2>
+                  <p className="ui-section-copy">
                     Every import and upload state is saved locally, so
                     interrupted work can continue where it stopped.
                   </p>
                 </div>
-                <div className="queue-workspace__actions">
-                  <span className="item-count">
+                <div className="ui-action-row items-center gap-3">
+                  <span className="ui-queue-count">
                     {snapshot.items.length} saved item
                     {pluralS(snapshot.items.length)}
                   </span>
                   <button
-                    className="text-button"
+                    className={secondaryButtonClass}
                     disabled={busy}
                     onClick={() => void clearUploads()}
                     type="button"
@@ -1249,11 +1258,11 @@ export default function App({
               <UploadProgressSummary items={snapshot.items} />
               <ManualUploadDefaultsPanel />
               <div
-                className={`queue-dropzone${dropActive ? " queue-dropzone--active" : ""}`}
+                className={`ui-drop-zone ${dropActive ? "border-brand bg-blue-50" : ""}`}
               >
-                <div className="queue-dropzone__copy">
+                <div className="ui-drop-copy">
                   <strong>Drag and drop videos here</strong>
-                  <p>
+                  <p className="ui-drop-description">
                     They are copied into this device’s managed workspace before
                     any upload. Files over YouTube’s 256 GB or 12-hour limits
                     are stopped before copying. You can also choose multiple
@@ -1261,7 +1270,7 @@ export default function App({
                   </p>
                 </div>
                 <button
-                  className="secondary-action"
+                  className={secondaryButtonClass}
                   disabled={busy}
                   onClick={() => void addVideo()}
                   type="button"
@@ -1306,22 +1315,22 @@ export default function App({
               scan={preflightScan}
             />
             <section
-              className="panel duplicates-panel"
+              className={panelClass}
               aria-labelledby="duplicates-heading"
             >
-              <div className="section-heading duplicate-heading">
+              <div className={sectionHeadingClass}>
                 <div>
-                  <p className="eyebrow">REVIEW REQUIRED</p>
-                  <h2 id="duplicates-heading">Duplicate candidates</h2>
-                  <p className="section-copy">
+                  <p className={eyebrowClass}>REVIEW REQUIRED</p>
+                  <h2 className="ui-card-heading" id="duplicates-heading">Duplicate candidates</h2>
+                  <p className="ui-section-copy">
                     {snapshot.activeChannel
                       ? `Check ${snapshot.activeChannel}'s uploaded-video titles for exact matches and numbered copies.`
                       : "Connect a YouTube channel to check its uploaded-video titles for duplicates."}
                   </p>
                 </div>
-                <div className="duplicate-heading__actions">
+                <div className={actionRowClass}>
                   <button
-                    className="secondary-action dedupe-action"
+                    className={secondaryButtonClass}
                     disabled={busy}
                     onClick={() => void reAuditIgnoredMatches()}
                     type="button"
@@ -1329,7 +1338,7 @@ export default function App({
                     Re-audit ignored matches
                   </button>
                   <button
-                    className="secondary-action dedupe-action"
+                    className={secondaryButtonClass}
                     disabled={!snapshot.activeChannel || busy}
                     aria-busy={dedupeBusy}
                     onClick={() => void runDedupe()}
@@ -1355,11 +1364,11 @@ export default function App({
           )}
 
           {activeTab === "deletion" && (
-            <section className="panel" aria-labelledby="deletion-heading">
-              <div className="section-heading">
+            <section className={panelClass} aria-labelledby="deletion-heading">
+              <div className={sectionHeadingClass}>
                 <div>
-                  <p className="eyebrow">EXPLICIT LOCAL REVIEW</p>
-                  <h2 id="deletion-heading">Video removal requests</h2>
+                  <p className={eyebrowClass}>EXPLICIT LOCAL REVIEW</p>
+                  <h2 className="ui-card-heading" id="deletion-heading">Video removal requests</h2>
                 </div>
               </div>
               <DeletionReview
@@ -1399,7 +1408,7 @@ export default function App({
         </div>
       </div>
 
-      <footer className="app-disclaimer">
+      <footer className="ui-disclaimer">
         YouTube Upload Manager is an independent project and is not affiliated
         with, endorsed by, sponsored by, or provided by Google or YouTube.
         Google and YouTube are trademarks of Google LLC; all other names, logos,

@@ -5,7 +5,6 @@ import {
   useMemo,
   useState,
 } from "react";
-import "./DeletionReview.lazy.css";
 import {
   beginDeletionAuthorization,
   cancelDeletionRequest,
@@ -290,21 +289,21 @@ export function DeletionReview({ activeChannel, activeChannelId, busy = false, i
     setReviewQueue(remaining);
     setConfirmation("");
   };
-  if (!activeChannel) return <p className="deletion-review__empty">Connect and sync a channel before reviewing locally saved YouTube videos.</p>;
+  if (!activeChannel) return <p className="m-0 text-[0.78rem] leading-[1.45] text-[#69768a]">Connect and sync a channel before reviewing locally saved YouTube videos.</p>;
 
-  return <div className="deletion-review">
-    <header className="deletion-review__warning">
-      <strong>Permanent deletion is never automatic.</strong>
-      <span>
+  return <div className="grid gap-3.5">
+    <header className="grid gap-1 rounded-lg border border-[#f3e2a9] bg-[#fffbeb] px-3.5 py-3 text-[#755c18]">
+      <strong className="text-[0.82rem] text-[#614b12]">Permanent deletion is never automatic.</strong>
+      <span className="text-[0.78rem] leading-[1.45] text-[#69768a]">
         Every selected video gets a local review request. Permanent execution
         requires an active temporary deletion mode and a typed-ID confirmation.
       </span>
     </header>
-    <section className="deletion-authorization" aria-labelledby="deletion-authorization-heading">
+    <section className="flex items-center justify-between gap-4 rounded-[0.55rem] border border-[#e0e5eb] bg-[#fafbfc] p-3.5 max-compact:flex-col max-compact:items-stretch" aria-labelledby="deletion-authorization-heading">
       <div>
-        <p className="eyebrow">TEMPORARY DELETION MODE</p>
-        <h3 id="deletion-authorization-heading">YouTube deletion authority</h3>
-        <p>
+        <p className="mb-[0.45rem] text-[0.67rem] leading-[1.2] font-bold tracking-[0.1em] text-[#68748a] uppercase">TEMPORARY DELETION MODE</p>
+        <h3 className="my-[0.12rem] text-[0.88rem] text-[#2b3850]" id="deletion-authorization-heading">YouTube deletion authority</h3>
+        <p className="mt-[0.3rem] mb-0 text-[0.75rem] leading-[1.45] text-[#677489]">
           {!deletionAuthorized
             ? "Grant deletion permission once for this device. Creating and cancelling local requests never asks for this authority."
             : deletionSudoActive
@@ -312,20 +311,20 @@ export function DeletionReview({ activeChannel, activeChannelId, busy = false, i
               : "Deletion permission is granted, but deletion mode is off. Enable it to delete confirmed videos for 15 minutes."}
         </p>
       </div>
-      {!deletionAuthorized ? <button className="danger-button" disabled={disabled} onClick={() => void authorizeDeletion()} type="button">{authorizing ? "Waiting for Google…" : "Grant deletion permission"}</button> : deletionSudoActive ? <button className="secondary-action" disabled={disabled} onClick={() => void setDeletionMode(false)} type="button">Exit deletion mode</button> : <button className="danger-button" disabled={disabled} onClick={() => void setDeletionMode(true)} type="button">Enter deletion mode (15 min)</button>}
+      {!deletionAuthorized ? <button className="rounded-md bg-[#a4413b] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#86342f] disabled:cursor-not-allowed disabled:opacity-55" disabled={disabled} onClick={() => void authorizeDeletion()} type="button">{authorizing ? "Waiting for Google…" : "Grant deletion permission"}</button> : deletionSudoActive ? <button className="rounded-md border border-[#cbd3df] bg-white px-3 py-2 text-sm font-semibold text-[#34405a] transition-colors hover:bg-[#f0f3f7] disabled:cursor-not-allowed disabled:opacity-55" disabled={disabled} onClick={() => void setDeletionMode(false)} type="button">Exit deletion mode</button> : <button className="rounded-md bg-[#a4413b] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#86342f] disabled:cursor-not-allowed disabled:opacity-55" disabled={disabled} onClick={() => void setDeletionMode(true)} type="button">Enter deletion mode (15 min)</button>}
     </section>
     {pendingRequests.length > 0 && (
       <section
         aria-busy={requestSearch !== deferredRequestSearch}
         aria-labelledby="deletion-requests-heading"
-        className="deletion-requests"
+        className="rounded-[0.55rem] border border-[#e0e5eb] bg-[#fafbfc] p-3.5"
       >
         <header>
-          <p className="eyebrow">LOCAL REVIEW QUEUE</p>
-          <h3 id="deletion-requests-heading">Pending and recoverable requests</h3>
-          <button className="text-button" disabled={disabled} onClick={() => void clearRequests()} type="button">Clear deletion requests</button>
+          <p className="mb-[0.45rem] text-[0.67rem] leading-[1.2] font-bold tracking-[0.1em] text-[#68748a] uppercase">LOCAL REVIEW QUEUE</p>
+          <h3 className="my-[0.12rem] text-[0.88rem] text-[#2b3850]" id="deletion-requests-heading">Pending and recoverable requests</h3>
+          <button className="text-sm font-semibold text-[#315389] underline decoration-[#315389]/35 underline-offset-2 transition-colors hover:text-[#1b54c6] disabled:cursor-not-allowed disabled:opacity-55" disabled={disabled} onClick={() => void clearRequests()} type="button">Clear deletion requests</button>
         </header>
-        <label>
+        <label className="mt-1 grid gap-1.5 text-[0.74rem] font-bold text-[#465775]">
           Search recoverable deletion requests by title
           <input
             aria-label="Search recoverable deletion requests by title"
@@ -335,21 +334,22 @@ export function DeletionReview({ activeChannel, activeChannelId, busy = false, i
               setRequestPage(1);
             }}
             placeholder="Search request titles"
+            className="w-full max-w-[32rem] rounded-md border border-[#cbd5e3] bg-white px-2.5 py-2 text-inherit font-medium text-[#27344a] focus:border-[#2463df] focus:outline-3 focus:outline-[#2d68e8]/15"
             type="search"
             value={requestSearch}
           />
         </label>
-        {filteredPendingRequests.length === 0 && <p className="deletion-review__empty">No recoverable deletion request titles match “{requestSearch}”.</p>}
-        <ul>
-          {visibleRequests.items.map((request) => <li data-deletion-request-record key={request.id}>
+        {filteredPendingRequests.length === 0 && <p className="m-0 text-[0.78rem] leading-[1.45] text-[#69768a]">No recoverable deletion request titles match “{requestSearch}”.</p>}
+        <ul className="mt-3 grid list-none gap-2.5 p-0">
+          {visibleRequests.items.map((request) => <li className="flex items-center justify-between gap-4 border-t border-[#e3e7ed] pt-2.5 max-compact:flex-col max-compact:items-stretch" data-deletion-request-record key={request.id}>
             <div>
-              <strong>{request.title}</strong>
-              <span>{request.videoId}</span>
-              <p>{request.detail}</p>
+              <strong className="block">{request.title}</strong>
+              <span className="mt-[0.17rem] block text-[0.72rem] text-[#758196]">{request.videoId}</span>
+              <p className="mt-[0.17rem] mb-0 text-[0.72rem] text-[#758196]">{request.detail}</p>
             </div>
-            <div className="deletion-request-actions">
-              {deletionSudoActive && <button className="danger-button" disabled={disabled} onClick={() => { setExecutionRequest(request); setExecutionConfirmation(""); }} type="button">{request.status === "needs_reconciliation" ? "Reconcile deletion" : "Execute permanent deletion"}</button>}
-              <button className="text-button" disabled={disabled} onClick={() => void cancelRequest(request)} type="button">Cancel request</button>
+            <div className="flex flex-wrap justify-end gap-2 max-compact:flex-col max-compact:items-stretch">
+              {deletionSudoActive && <button className="rounded-md bg-[#a4413b] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#86342f] disabled:cursor-not-allowed disabled:opacity-55 max-compact:w-full" disabled={disabled} onClick={() => { setExecutionRequest(request); setExecutionConfirmation(""); }} type="button">{request.status === "needs_reconciliation" ? "Reconcile deletion" : "Execute permanent deletion"}</button>}
+              <button className="text-sm font-semibold text-[#315389] underline decoration-[#315389]/35 underline-offset-2 transition-colors hover:text-[#1b54c6] disabled:cursor-not-allowed disabled:opacity-55" disabled={disabled} onClick={() => void cancelRequest(request)} type="button">Cancel request</button>
             </div>
           </li>)}
         </ul>
@@ -364,17 +364,17 @@ export function DeletionReview({ activeChannel, activeChannelId, busy = false, i
         />
       </section>
     )}
-    {selected && <section className="deletion-confirmation" aria-labelledby="deletion-confirmation-heading"><p className="eyebrow">REQUEST CONFIRMATION</p><h3 id="deletion-confirmation-heading">Request deletion for “{selected.title}”</h3><p>{reviewQueue.length > 0 ? `${reviewQueue.length + 1} selected videos remain in this review queue. Confirm each video ID separately.` : "This creates a local pending request only. Type the full video ID below to prove this is the intended video."}</p><code>{selected.videoId}</code><label htmlFor="delete-video-confirmation">Video ID confirmation</label><input id="delete-video-confirmation" autoComplete="off" autoFocus value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder={selected.videoId} spellCheck={false} /><div className="deletion-confirmation__actions"><button className="secondary-action" disabled={disabled} onClick={closeRequestConfirmation} type="button">Cancel selected review</button><button className="danger-button" disabled={disabled || confirmation !== selected.videoId} onClick={() => void createRequest()} type="button">Create local request{reviewQueue.length > 0 ? " and continue" : ""}</button></div></section>}
-    {executionRequest && <section aria-busy={executing} className="deletion-confirmation deletion-confirmation--final" aria-labelledby="execution-confirmation-heading"><p className="eyebrow">PERMANENT, IRREVERSIBLE ACTION</p><h3 id="execution-confirmation-heading">Delete “{executionRequest.title}” from YouTube</h3><p>{executing ? "Deleting on YouTube. You can keep reviewing the local library while this request completes." : "This calls YouTube’s delete endpoint. The video cannot be restored by this app. Type the exact video ID a second time to execute this permanent deletion."}</p><code>{executionRequest.videoId}</code><label htmlFor="execute-delete-video-confirmation">Exact video ID for permanent deletion</label><input id="execute-delete-video-confirmation" autoComplete="off" autoFocus disabled={executing} value={executionConfirmation} onChange={(event) => setExecutionConfirmation(event.target.value)} placeholder={executionRequest.videoId} spellCheck={false} /><div className="deletion-confirmation__actions"><button className="secondary-action" disabled={disabled || executing} onClick={closeExecutionConfirmation} type="button">Keep video</button><button className="danger-button" disabled={disabled || executing || executionConfirmation !== executionRequest.videoId} onClick={() => void executeRequest()} type="button">{executing ? "Deleting…" : "Delete permanently from YouTube"}</button></div></section>}
+    {selected && <section className="rounded-[0.55rem] border border-[#e0e5eb] bg-[#fafbfc] p-3.5" aria-labelledby="deletion-confirmation-heading"><p className="mb-[0.45rem] text-[0.67rem] leading-[1.2] font-bold tracking-[0.1em] text-[#68748a] uppercase">REQUEST CONFIRMATION</p><h3 className="my-[0.12rem] text-[0.88rem] text-[#2b3850]" id="deletion-confirmation-heading">Request deletion for “{selected.title}”</h3><p className="mt-[0.3rem] mb-0 text-[0.75rem] leading-[1.45] text-[#677489]">{reviewQueue.length > 0 ? `${reviewQueue.length + 1} selected videos remain in this review queue. Confirm each video ID separately.` : "This creates a local pending request only. Type the full video ID below to prove this is the intended video."}</p><code className="my-2.5 block w-fit rounded-md border border-[#dce2ea] bg-[#f0f3f7] px-2 py-1.5 font-mono text-[0.72rem] text-[#355b9d]">{selected.videoId}</code><label className="mt-2.5 mb-1.5 block text-[0.74rem] font-bold text-[#3e4b62]" htmlFor="delete-video-confirmation">Video ID confirmation</label><input className="w-full max-w-[30rem] rounded-md border border-[#cbd3df] bg-white px-2.5 py-2 text-[#172033] focus:border-[#2463df] focus:outline-3 focus:outline-[#2d68e8]/15" id="delete-video-confirmation" autoComplete="off" autoFocus value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder={selected.videoId} spellCheck={false} /><div className="mt-3 flex flex-wrap justify-start gap-2"><button className="rounded-md border border-[#cbd3df] bg-white px-3 py-2 text-sm font-semibold text-[#34405a] transition-colors hover:bg-[#f0f3f7] disabled:cursor-not-allowed disabled:opacity-55" disabled={disabled} onClick={closeRequestConfirmation} type="button">Cancel selected review</button><button className="rounded-md bg-[#a4413b] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#86342f] disabled:cursor-not-allowed disabled:opacity-55" disabled={disabled || confirmation !== selected.videoId} onClick={() => void createRequest()} type="button">Create local request{reviewQueue.length > 0 ? " and continue" : ""}</button></div></section>}
+    {executionRequest && <section aria-busy={executing} className="rounded-[0.55rem] border border-[#edcbc8] bg-[#fff7f6] p-3.5" aria-labelledby="execution-confirmation-heading"><p className="mb-[0.45rem] text-[0.67rem] leading-[1.2] font-bold tracking-[0.1em] text-[#68748a] uppercase">PERMANENT, IRREVERSIBLE ACTION</p><h3 className="my-[0.12rem] text-[0.88rem] text-[#2b3850]" id="execution-confirmation-heading">Delete “{executionRequest.title}” from YouTube</h3><p className="mt-[0.3rem] mb-0 text-[0.75rem] leading-[1.45] text-[#677489]">{executing ? "Deleting on YouTube. You can keep reviewing the local library while this request completes." : "This calls YouTube’s delete endpoint. The video cannot be restored by this app. Type the exact video ID a second time to execute this permanent deletion."}</p><code className="my-2.5 block w-fit rounded-md border border-[#dce2ea] bg-[#f0f3f7] px-2 py-1.5 font-mono text-[0.72rem] text-[#355b9d]">{executionRequest.videoId}</code><label className="mt-2.5 mb-1.5 block text-[0.74rem] font-bold text-[#3e4b62]" htmlFor="execute-delete-video-confirmation">Exact video ID for permanent deletion</label><input className="w-full max-w-[30rem] rounded-md border border-[#cbd3df] bg-white px-2.5 py-2 text-[#172033] focus:border-[#2463df] focus:outline-3 focus:outline-[#2d68e8]/15" id="execute-delete-video-confirmation" autoComplete="off" autoFocus disabled={executing} value={executionConfirmation} onChange={(event) => setExecutionConfirmation(event.target.value)} placeholder={executionRequest.videoId} spellCheck={false} /><div className="mt-3 flex flex-wrap justify-start gap-2"><button className="rounded-md border border-[#cbd3df] bg-white px-3 py-2 text-sm font-semibold text-[#34405a] transition-colors hover:bg-[#f0f3f7] disabled:cursor-not-allowed disabled:opacity-55" disabled={disabled || executing} onClick={closeExecutionConfirmation} type="button">Keep video</button><button className="rounded-md bg-[#a4413b] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#86342f] disabled:cursor-not-allowed disabled:opacity-55" disabled={disabled || executing || executionConfirmation !== executionRequest.videoId} onClick={() => void executeRequest()} type="button">{executing ? "Deleting…" : "Delete permanently from YouTube"}</button></div></section>}
     <div
       aria-busy={loading || inventorySearch !== deferredInventorySearch}
-      className="remote-video-list"
+       className="grid gap-2"
     >
-      {videos.length === 0 && <p className="deletion-review__empty">{loading ? "Loading locally saved inventory…" : "Sync the YouTube library to review videos."}</p>}
-      {videos.length > 0 && <label>Search saved YouTube videos by title<input aria-label="Search saved YouTube videos by title" autoComplete="off" onChange={(event) => { setInventorySearch(event.target.value); setInventoryPage(1); }} placeholder="Search video titles" type="search" value={inventorySearch} /></label>}
-      {filteredSelectableVideos.length > 0 && <div className="deletion-selection-toolbar"><label><input checked={allSelectableSelected} disabled={disabled} onChange={toggleSelectAll} type="checkbox" /> Select all filtered videos (all pages)</label><span>{selectedFilteredVideoCount} selected</span><button className="danger-button" disabled={disabled || selectedFilteredVideoCount === 0} onClick={reviewSelected} type="button">Delete selected ({selectedFilteredVideoCount})</button></div>}
-      {videos.length > 0 && filteredVideos.length === 0 && <p className="deletion-review__empty">No saved YouTube video titles match “{inventorySearch}”.</p>}
-      {visibleVideos.items.map((video) => <article className="remote-video-card" data-deletion-inventory-record key={video.videoId}><label className="remote-video-card__select" aria-label={`Select ${video.title} for deletion review`}><input checked={selectedVideoIds.has(video.videoId)} disabled={disabled || requestedVideoIds.has(video.videoId)} onChange={() => toggleVideo(video.videoId)} type="checkbox" /></label><div><span className="remote-video-card__scope">YouTube video</span><h3>{video.title}</h3><p>ID: <code>{video.videoId}</code>{video.privacyStatus ? ` · ${video.privacyStatus}` : ""}{video.duration ? ` · ${video.duration}` : ""}</p></div><button className="danger-button" disabled={disabled || requestedVideoIds.has(video.videoId)} onClick={() => { setReviewQueue([]); setSelected(video); setConfirmation(""); }} type="button">{requestedVideoIds.has(video.videoId) ? "Request pending" : "Delete"}</button></article>)}
+       {videos.length === 0 && <p className="m-0 text-[0.78rem] leading-[1.45] text-[#69768a]">{loading ? "Loading locally saved inventory…" : "Sync the YouTube library to review videos."}</p>}
+       {videos.length > 0 && <label className="mt-1 grid gap-1.5 text-[0.74rem] font-bold text-[#465775]">Search saved YouTube videos by title<input className="w-full max-w-[32rem] rounded-md border border-[#cbd5e3] bg-white px-2.5 py-2 text-inherit font-medium text-[#27344a] focus:border-[#2463df] focus:outline-3 focus:outline-[#2d68e8]/15" aria-label="Search saved YouTube videos by title" autoComplete="off" onChange={(event) => { setInventorySearch(event.target.value); setInventoryPage(1); }} placeholder="Search video titles" type="search" value={inventorySearch} /></label>}
+       {filteredSelectableVideos.length > 0 && <div className="flex flex-wrap items-center justify-between gap-3.5 rounded-[0.55rem] border border-[#d8e4f7] bg-[#f2f6fd] px-3 py-2.5"><label className="inline-flex cursor-pointer items-center gap-2 text-[0.75rem] font-semibold text-[#3c5274]"><input className="m-0 size-4 accent-[#2463df]" checked={allSelectableSelected} disabled={disabled} onChange={toggleSelectAll} type="checkbox" /> Select all filtered videos (all pages)</label><span className="ml-auto text-[0.72rem] text-[#63728a]">{selectedFilteredVideoCount} selected</span><button className="rounded-md bg-[#a4413b] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#86342f] disabled:cursor-not-allowed disabled:opacity-55" disabled={disabled || selectedFilteredVideoCount === 0} onClick={reviewSelected} type="button">Delete selected ({selectedFilteredVideoCount})</button></div>}
+       {videos.length > 0 && filteredVideos.length === 0 && <p className="m-0 text-[0.78rem] leading-[1.45] text-[#69768a]">No saved YouTube video titles match “{inventorySearch}”.</p>}
+       {visibleVideos.items.map((video) => <article className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-4 rounded-[0.55rem] border border-[#e0e5eb] bg-[#fafbfc] p-3.5 max-compact:grid-cols-1 max-compact:items-stretch" data-deletion-inventory-record key={video.videoId}><label className="self-stretch inline-flex cursor-pointer items-center gap-2 border-r border-[#e2e7ee] pr-3 text-[0.75rem] font-semibold text-[#3c5274] max-compact:border-r-0 max-compact:border-b max-compact:pb-3" aria-label={`Select ${video.title} for deletion review`}><input className="m-0 size-4 accent-[#2463df] disabled:cursor-not-allowed" checked={selectedVideoIds.has(video.videoId)} disabled={disabled || requestedVideoIds.has(video.videoId)} onChange={() => toggleVideo(video.videoId)} type="checkbox" /></label><div className="min-w-0"><span className="text-[0.64rem] font-bold tracking-[0.07em] text-[#5271a3] uppercase">YouTube video</span><h3 className="my-[0.12rem] wrap-anywhere text-[0.88rem] text-[#2b3850]">{video.title}</h3><p className="mt-[0.15rem] mb-0 wrap-anywhere text-[0.73rem] text-[#718095]">ID: <code className="font-mono text-[0.72rem] text-[#355b9d]">{video.videoId}</code>{video.privacyStatus ? ` · ${video.privacyStatus}` : ""}{video.duration ? ` · ${video.duration}` : ""}</p></div><button className="rounded-md bg-[#a4413b] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#86342f] disabled:cursor-not-allowed disabled:opacity-55" disabled={disabled || requestedVideoIds.has(video.videoId)} onClick={() => { setReviewQueue([]); setSelected(video); setConfirmation(""); }} type="button">{requestedVideoIds.has(video.videoId) ? "Request pending" : "Delete"}</button></article>)}
       <PaginationControls
         end={visibleVideos.end}
         label="Saved YouTube videos"

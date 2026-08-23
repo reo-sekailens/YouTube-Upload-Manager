@@ -19,13 +19,13 @@ export function PaginationControls({
 }: PaginationControlsProps) {
   if (total === 0) return null;
   return (
-    <nav className="data-pagination" aria-label={`${label} pages`}>
+    <nav className="mt-2.5 flex items-center justify-between border-t border-[#e1e6ee] pt-2.5 text-[0.72rem] text-[#68748a] max-sm:flex-col max-sm:items-start max-sm:gap-2" aria-label={`${label} pages`}>
       <span aria-live="polite">
         {start + 1}–{end} of {total}
       </span>
-      <div>
+      <div className="flex items-center gap-2">
         <button
-          className="text-button"
+          className="cursor-pointer rounded px-1.5 py-1 text-[0.72rem] font-[680] text-[#344a67] hover:bg-[#f3f5f8] focus-visible:outline-3 focus-visible:outline-[#2d68e847] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-55"
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
           type="button"
@@ -36,7 +36,7 @@ export function PaginationControls({
           Page {page} of {pageCount}
         </span>
         <button
-          className="text-button"
+          className="cursor-pointer rounded px-1.5 py-1 text-[0.72rem] font-[680] text-[#344a67] hover:bg-[#f3f5f8] focus-visible:outline-3 focus-visible:outline-[#2d68e847] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-55"
           disabled={page >= pageCount}
           onClick={() => onPageChange(page + 1)}
           type="button"

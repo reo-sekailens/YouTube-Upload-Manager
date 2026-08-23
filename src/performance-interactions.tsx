@@ -121,7 +121,7 @@ async function measureSearch(
   longTaskEntries: LongTaskReceipt[],
 ): Promise<InteractionSample> {
   const input = root.querySelector<HTMLInputElement>("#upload-queue-title-search");
-  const region = input?.closest<HTMLElement>(".queue-table-wrap");
+  const region = input?.closest<HTMLElement>("[data-queue-table]");
   if (!input || !region) throw new Error("The real queue search control is missing.");
   const target = String(((ordinal * 239) % fixtureSize) + 1).padStart(5, "0");
   const query = `${queryPrefix}${target}`;
@@ -166,7 +166,7 @@ async function measureClear(
   longTaskEntries: LongTaskReceipt[],
 ): Promise<InteractionSample> {
   const input = root.querySelector<HTMLInputElement>("#upload-queue-title-search");
-  const region = input?.closest<HTMLElement>(".queue-table-wrap");
+  const region = input?.closest<HTMLElement>("[data-queue-table]");
   const button = Array.from(root.querySelectorAll<HTMLButtonElement>("button")).find(
     ({ textContent }) => textContent?.trim() === "Clear search",
   );
@@ -292,22 +292,22 @@ function InteractionFixture() {
   }, []);
 
   return (
-    <main className="app-shell">
+    <main className="mx-auto max-w-[1240px] px-8 pt-8 pb-20">
       <section
-        className="workspace-tab"
+        className="mt-4"
         data-performance-batch-content="ready"
         id="workspace-tab-batch"
       >
-        <section className="queue-workspace" aria-labelledby="queue-heading">
-          <div className="section-heading">
+        <section className="rounded-xl border border-line bg-surface p-6 shadow-[0_12px_30px_rgba(25,35,56,0.045)]" aria-labelledby="queue-heading">
+          <div className="mb-5 flex items-start justify-between gap-4">
             <div>
-              <p className="eyebrow">LOCAL PERFORMANCE HARNESS</p>
-              <h1 id="queue-heading">10,000-title interaction certification</h1>
-              <p className="section-copy">
+              <p className="mb-2 text-[0.67rem] font-bold uppercase tracking-[0.1em] leading-[1.2] text-muted">LOCAL PERFORMANCE HARNESS</p>
+              <h1 id="queue-heading" className="m-0 text-[1.2rem] font-bold tracking-[-0.035em] text-ink">10,000-title interaction certification</h1>
+              <p className="mt-2 max-w-[40rem] text-[0.82rem] leading-[1.5] text-muted">
                 Synthetic device-local records exercise the real Batch queue component.
               </p>
             </div>
-            <span className="item-count">10,000 saved items</span>
+            <span className="whitespace-nowrap rounded-full bg-[#f2f4f7] px-2.5 py-1.5 text-[0.73rem] font-semibold text-[#58657a]">10,000 saved items</span>
           </div>
           <QueueTable
             busy={false}

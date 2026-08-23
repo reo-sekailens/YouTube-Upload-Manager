@@ -188,63 +188,63 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
     : "YouTube is not connected";
 
   return (
-    <section className="connection-panel panel" aria-labelledby="connection-heading">
-      <header className="section-heading connection-panel__heading">
+    <section className="m-0 w-full rounded-xl border border-line bg-surface p-5" aria-labelledby="connection-heading">
+      <header className="mb-3 flex items-start justify-between gap-4 border-b border-[#e7eaf0] pb-4 max-compact:flex-col max-compact:items-stretch">
         <div>
-          <p className="eyebrow">ACCOUNT CONNECTION</p>
-          <h2 id="connection-heading">Your YouTube connection</h2>
+          <p className="mb-2 text-[0.67rem] font-bold uppercase tracking-[0.1em] leading-[1.2] text-muted">ACCOUNT CONNECTION</p>
+          <h2 id="connection-heading" className="m-0 text-[1.2rem] font-bold tracking-[-0.035em] text-ink">Your YouTube connection</h2>
         </div>
-        <span className={`connection-status${settings.connected ? " connection-status--connected" : ""}`}>
-          <span aria-hidden="true" />
+        <span className={settings.connected ? "inline-flex items-center gap-1.5 text-right text-[0.73rem] font-semibold text-[#18724c]" : "inline-flex items-center gap-1.5 text-right text-[0.73rem] font-semibold text-[#876a20]"}>
+          <span aria-hidden="true" className="size-1.5 rounded-full bg-current" />
           {status}
         </span>
       </header>
 
-      <div className="connection-panel__summary">
+      <div className="pt-0.5">
         {settings.connected && settings.activeChannel ? (
-          <p className="connection-panel__channel">
+          <p className="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-[#dcece3] bg-[#f8fbf9] px-3 py-2.5 text-[0.83rem] leading-[1.5] text-[#5f6c80] [&>span]:text-[0.72rem] [&>span]:font-semibold [&>span]:uppercase [&>span]:tracking-[0.04em] [&>span]:text-muted [&>strong]:overflow-wrap-anywhere [&>strong]:text-[0.87rem] [&>strong]:text-[#1d5e40]">
             <span>Active channel</span>
             <strong>{settings.activeChannel}</strong>
           </p>
         ) : settings.connected ? (
-          <p className="connection-panel__description">
+          <p className="mb-4 text-[0.83rem] leading-[1.5] text-[#5f6c80]">
             Authorization is connected on this device. The channel name appears
             after the account check completes.
           </p>
         ) : (
-          <p className="connection-panel__description">
+          <p className="mb-4 text-[0.83rem] leading-[1.5] text-[#5f6c80]">
             Connect your Google account when ready. No account is connected
             yet.
           </p>
         )}
       </div>
 
-      <p className="connection-form__help">
+      <p className="mt-2 text-[0.73rem] leading-[1.5] text-[#7b8799]">
         Create your own Google Cloud project, enable the YouTube Data API,
         create a Desktop OAuth client, then import its downloaded JSON here.
         OAuth access and refresh tokens remain in OS-protected storage and
         never reach this screen.
       </p>
       {!settings.connected && (
-        <p className="connection-form__help">
+        <p className="mt-2 text-[0.73rem] leading-[1.5] text-[#7b8799]">
           The JSON is parsed locally. Its client secret, when included, is stored only in the operating system credential store.
         </p>
       )}
-      {notice && <p className="connection-form__notice" role="status">{notice}</p>}
-      {connecting && <p className="connection-form__help">Google is waiting in your browser. You can keep using other parts of the app, or cancel this connection attempt.</p>}
-      <footer className="connection-panel__actions">
-        {!settings.connected && <button disabled={!isTauri || connecting} onClick={() => void connect()} type="button">
+      {notice && <p className="mt-2 text-[0.73rem] leading-[1.5] text-[#315389]" role="status">{notice}</p>}
+      {connecting && <p className="mt-2 text-[0.73rem] leading-[1.5] text-[#7b8799]">Google is waiting in your browser. You can keep using other parts of the app, or cancel this connection attempt.</p>}
+      <footer className="mt-4 flex flex-wrap items-center gap-3 border-t border-[#e7eaf0] pt-4 max-compact:flex-col max-compact:items-stretch max-compact:[&_button]:w-full">
+        {!settings.connected && <button className="cursor-pointer rounded-md border border-brand bg-brand px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-white transition-[background,border-color,box-shadow] duration-150 hover:border-brand-strong hover:bg-brand-strong disabled:cursor-not-allowed disabled:opacity-50" disabled={!isTauri || connecting} onClick={() => void connect()} type="button">
           {connecting ? "Opening Google…" : "Connect YouTube"}
         </button>}
-        {!settings.connected && <button className="secondary-button" disabled={!isTauri || connecting} onClick={() => void importDesktopClient()} type="button">Import Desktop OAuth JSON</button>}
-        {!settings.connected && connecting && <button className="secondary-button" onClick={() => void cancelConnection()} type="button">Cancel connection</button>}
+        {!settings.connected && <button className="cursor-pointer rounded-md border border-[#cdd4df] bg-white px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-[#34405a] transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50" disabled={!isTauri || connecting} onClick={() => void importDesktopClient()} type="button">Import Desktop OAuth JSON</button>}
+        {!settings.connected && connecting && <button className="cursor-pointer rounded-md border border-[#cdd4df] bg-white px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-[#34405a] transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50" onClick={() => void cancelConnection()} type="button">Cancel connection</button>}
         {settings.connected && (
-          <button className="danger-button" disabled={!isTauri || disconnecting || connecting} onClick={() => void disconnect()} type="button">
+          <button className="cursor-pointer rounded-md border border-[#e8c7c5] bg-white px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-danger transition-[background,border-color,box-shadow] duration-150 hover:border-[#d59d99] hover:bg-[#fff5f4] disabled:cursor-not-allowed disabled:opacity-50" disabled={!isTauri || disconnecting || connecting} onClick={() => void disconnect()} type="button">
             {disconnecting ? "Disconnecting…" : "Disconnect YouTube"}
           </button>
         )}
-        {!isTauri && <p>Open the signed desktop app to connect YouTube.</p>}
-        {settings.connected && <p>Disconnecting removes this device’s local authorization only. It never deletes a YouTube video.</p>}
+        {!isTauri && <p className="m-0 text-[0.72rem] text-[#7b8799]">Open the signed desktop app to connect YouTube.</p>}
+        {settings.connected && <p className="m-0 text-[0.72rem] text-[#7b8799]">Disconnecting removes this device’s local authorization only. It never deletes a YouTube video.</p>}
       </footer>
     </section>
   );

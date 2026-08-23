@@ -108,33 +108,33 @@ export function DiagnosticsPanel() {
   );
 
   return (
-    <section className="panel diagnostics-panel" aria-labelledby="about-heading">
-      <div className="section-heading diagnostics-panel__heading">
+    <section className="grid gap-4 rounded-xl border border-line bg-surface p-5" aria-labelledby="about-heading">
+      <div className="flex items-start justify-between gap-4 max-compact:flex-col max-compact:items-stretch">
         <div>
-          <p className="eyebrow">ABOUT AND SUPPORT</p>
-          <h2 id="about-heading">YouTube Upload Manager</h2>
-          <p className="diagnostics-panel__release" aria-live="polite">
+          <p className="mb-2 text-[0.67rem] font-bold uppercase tracking-[0.1em] leading-[1.2] text-muted">ABOUT AND SUPPORT</p>
+          <h2 id="about-heading" className="m-0 text-[1.2rem] font-bold tracking-[-0.035em] text-ink">YouTube Upload Manager</h2>
+          <p className="mt-1.5 text-[0.78rem] font-bold text-[#315389]" aria-live="polite">
             {releaseLabel}
           </p>
-          <p className="section-copy">
+          <p className="mt-2 max-w-[40rem] text-[0.82rem] leading-[1.5] text-muted">
             A local-first desktop app for reviewed YouTube uploads, duplicate
             review, and channel-library maintenance.
           </p>
         </div>
-        <span className="diagnostics-panel__local">Device-local</span>
+        <span className="self-start whitespace-nowrap rounded-full bg-[#edf7f0] px-2.5 py-1.5 text-[0.71rem] font-bold text-success">Device-local</span>
       </div>
 
-      <div className="diagnostics-panel__grid">
-        <section>
-          <h3>Privacy by design</h3>
-          <p>
+      <div className="grid grid-cols-2 gap-3 max-compact:grid-cols-1">
+        <section className="rounded-lg border border-[#e1e6ee] bg-[#fafbfc] p-3.5">
+          <h3 className="m-0 text-[0.86rem] text-[#2d3f5d]">Privacy by design</h3>
+          <p className="mt-1.5 text-[0.76rem] leading-[1.5] text-[#65758b]">
             Upload files, queue state, and diagnostic history remain on this
             device. Nothing is sent when you create a report.
           </p>
         </section>
-        <section>
-          <h3>What the report includes</h3>
-          <p>
+        <section className="rounded-lg border border-[#e1e6ee] bg-[#fafbfc] p-3.5">
+          <h3 className="m-0 text-[0.86rem] text-[#2d3f5d]">What the report includes</h3>
+          <p className="mt-1.5 text-[0.76rem] leading-[1.5] text-[#65758b]">
             App and system details, saved operational warnings and errors, and
             any safely captured app-crash marker. Secrets, access tokens,
             account identifiers, file paths, and provider payloads are omitted.
@@ -142,24 +142,24 @@ export function DiagnosticsPanel() {
         </section>
       </div>
 
-      <section className="diagnostics-panel__support" aria-labelledby="support-actions-heading">
+      <section className="rounded-lg border border-[#e1e6ee] bg-[#fafbfc] p-3.5" aria-labelledby="support-actions-heading">
         <div>
-          <p className="eyebrow">SUPPORT ACTIONS</p>
-          <h3 id="support-actions-heading">Learn, troubleshoot, and report</h3>
-          <p>Documentation opens in your default browser. Diagnostics stay on this device until you copy them.</p>
+          <p className="mb-2 text-[0.67rem] font-bold uppercase tracking-[0.1em] leading-[1.2] text-muted">SUPPORT ACTIONS</p>
+          <h3 id="support-actions-heading" className="m-0 text-[0.86rem] text-[#2d3f5d]">Learn, troubleshoot, and report</h3>
+          <p className="mt-1.5 text-[0.76rem] leading-[1.5] text-[#65758b]">Documentation opens in your default browser. Diagnostics stay on this device until you copy them.</p>
         </div>
-        <div className="diagnostics-panel__support-actions">
-          <button className="secondary-action" onClick={() => void openSupportLink("wiki")} type="button">
+        <div className="mt-3.5 grid grid-cols-4 gap-2.5 max-compact:grid-cols-1">
+          <button className="grid min-h-20 cursor-pointer items-start gap-1 rounded-md border border-[#cdd4df] bg-white p-3 text-left transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50 [&>strong]:text-[0.78rem] [&>strong]:text-[#2d3f5d] [&>span]:text-[0.7rem] [&>span]:leading-[1.38] [&>span]:text-[#65758b]" onClick={() => void openSupportLink("wiki")} type="button">
             <strong>GitHub Wiki</strong>
             <span>Setup, recovery, and security guides</span>
           </button>
-          <button className="secondary-action" onClick={() => void openSupportLink("pages")} type="button">
+          <button className="grid min-h-20 cursor-pointer items-start gap-1 rounded-md border border-[#cdd4df] bg-white p-3 text-left transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50 [&>strong]:text-[0.78rem] [&>strong]:text-[#2d3f5d] [&>span]:text-[0.7rem] [&>span]:leading-[1.38] [&>span]:text-[#65758b]" onClick={() => void openSupportLink("pages")} type="button">
             <strong>Project website</strong>
             <span>Overview and release information</span>
           </button>
           <button
             aria-busy={busy}
-            className="secondary-action"
+            className="grid min-h-20 cursor-pointer items-start gap-1 rounded-md border border-[#cdd4df] bg-white p-3 text-left transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50 [&>strong]:text-[0.78rem] [&>strong]:text-[#2d3f5d] [&>span]:text-[0.7rem] [&>span]:leading-[1.38] [&>span]:text-[#65758b]"
             disabled={busy}
             onClick={() => void copyIssueReport()}
             type="button"
@@ -169,7 +169,7 @@ export function DiagnosticsPanel() {
           </button>
           <button
             aria-busy={busy}
-            className="secondary-action"
+            className="grid min-h-20 cursor-pointer items-start gap-1 rounded-md border border-[#cdd4df] bg-white p-3 text-left transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50 [&>strong]:text-[0.78rem] [&>strong]:text-[#2d3f5d] [&>span]:text-[0.7rem] [&>span]:leading-[1.38] [&>span]:text-[#65758b]"
             disabled={busy}
             onClick={() => void openPrefilledIssue()}
             type="button"
@@ -179,7 +179,7 @@ export function DiagnosticsPanel() {
           </button>
         </div>
       </section>
-      <p className="diagnostics-panel__status" role="status">
+      <p className="m-0 rounded-md border border-[#d7e4ff] bg-[#f0f5ff] px-2.5 py-2 text-[0.76rem] leading-[1.5] text-[#315389]" role="status">
         {status}
       </p>
     </section>

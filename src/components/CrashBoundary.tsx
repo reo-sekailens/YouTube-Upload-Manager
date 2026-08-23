@@ -28,7 +28,7 @@ export class CrashBoundary extends Component<
   render() {
     if (this.state.failed) {
       return (
-        <Suspense fallback={<main className="crash-recovery" role="status" />}>
+        <Suspense fallback={<main className="min-h-screen bg-[linear-gradient(135deg,#06244c,#0a4a86_52%,#0b6aab)]" role="status" />}>
           <CrashRecoveryScreen
             failureKind="React render error"
             liveFailure

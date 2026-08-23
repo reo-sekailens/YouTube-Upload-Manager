@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import "./PreIngestDuplicatePanel.lazy.css";
 import { windowItems } from "../lib/list-windowing";
 import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
 import type { PreIngestDuplicateScan } from "../lib/types";
@@ -93,7 +92,7 @@ function FullMetadataDetails({
   const visibleMetadata = loadedMetadata;
   return (
     <details
-      className="pre-ingest-duplicate__full-metadata"
+      className="mt-1.5 border-t border-line pt-2 text-[0.69rem] text-[#38516f] [&_summary]:cursor-pointer [&_summary]:font-bold [&_dl]:mt-2 [&_dl]:grid [&_dl]:gap-1.5 [&_dl>div]:grid [&_dl>div]:gap-0.5 [&_dl>div]:rounded-md [&_dl>div]:border [&_dl>div]:border-line [&_dl>div]:bg-white [&_dl>div]:px-1.5 [&_dl>div]:py-1 [&_dt]:text-[0.6rem] [&_dt]:font-bold [&_dt]:uppercase [&_dt]:text-[#718095] [&_dd]:m-0 [&_dd]:overflow-wrap-anywhere [&_dd]:text-[0.68rem] [&_dd]:text-[#3c4e68] [&_section]:border-0 [&_section]:bg-transparent [&_section]:pt-0.5 [&_section>strong]:text-[0.71rem] [&_section>strong]:text-[#304968]"
       onToggle={(event) => {
         const open = event.currentTarget.open;
         setExpanded(open);
@@ -354,22 +353,22 @@ export function PreIngestDuplicatePanel({
   return (
     <section
       aria-labelledby="pre-ingest-duplicate-heading"
-      className="panel pre-ingest-duplicate"
+      className="mb-4 rounded-xl border border-line bg-surface p-5"
     >
-      <header className="section-heading pre-ingest-duplicate__heading">
+      <header className="mb-3.5 flex items-start justify-between gap-4 max-compact:flex-col max-compact:items-stretch">
         <div>
-          <p className="eyebrow">BEFORE INGEST</p>
-          <h2 id="pre-ingest-duplicate-heading">Check files for duplicates</h2>
-          <p className="section-copy">
+          <p className="mb-2 text-[0.67rem] font-bold uppercase tracking-[0.1em] leading-[1.2] text-muted">BEFORE INGEST</p>
+          <h2 id="pre-ingest-duplicate-heading" className="m-0 tracking-[-0.035em] text-ink">Check files for duplicates</h2>
+          <p className="mt-2 text-[0.78rem] leading-[1.45] text-muted">
             Fast match returns filename results immediately, then reads optional
             media metadata in the background. Choose deep BLAKE3 matching only
             when you need exact file evidence. Both accept INSV, LRV, and other
             file types without ingesting or uploading them.
           </p>
         </div>
-        <div className="pre-ingest-duplicate__actions">
+        <div className="flex flex-wrap items-center justify-end gap-2 max-compact:items-stretch max-compact:[&_button]:w-full">
           <button
-            className="secondary-action"
+            className="cursor-pointer rounded-md border border-[#cdd4df] bg-white px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-[#34405a] transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50"
             disabled={
               busy ||
               (scan !== undefined &&
@@ -382,7 +381,7 @@ export function PreIngestDuplicatePanel({
             Light match files
           </button>
           <button
-            className="secondary-action"
+            className="cursor-pointer rounded-md border border-[#cdd4df] bg-white px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-[#34405a] transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50"
             disabled={
               busy ||
               (scan !== undefined &&
@@ -396,7 +395,7 @@ export function PreIngestDuplicatePanel({
           </button>
           {scan && !["complete", "cancelled"].includes(scan.status) && (
             <button
-              className="text-button"
+              className="cursor-pointer rounded-md border border-[#cdd4df] bg-white px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-[#34405a] transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={busy}
               onClick={onCancel}
               type="button"
@@ -407,7 +406,9 @@ export function PreIngestDuplicatePanel({
         </div>
       </header>
       <div
-        className={`pre-ingest-duplicate__dropzone${dropActive ? " pre-ingest-duplicate__dropzone--active" : ""}`}
+        className={dropActive
+          ? "grid gap-1 rounded-[0.62rem] border-[1.5px] border-dashed border-brand bg-[#f1f6ff] p-3.5 text-[0.73rem] leading-[1.45] text-[#59708f] transition-[background,border-color] duration-150 [&_strong]:text-[0.82rem] [&_strong]:text-[#324966]"
+          : "grid gap-1 rounded-[0.62rem] border-[1.5px] border-dashed border-[#b8c7dd] bg-[#fbfcfe] p-3.5 text-[0.73rem] leading-[1.45] text-[#59708f] transition-[background,border-color] duration-150 [&_strong]:text-[0.82rem] [&_strong]:text-[#324966]"}
       >
         <strong>
           {scan && scan.status !== "complete"
@@ -423,17 +424,17 @@ export function PreIngestDuplicatePanel({
         </span>
       </div>
       {scan && scan.totalFiles > 0 && (
-        <section className="pre-ingest-duplicate__progress" aria-live="polite">
+        <section className="mt-3 grid gap-2.5 rounded-[0.62rem] border border-[#d8e5f8] bg-[#f6f9ff] px-3.5 py-3 text-[0.72rem] text-[#60728a] [&>div]:flex [&>div]:flex-wrap [&>div]:items-center [&>div]:justify-between [&>div]:gap-2 [&>p]:m-0 [&>progress]:h-2.5 [&>progress]:w-full [&>progress]:accent-brand" aria-live="polite">
           <div>
-            <strong>{scan.mode === "deep" ? "Deep duplicate check" : "Light duplicate check"}</strong>
+            <strong className="text-[0.79rem] text-[#304c73]">{scan.mode === "deep" ? "Deep duplicate check" : "Light duplicate check"}</strong>
             <span>{scan.completedFiles} of {scan.totalFiles} files checked · {progressPercent}%</span>
           </div>
           <progress max={scan.totalFiles} value={scan.completedFiles} aria-label={`${scan.completedFiles} of ${scan.totalFiles} files checked`} />
           <p>{scan.currentFileName ? `Checking ${scan.currentFileName}` : scan.status === "complete" && scan.pendingMetadataFiles > 0 ? `Duplicate check complete. Reading media metadata for ${scan.pendingMetadataFiles} file${scan.pendingMetadataFiles === 1 ? "" : "s"} in the background.` : scan.status === "complete" ? "Duplicate check complete." : "Preparing the next selected file…"}</p>
-          <details className="pre-ingest-duplicate__activity-log">
+          <details className="mt-0.5 border-t border-[#dce6f3] pt-2.5 [&_summary]:cursor-pointer [&_summary]:text-[0.74rem] [&_summary]:font-bold [&_summary]:text-[#405778] [&>div]:mt-2.5 [&>div]:flex [&>div]:flex-wrap [&>div]:items-center [&>div]:justify-start [&>div]:gap-2 [&_ol]:mt-2.5 [&_ol]:grid [&_ol]:max-h-52 [&_ol]:gap-1.5 [&_ol]:overflow-auto [&_ol]:pl-5 [&_li]:grid [&_li]:gap-0.5 [&_li]:text-[0.72rem] [&_time]:text-[0.66rem] [&_time]:text-[#7a899c] [&_li_strong]:text-[0.72rem] [&_li_strong]:text-[#38516f]">
             <summary>Activity log ({scan.activityTotal ?? scan.activityLog.length})</summary>
             <div>
-              <button className="text-button" disabled={!progressLog} onClick={() => void copyProgressLog()} type="button">Copy log</button>
+              <button className="cursor-pointer rounded-md border border-[#cdd4df] bg-white px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-[#34405a] transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50" disabled={!progressLog} onClick={() => void copyProgressLog()} type="button">Copy log</button>
               {copyStatus && <span role="status">{copyStatus}</span>}
             </div>
             <ol>
@@ -464,17 +465,17 @@ export function PreIngestDuplicatePanel({
         </section>
       )}
       {scan?.youtubeCheckDetail && (
-        <p className="pre-ingest-duplicate__notice" role="status">
+        <p className="mt-3 rounded-md border border-[#f1dc9b] bg-[#fff9eb] px-2.5 py-2 text-[0.73rem] leading-[1.45] text-[#6c5a27]" role="status">
           {scan.youtubeCheckDetail}
         </p>
       )}
       {scan && scan.files.length > 0 && (
         <div
-          className="pre-ingest-duplicate__results"
+          className="mt-3 grid gap-2"
         >
           {eligibleOrdinals.length > 0 && (
-            <div className="pre-ingest-duplicate__bulk-toolbar">
-              <label>
+            <div className="mb-1 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#cbdaf4] bg-[#f3f7ff] px-3.5 py-3 max-compact:items-stretch max-compact:[&_button]:w-full">
+              <label className="inline-flex items-center gap-2 text-sm text-[#34405a]">
                 <input
                   checked={allEligibleSelected}
                   disabled={busy || bulkDeleting}
@@ -485,7 +486,7 @@ export function PreIngestDuplicatePanel({
               </label>
               <span>{selectedFiles.length} selected</span>
               <button
-                className="danger-button"
+                className="cursor-pointer rounded-md border border-danger bg-danger px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-white transition-[background,border-color,box-shadow] duration-150 hover:border-[#85342f] hover:bg-[#85342f] disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={busy || bulkDeleting || selectedFiles.length === 0}
                 onClick={() => {
                   setBulkOpen(true);
@@ -506,7 +507,7 @@ export function PreIngestDuplicatePanel({
           <div aria-label="Pre-ingest duplicate results" role="list">
           {visibleFiles.items.map((file) => (
             <article
-              className="pre-ingest-duplicate__result"
+              className="rounded-lg border border-[#e1e6ee] bg-[#fafbfc] px-3 py-3 [&>header]:flex [&>header]:items-start [&>header]:justify-between [&>header]:gap-3 [&>header>div]:grid [&>header>div]:min-w-0 [&>header>div]:gap-0.5 [&_strong]:overflow-wrap-anywhere [&_strong]:text-[0.8rem] [&_strong]:text-[#2d3f5d] [&>header_span]:text-[0.72rem] [&_p]:mt-1.5 [&_p]:text-[0.72rem] [&_p]:leading-[1.45] [&_p]:text-[#68748a] max-compact:[&>header]:flex-col max-compact:[&>header]:items-stretch"
               data-preflight-record
               key={file.ordinal}
               role="listitem"
@@ -514,7 +515,7 @@ export function PreIngestDuplicatePanel({
               <header>
                 {isLocalDeleteEligible(file) && (
                   <label
-                    className="pre-ingest-duplicate__select"
+                    className="mr-[-0.1rem] inline-flex flex-none items-center gap-2"
                     aria-label={`Select ${file.fileName} for local deletion`}
                   >
                     <input
@@ -532,10 +533,10 @@ export function PreIngestDuplicatePanel({
                 <b
                   className={
                     file.error
-                      ? "is-error"
+                      ? "self-start rounded-full bg-[#fff0ef] px-2 py-1 text-[0.67rem] text-danger"
                       : verdict(file) === "No match found"
-                        ? "is-clear"
-                        : "is-match"
+                        ? "self-start rounded-full bg-[#eaf7ef] px-2 py-1 text-[0.67rem] text-success"
+                        : "self-start rounded-full bg-[#fff2dd] px-2 py-1 text-[0.67rem] text-[#885a14]"
                   }
                 >
                   {verdict(file)}
@@ -544,7 +545,7 @@ export function PreIngestDuplicatePanel({
               {file.error && <p>{file.error}</p>}
               {file.localMatches.length > 0 && (
                 <div
-                  className="pre-ingest-duplicate__comparison"
+                  className="mt-2.5 grid grid-cols-2 gap-2 max-compact:grid-cols-1 [&>section]:grid [&>section]:min-w-0 [&>section]:gap-0.5 [&>section]:rounded-md [&>section]:border [&>section]:border-[#dce5f1] [&>section]:bg-white [&>section]:px-2.5 [&>section]:py-2 [&>section>span]:text-[0.64rem] [&>section>span]:font-bold [&>section>span]:uppercase [&>section>span]:tracking-[0.05em] [&>section>span]:text-[#66758b] [&>section>div+div]:mt-0.5 [&>section>div+div]:border-t [&>section>div+div]:border-[#e7edf5] [&>section>div+div]:pt-1"
                   aria-label={`Local duplicate comparison for ${file.fileName}`}
                 >
                   <section>
@@ -586,14 +587,14 @@ export function PreIngestDuplicatePanel({
               )}
               {file.uploadedTitleMatches.length > 0 && (
                 <div
-                  className="pre-ingest-duplicate__comparison pre-ingest-duplicate__comparison--remote"
+                  className="mt-2.5 grid grid-cols-2 gap-3 max-compact:grid-cols-1 [&>section]:grid [&>section]:min-w-0 [&>section]:gap-1.5 [&>section]:rounded-md [&>section]:border [&>section]:border-[#dce5f1] [&>section]:bg-white [&>section]:px-3 [&>section]:py-3 [&>section:last-child]:border-[#f0dda8] [&>section:last-child]:bg-[#fffaf0] [&_details]:mt-0.5 [&_details]:border-t [&_details]:border-[#f0dda8] [&_details]:pt-2 [&_details_summary]:cursor-pointer [&_details_summary]:text-[0.69rem] [&_details_summary]:font-bold [&_details_summary]:text-[#76581e]"
                   aria-label={`Remote title comparison for ${file.fileName}`}
                 >
-                  <section className="pre-ingest-duplicate__source-metadata">
+                  <section className="border-[#d5e2f5]! bg-[#f8fbff]!">
                     <span>Local file</span>
                     <strong>{file.fileName}</strong>
-                    <p className="pre-ingest-duplicate__comparison-title">Selected desktop source</p>
-                    <dl className="pre-ingest-duplicate__facts">
+                    <p className="m-0 text-[0.7rem]! text-[#607089]!">Selected desktop source</p>
+                    <dl className="mt-0.5 grid grid-cols-2 gap-1.5 max-compact:grid-cols-1 [&>div]:grid [&>div]:min-w-0 [&>div]:gap-0.5 [&>div]:rounded-md [&>div]:border [&>div]:border-[#cfdbea]/80 [&>div]:bg-white/70 [&>div]:px-2 [&>div]:py-1.5 [&_dt]:text-[0.6rem] [&_dt]:font-bold [&_dt]:uppercase [&_dt]:tracking-[0.055em] [&_dt]:text-[#718095] [&_dd]:m-0 [&_dd]:overflow-wrap-anywhere [&_dd]:text-[0.72rem] [&_dd]:font-semibold [&_dd]:text-[#2d3f5d]">
                       <div><dt>Type</dt><dd>{file.localMetadata.fileType ?? "Unknown"}</dd></div>
                       <div><dt>Size</dt><dd>{formatBytes(file.localMetadata.sizeBytes ?? file.sizeBytes)}</dd></div>
                       <div><dt>Duration</dt><dd>{formatLocalDuration(file.localMetadata.durationSeconds)}</dd></div>
@@ -615,10 +616,10 @@ export function PreIngestDuplicatePanel({
                   <section>
                     <span>YouTube video</span>
                     {file.uploadedTitleMatches.map((match) => (
-                      <div className="pre-ingest-duplicate__remote-match" key={`${match.title}-${match.updatedAt}`}>
+                      <div className="[&>p]:m-0 [&>p]:text-[0.7rem]! [&>p]:text-[#607089]! [&_dl]:mt-0.5 [&_dl]:grid [&_dl]:grid-cols-2 [&_dl]:gap-1.5 max-compact:[&_dl]:grid-cols-1 [&_dl>div]:grid [&_dl>div]:min-w-0 [&_dl>div]:gap-0.5 [&_dl>div]:rounded-md [&_dl>div]:border [&_dl>div]:border-[#edd391]/70 [&_dl>div]:bg-white/70 [&_dl>div]:px-2 [&_dl>div]:py-1.5 [&_dt]:text-[0.6rem] [&_dt]:font-bold [&_dt]:uppercase [&_dt]:text-[#7e6a43] [&_dd]:m-0 [&_dd]:overflow-wrap-anywhere [&_dd]:text-[0.7rem] [&_dd]:text-[#5d5139]" key={`${match.title}-${match.updatedAt}`}>
                         <strong>{match.title}</strong>
-                        <p className="pre-ingest-duplicate__comparison-title">Possible title match — not an exact file hash</p>
-                        <dl className="pre-ingest-duplicate__facts">
+                        <p>Possible title match — not an exact file hash</p>
+                        <dl>
                           <div><dt>Duration</dt><dd>{formatYoutubeDuration(match.duration)}</dd></div>
                           <div><dt>Visibility</dt><dd>{match.privacyStatus ?? "Unavailable"}</dd></div>
                         </dl>
@@ -647,7 +648,7 @@ export function PreIngestDuplicatePanel({
               )}
               {isLocalDeleteEligible(file) && (
                 <button
-                  className="danger-button pre-ingest-duplicate__delete"
+                  className="mt-2.5 cursor-pointer rounded-md border border-danger bg-danger px-2 py-1.5 text-[0.72rem] font-semibold text-white transition-[background,border-color,box-shadow] duration-150 hover:border-[#85342f] hover:bg-[#85342f] disabled:cursor-not-allowed disabled:opacity-50"
                   disabled={busy || bulkDeleting}
                   onClick={() =>
                     void startLocalDuplicateDelete(file, file.ordinal)
@@ -658,7 +659,7 @@ export function PreIngestDuplicatePanel({
                 </button>
               )}
               {deleteError && !deleteTarget && (
-                <p className="pre-ingest-duplicate__delete-error" role="alert">
+                <p className="font-semibold text-danger!" role="alert">
                   {deleteError}
                 </p>
               )}
@@ -691,10 +692,10 @@ export function PreIngestDuplicatePanel({
       )}
       {deleteTarget && (
         <section
-          className="pre-ingest-duplicate__delete-confirmation"
+          className="mt-3.5 grid gap-2.5 rounded-lg border border-[#edcbc8] bg-[#fff8f7] p-3.5 [&_.delete-eyebrow]:m-0 [&_.delete-eyebrow]:text-[0.67rem] [&_.delete-eyebrow]:font-bold [&_.delete-eyebrow]:uppercase [&_.delete-eyebrow]:tracking-[0.1em] [&_.delete-eyebrow]:text-danger [&_h3]:m-0 [&_h3]:text-[0.93rem] [&_h3]:text-[#3e2a2a] [&>p]:m-0 [&>p]:text-[0.75rem] [&>p]:leading-[1.45] [&>p]:text-[#6e5554] [&_label]:grid [&_label]:gap-1 [&_label]:text-[0.74rem] [&_label]:font-bold [&_label]:text-[#5e4848] [&_input]:rounded-md [&_input]:border [&_input]:border-[#d8bebb] [&_input]:bg-white [&_input]:px-2 [&_input]:py-2 [&_input]:text-[#303040] [&_input]:focus:border-[#b85048] [&_input]:focus:outline-3 [&_input]:focus:outline-[#c44f46]/16 [&>div]:flex [&>div]:flex-wrap [&>div]:justify-end [&>div]:gap-2 max-compact:[&>div]:flex-col max-compact:[&>div]:items-stretch max-compact:[&>div_button]:w-full"
           aria-labelledby="local-duplicate-delete-heading"
         >
-          <p className="eyebrow">PERMANENT, IRREVERSIBLE ACTION</p>
+          <p className="m-0 text-[0.67rem] font-bold tracking-[0.1em] text-danger uppercase">PERMANENT, IRREVERSIBLE ACTION</p>
           <h3 id="local-duplicate-delete-heading">
             Delete “{deleteTarget.file.fileName}” from this device
           </h3>
@@ -716,13 +717,13 @@ export function PreIngestDuplicatePanel({
             value={confirmation}
           />
           {deleteError && (
-            <p className="pre-ingest-duplicate__delete-error" role="alert">
+            <p className="font-semibold text-danger!" role="alert">
               {deleteError}
             </p>
           )}
           <div>
             <button
-              className="secondary-action"
+              className="cursor-pointer rounded-md border border-[#cdd4df] bg-white px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-[#34405a] transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={busy || bulkDeleting}
               onClick={clearSingleDelete}
               type="button"
@@ -730,7 +731,7 @@ export function PreIngestDuplicatePanel({
               Cancel deletion
             </button>
             <button
-              className="danger-button"
+              className="cursor-pointer rounded-md border border-danger bg-danger px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-white transition-[background,border-color,box-shadow] duration-150 hover:border-[#85342f] hover:bg-[#85342f] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={
                 busy ||
                 bulkDeleting ||
@@ -746,10 +747,10 @@ export function PreIngestDuplicatePanel({
       )}
       {bulkOpen && (
         <section
-          className="pre-ingest-duplicate__delete-confirmation"
+          className="mt-3.5 grid gap-2.5 rounded-lg border border-[#edcbc8] bg-[#fff8f7] p-3.5 [&_.delete-eyebrow]:m-0 [&_.delete-eyebrow]:text-[0.67rem] [&_.delete-eyebrow]:font-bold [&_.delete-eyebrow]:uppercase [&_.delete-eyebrow]:tracking-[0.1em] [&_.delete-eyebrow]:text-danger [&_h3]:m-0 [&_h3]:text-[0.93rem] [&_h3]:text-[#3e2a2a] [&>p]:m-0 [&>p]:text-[0.75rem] [&>p]:leading-[1.45] [&>p]:text-[#6e5554] [&_label]:grid [&_label]:gap-1 [&_label]:text-[0.74rem] [&_label]:font-bold [&_label]:text-[#5e4848] [&_input]:rounded-md [&_input]:border [&_input]:border-[#d8bebb] [&_input]:bg-white [&_input]:px-2 [&_input]:py-2 [&_input]:text-[#303040] [&_input]:focus:border-[#b85048] [&_input]:focus:outline-3 [&_input]:focus:outline-[#c44f46]/16 [&>div]:flex [&>div]:flex-wrap [&>div]:justify-end [&>div]:gap-2 max-compact:[&>div]:flex-col max-compact:[&>div]:items-stretch max-compact:[&>div_button]:w-full"
           aria-labelledby="bulk-local-delete-heading"
         >
-          <p className="eyebrow">BULK PERMANENT DELETION</p>
+          <p className="m-0 text-[0.67rem] font-bold tracking-[0.1em] text-danger uppercase">BULK PERMANENT DELETION</p>
           <h3 id="bulk-local-delete-heading">
             Delete {selectedFiles.length} selected local file
             {selectedFiles.length === 1 ? "" : "s"}
@@ -760,13 +761,13 @@ export function PreIngestDuplicatePanel({
             when you run duplicate review. Type <code>{bulkPhrase}</code> to
             confirm this batch.
           </p>
-          <ul className="pre-ingest-duplicate__bulk-selection">
+          <ul className="my-2.5 max-h-40 overflow-auto pl-5 [&_li+li]:mt-1">
             {selectedFiles.map(({ file, ordinal }) => (
               <li key={ordinal}>{file.fileName}</li>
             ))}
           </ul>
           {bulkProgress.total > 0 && (
-            <p className="pre-ingest-duplicate__bulk-progress" role="status">
+            <p className="font-semibold text-muted!" role="status">
               {bulkProgress.stage}
             </p>
           )}
@@ -783,13 +784,13 @@ export function PreIngestDuplicatePanel({
             />
           </label>
           {bulkError && (
-            <p className="pre-ingest-duplicate__delete-error" role="alert">
+            <p className="font-semibold text-danger!" role="alert">
               {bulkError}
             </p>
           )}
           <div>
             <button
-              className="secondary-action"
+              className="cursor-pointer rounded-md border border-[#cdd4df] bg-white px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-[#34405a] transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={busy || bulkDeleting}
               onClick={closeBulkDelete}
               type="button"
@@ -797,7 +798,7 @@ export function PreIngestDuplicatePanel({
               Cancel deletion
             </button>
             <button
-              className="danger-button"
+              className="cursor-pointer rounded-md border border-danger bg-danger px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-white transition-[background,border-color,box-shadow] duration-150 hover:border-[#85342f] hover:bg-[#85342f] disabled:cursor-not-allowed disabled:opacity-50"
               disabled={busy || bulkDeleting || bulkConfirmation !== bulkPhrase}
               onClick={() => void deleteSelectedFiles()}
               type="button"

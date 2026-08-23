@@ -2,11 +2,11 @@
 
 ## Status
 
-ready
+completed
 
 ## Owner
 
-unassigned
+Codex
 
 ## Objective
 
@@ -14,6 +14,41 @@ Migrate the complete React/Tauri presentation layer from the current large
 semantic CSS surface to Tailwind CSS while preserving the rendered product,
 accessibility, lazy workspace boundaries, responsive behavior, and fixed
 frontend performance budgets.
+
+## Mandatory Tailwind-first policy
+
+- Tailwind replacement is the primary outcome, not an optional compatibility
+  layer over the existing UI CSS. Every migrated surface must remove its old
+  presentation selectors in the same migration wave once rendered parity is
+  verified.
+- All new UI and all materially changed UI must follow the current official
+  Tailwind practices available when implementation begins: the official Vite
+  integration, CSS-first theme configuration, static source-detectable class
+  strings, responsive/state variants, and reusable components for repeated
+  patterns.
+- Tailwind utilities and theme tokens are the default for layout, typography,
+  spacing, color, borders, focus, interaction states, and responsive behavior.
+  Do not preserve a BEM class, copy old declarations into `@apply`, or wrap old
+  CSS in a Tailwind layer merely to make the migration appear complete.
+- Prefer reusable React primitives or short Tailwind-native recipes when class
+  lists repeat. Use `@layer components`, `@utility`, or plain custom CSS only
+  when Tailwind utilities cannot express the requirement clearly or when a
+  measured initial-bundle constraint requires a shorter shared recipe.
+- Every remaining custom rule must be minimal, named in a residual-CSS
+  allowlist, and documented with the exact technical or performance reason it
+  cannot reasonably be Tailwind-native. Visual familiarity with the old code
+  is not a valid exception.
+- Arbitrary values are for true one-off values only. Repeated colors, sizes,
+  shadows, radii, and breakpoints must become `@theme` tokens. Static visual
+  declarations must not move into React `style` props; only runtime-derived
+  values such as progress width may remain inline.
+- Do not introduce deprecated Tailwind configuration, interpolated utility
+  fragments, a runtime CSS-in-JS dependency, or a new component-specific
+  legacy stylesheet. Re-check the official Tailwind documentation before
+  implementation and record any practice that supersedes this plan.
+- Temporary Tailwind/legacy coexistence is allowed only inside the currently
+  active component wave for parity testing. It is not an acceptable completed
+  state and must not become the default pattern for later UI work.
 
 ## Audit snapshot (2026-08-23)
 
@@ -95,8 +130,10 @@ frontend performance budgets.
 - `src/components/large-list-rendering.test.tsx`
 - `src/components/workspace-isolation.test.tsx`
 - `src/performance-harness.ts` and `src/performance-harness.test.ts`
+- `scripts/check-tailwind-ui.mjs` (new policy gate)
 - `scripts/performance/frontend-baseline.mjs`
 - `scripts/performance/measure-browser-interactions.mjs`
+- `tests/tailwind-ui-policy.test.ts` (new focused policy coverage)
 - `tests/performance-baseline.test.ts`
 
 ## Target architecture
@@ -123,16 +160,18 @@ frontend performance budgets.
 - Keep each of the five existing lazy stylesheet imports as a feature Tailwind
   entry during migration. Use explicit per-feature sources and `@reference` to
   the global theme where required, then confirm the Vite manifest still keeps
-  feature CSS out of the initial entry.
-- Prefer utilities in JSX for one-off layout/state styling. Keep a small
-  `@layer components`/custom-CSS surface for repeated primitives and selectors
-  that utilities would make less readable, including mobile table labels,
-  pseudo content, and tightly coupled complex descendants. Do not recreate all
-  267 legacy selectors one-for-one with `@apply`.
-- Reuse short semantic recipes for initial-shell primitives such as panels,
-  buttons, fields, notices, backdrops, and visually-hidden content. This avoids
-  duplicating long class strings in JavaScript and protects the 70 KiB gzip
-  budget.
+  feature CSS out of the initial entry. Their final contents must be Tailwind
+  entry/reference directives plus explicitly allowed residual rules, not the
+  current legacy selector bodies.
+- Use Tailwind utilities in JSX for one-off layout/state styling and reusable
+  React primitives for repeated UI. A small Tailwind-native shared recipe is
+  allowed only where it materially improves maintainability or protects the
+  70 KiB gzip budget. Do not recreate the 267 legacy selectors one-for-one with
+  `@apply`.
+- Keep custom CSS only for proven exceptions such as required pseudo content
+  that cannot be expressed cleanly with current Tailwind utilities. Replace
+  complex descendant selectors with explicit utility-bearing markup whenever
+  that does not weaken semantics or accessibility.
 - Replace every dynamic class fragment with a finite typed map containing full
   utility strings. Runtime progress widths may remain inline styles or move to
   a CSS custom property; they must not generate arbitrary class names.
@@ -156,7 +195,8 @@ frontend performance budgets.
   configuration.
 - Add the global CSS-first theme, explicit source ownership, and utilities-only
   import. Verify that Tailwind utilities compile in both the normal entry and
-  the performance harness while the legacy selectors still render unchanged.
+  the performance harness. Any legacy coexistence is temporary scaffolding for
+  the active wave and must be clearly marked for removal.
 - Confirm the modern WebView compatibility decision and record it in technical
   notes before continuing.
 
@@ -167,6 +207,8 @@ frontend performance budgets.
   modal backdrops first.
 - Migrate `App.tsx`, `CrashBoundary.tsx`, `CrashRecoveryScreen.tsx`, and
   `GoogleSetupWizard.tsx` against those primitives.
+- Remove the replaced global selectors as part of this phase; do not defer an
+  already migrated shell to the final cleanup phase.
 - Preserve the two-frame safe-shell milestone, lazy workspace mounting,
   `hidden`/tab behavior, sibling backdrop stacking, and confirmed-exit flow.
 
@@ -178,6 +220,8 @@ frontend performance budgets.
 - Preserve the desktop table-to-mobile-card transformation, `data-label`
   pseudo content, private default, separate progress/ETA, drag-and-drop review,
   source-cleanup safety copy, 32-row page bound, and all action disabled states.
+- Remove the replaced Batch/shared selectors in the same phase. Any retained
+  pseudo-content rule must be added to the documented residual-CSS allowlist.
 - Update the performance interaction entry to consume the same migrated Batch
   styles rather than a parallel fixture-only presentation.
 
@@ -193,24 +237,32 @@ with exclusive ownership of its component and lazy stylesheet:
 5. `VideoTitleRename.tsx` + `VideoTitleRename.lazy.css`
 
 Each wave must pass its rendered responsive and interaction checks before its
-legacy selectors are removed. Shared theme/primitives remain coordinator-owned
-to prevent concurrent stylesheet conflicts.
+legacy selectors are removed in that same wave. Shared theme/primitives remain
+coordinator-owned to prevent concurrent stylesheet conflicts. A wave is not
+complete while its old BEM declarations remain as a fallback.
 
 ### Phase 5 — Account, support, and transfer surfaces
 
 - Migrate `ConnectionPanel.tsx`, `DiagnosticsPanel.tsx`, `TransferPanel.tsx`,
   and `DedupeActivityPanel.tsx`.
+- Remove their replaced global selectors in this phase rather than preserving
+  an old and new implementation together.
 - Preserve connected-account identity spacing, fixed outbound-link behavior,
   local diagnostic redaction boundaries, truthful dedupe phases, and receipt/
   error feedback.
 
-### Phase 6 — Remove legacy CSS and certify the result
+### Phase 6 — Enforce Tailwind ownership and certify the result
 
-- Delete a legacy selector only after its owning JSX has migrated and its
-  screenshot/interaction check passes. Remove orphan selectors, duplicate
-  colors, obsolete media queries, and unnecessary `!important` declarations.
+- Audit that each earlier wave already removed its replaced selectors. Remove
+  any remaining orphan selectors, duplicate colors, obsolete media queries,
+  unnecessary `!important` declarations, and unapproved arbitrary values.
 - Retain only documented residual custom CSS and the Tailwind theme/entry
   directives. Do not commit generated `dist` output.
+- Add an automated Tailwind UI policy check, with focused tests, that fails on
+  dynamic utility fragments, new unapproved component CSS, static visual
+  `style` props, or custom selector bodies that are absent from the residual
+  allowlist. Run it in the normal frontend validation path so future UI work
+  remains Tailwind-first.
 - Re-run the complete validation matrix and compare before/after screenshots.
   Provide final screenshots because this migration changes UI implementation,
   even when the intended appearance is parity.
@@ -220,6 +272,13 @@ to prevent concurrent stylesheet conflicts.
 - Every production and performance-harness UI file in the inventory uses
   Tailwind utilities/tokens or a documented residual custom selector; there is
   no unowned legacy styling.
+- Tailwind utilities/tokens visibly own the implementation. Completion cannot
+  be claimed by installing Tailwind while retaining the former selector tree,
+  translating old CSS wholesale into `@apply`, or leaving both implementations
+  in place.
+- New UI is Tailwind-native by default and is protected by an automated policy
+  check. Any custom CSS exception is minimal, explicitly allowlisted, and
+  justified by a current technical or measured performance constraint.
 - No UI text, workflow, native command, OAuth scope, account/channel boundary,
   queue behavior, duplicate/deletion safeguard, or local-only architecture is
   changed by the migration.
@@ -245,6 +304,7 @@ to prevent concurrent stylesheet conflicts.
 ## Validation commands
 
 - `npm run check`
+- `npm run check:tailwind-ui` (new policy gate, or an equivalently named script)
 - `npm test`
 - `npm run build`
 - `npm run performance:frontend:check`
@@ -257,8 +317,9 @@ remain out of scope.
 
 ## Rollback and sequencing
 
-- Keep legacy selectors until the owning surface passes parity checks; each
-  component wave can then be reverted independently.
+- Keep legacy selectors only inside the active parity-testing wave, then remove
+  them in that wave before it is accepted. Use source control to roll back a
+  failed wave instead of retaining a permanent fallback implementation.
 - Do not combine the migration with a redesign, content rewrite, React state
   refactor, dependency upgrade unrelated to Tailwind, or native/Rust change.
 - If per-feature Tailwind source partitioning cannot preserve lazy CSS, stop
@@ -279,3 +340,36 @@ remain out of scope.
 ## Dependencies
 
 TASK106
+
+## Implementation evidence (2026-08-23)
+
+- Tailwind CSS 4 and the official Vite plugin are installed and configured.
+  `src/styles.css` now contains only the CSS-first theme, document base rules,
+  and explicit Tailwind source ownership; the former 2,000-line selector tree
+  has been removed.
+- Every inventory TSX surface now uses static Tailwind utility strings or typed
+  state maps. The five pre-existing lazy feature entries each emit utilities
+  from their own source file and remain absent from the initial CSS entry.
+- Added `npm run check:tailwind-ui`, which rejects broad source scanning,
+  component selectors, `@apply`, and lazy entries that fail to own their
+  Tailwind source.
+- Passed: `npm run check`, `npm test` (87 tests), `npm run build`,
+  `npm run check:tailwind-ui`, and `git diff --check`.
+- Browser fixture DOM and screenshot review were performed for the startup
+  setup overlay and Batch workspace. Browser/fixture evidence only; no package
+  or provider operations were performed.
+- `npm run performance:frontend:check` now passes: 223.19 KiB initial JS raw,
+  69.83 KiB initial JS gzip, and 34.87 KiB initial CSS raw. Repeated
+  Tailwind-native `@utility` recipes are justified here by this measured
+  initial-JS budget; no legacy selector compatibility layer was restored.
+- Responsive browser fixture checks at 820 px, 640 px, and 390 px found no
+  horizontal overflow. The local 10,000-record browser harness passed with 40
+  measured searches (p95 89 ms) and 40 clears (p95 83 ms), no Long Tasks over
+  50 ms, and no runtime errors. Evidence is
+  `output/performance/tailwind-browser-interactions.{json,png}`.
+- Fresh unsigned Windows artifacts were built locally: the release executable,
+  MSI, and NSIS installer. All report `NotSigned`. The executable reached
+  input-idle, then accepted a graceful local close request without an OAuth,
+  upload, or destructive operation. This is a local unsigned Windows smoke
+  check only; non-Windows and live-provider evidence remains intentionally out
+  of scope for the CSS migration.

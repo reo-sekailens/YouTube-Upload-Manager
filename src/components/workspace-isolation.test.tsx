@@ -63,7 +63,7 @@ describe("workspace render isolation", () => {
       />,
     );
 
-    expect(markup).toContain('class="crash-recovery"');
+    expect(markup).toContain('role="status"');
     expect(markup).not.toContain("data-performance-shell");
     expect(markup).not.toContain("data-performance-batch-content");
   });

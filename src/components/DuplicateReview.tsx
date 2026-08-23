@@ -97,6 +97,28 @@ type BulkDeletionLogEntry = SelectedDuplicateVideo & {
 };
 
 type PlayerInfoSubscriber = (event: MessageEvent) => void;
+const secondaryButtonClass =
+  "cursor-pointer rounded-md border border-[#cdd4df] bg-white px-2.5 py-1.5 text-[0.72rem] font-[680] text-[#344a67] transition-colors hover:border-[#aeb9c8] hover:bg-[#f3f5f8] focus-visible:outline-3 focus-visible:outline-[#2d68e847] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-55";
+const dangerButtonClass =
+  "cursor-pointer rounded-md border border-[#e5c2c0] bg-white px-2.5 py-1.5 text-[0.72rem] font-[680] text-[#a4413b] transition-colors hover:border-[#d89d98] hover:bg-[#fff5f4] focus-visible:outline-3 focus-visible:outline-[#c44f463d] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-55";
+const deletionPanelClass =
+  "mt-3.5 grid gap-2.5 rounded-lg border border-[#edcbc8] bg-[#fff8f7] p-3.5";
+const deletionLabelClass =
+  "grid gap-1.5 text-[0.74rem] font-bold text-[#5e4848] [&_input]:rounded-md [&_input]:border [&_input]:border-[#d8bebb] [&_input]:bg-white [&_input]:px-2.5 [&_input]:py-2 [&_input]:text-[#303040] [&_input]:focus:border-[#b85048] [&_input]:focus:outline-3 [&_input]:focus:outline-[#c44f4629]";
+const deletionActionClass =
+  "flex flex-wrap items-center justify-end gap-2.5 max-sm:flex-col max-sm:items-stretch max-sm:[&_button]:w-full";
+const deletionAuthorizationClass =
+  "flex flex-wrap items-center justify-between gap-2.5 max-sm:flex-col max-sm:items-stretch max-sm:[&_button]:w-full";
+const logStatusClasses: Record<BulkDeletionLogEntry["status"], string> = {
+  queued: "text-[#8d6b2d]",
+  deleting: "text-[#a4413b]",
+  deleted: "text-[#28714e]",
+  failed: "text-[#a4413b]",
+};
+const matchBadgeClasses = {
+  exact: "bg-[#e9f7ef] text-[#28714e]",
+  possible: "bg-[#fff5df] text-[#8d6b2d]",
+} as const;
 const playerInfoSubscribers = new Set<PlayerInfoSubscriber>();
 const dispatchPlayerInfo = (event: MessageEvent) => {
   if (event.origin !== youtubeComparisonOrigin) return;
@@ -131,17 +153,20 @@ function DeleteProgress({
       aria-valuemax={total}
       aria-valuemin={0}
       aria-valuenow={completed}
-      className="duplicate-delete-progress"
+      className="grid gap-1.5 rounded-md border border-[#edcbc8] bg-white p-2.5"
       role="progressbar"
     >
-      <div>
+      <div className="flex items-baseline justify-between gap-2.5 text-[0.72rem] leading-snug font-[680] text-[#704b49]">
         <span>{stage}</span>
-        <strong>
+        <strong className="shrink-0 text-[0.7rem] text-[#a4413b]">
           {completed} of {total}
         </strong>
       </div>
-      <div className="duplicate-delete-progress__track">
-        <span style={{ width: `${percentage}%` }} />
+      <div className="h-2 overflow-hidden rounded-full bg-[#f0d9d6]">
+        <span
+          className="block h-full min-w-0 rounded-[inherit] bg-[#c95146] transition-[width] duration-250"
+          style={{ width: `${percentage}%` }}
+        />
       </div>
     </div>
   );
@@ -153,21 +178,21 @@ function BulkDeletionLog({ entries }: { entries: BulkDeletionLogEntry[] }) {
     (entry) => entry.status === "deleting",
   ).length;
   return (
-    <details className="duplicate-deletion-log">
-      <summary>
+    <details className="rounded-md border border-[#edcbc8] bg-white text-[0.72rem] text-[#704b49]">
+      <summary className="flex cursor-pointer items-center justify-between gap-2.5 p-2.5 font-bold [&_span]:text-[0.68rem] [&_span]:font-[680] [&_span]:text-[#a4413b]">
         Deletion activity log{" "}
         <span>
           {deleted} deleted ·{" "}
           {deleting > 0 ? "1 deleting" : `${entries.length - deleted} queued`}
         </span>
       </summary>
-      <ol>
+      <ol className="grid list-none gap-1.5 border-t border-[#f0ddda] px-2.5 pt-2 pb-2.5">
         {entries.map((entry) => (
           <li
-            className={`duplicate-deletion-log__entry duplicate-deletion-log__entry--${entry.status}`}
+            className="grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-2 gap-y-0.5"
             key={entry.videoId}
           >
-            <span>
+            <span className={`col-start-1 whitespace-nowrap text-[0.67rem] font-bold ${logStatusClasses[entry.status]}`}>
               {entry.status === "queued"
                 ? "About to delete"
                 : entry.status === "deleting"
@@ -176,10 +201,12 @@ function BulkDeletionLog({ entries }: { entries: BulkDeletionLogEntry[] }) {
                     ? "Deleted"
                     : "Could not delete"}
             </span>
-            <strong>
+            <strong className="col-start-2 overflow-wrap-anywhere text-[0.7rem] text-[#4d3a39]">
               {entry.label}: {entry.title}
             </strong>
-            <code>{entry.videoId}</code>
+            <code className="col-start-2 px-1.5 py-0.5 text-[0.65rem]">
+              {entry.videoId}
+            </code>
           </li>
         ))}
       </ol>
@@ -398,8 +425,8 @@ function EmbeddedComparison({
   };
 
   return (
-    <div className="duplicate-comparison">
-      <div className="duplicate-comparison__preview-bar">
+    <div className="grid gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-md border border-[#dce5f1] bg-[#f4f7fb] px-2.5 py-2 text-[0.73rem] leading-snug text-[#5c6c82] [&>div]:flex [&>div]:flex-wrap [&>div]:gap-2 [&>p]:basis-full [&>p]:m-0 [&>p]:text-[#a4413b]">
         <span>
           {previewLoaded
             ? readyPlayerCount >= 2
@@ -409,7 +436,7 @@ function EmbeddedComparison({
         </span>
         <div>
           <button
-            className="secondary-action"
+            className={secondaryButtonClass}
             disabled={!isTauri}
             onClick={() => void openAccountBrowser()}
             type="button"
@@ -418,7 +445,7 @@ function EmbeddedComparison({
           </button>
           {previewLoaded && (
             <button
-              className="secondary-action"
+              className={secondaryButtonClass}
               onClick={unloadPreview}
               type="button"
             >
@@ -428,15 +455,16 @@ function EmbeddedComparison({
         </div>
         {accountBrowserError && <p role="alert">{accountBrowserError}</p>}
       </div>
-      <div className="duplicate-comparison__players">
-        <section className="duplicate-comparison__player">
-          <header>
-            <span>Video A</span>
-            <strong>{candidate.leftTitle}</strong>
-            <code>{candidate.leftVideoId}</code>
+      <div className="grid gap-3 min-[820px]:grid-cols-2">
+        <section className="grid gap-2.5">
+          <header className="grid gap-1">
+            <span className="text-[0.72rem] font-bold text-[#52617a]">Video A</span>
+            <strong className="overflow-wrap-anywhere text-[0.85rem] text-[#2d3f5d]">{candidate.leftTitle}</strong>
+            <code className="overflow-wrap-anywhere text-[0.68rem] text-[#65758b]">{candidate.leftVideoId}</code>
           </header>
           {shouldLoadComparisonPlayers(playing, previewLoaded) ? (
             <iframe
+              className="aspect-video w-full rounded-md border-0"
               onLoad={() => setReadyPlayerCount((count) => count + 1)}
               ref={leftPlayer}
               src={playerSource(candidate.leftVideoId!)}
@@ -445,12 +473,12 @@ function EmbeddedComparison({
               referrerPolicy="strict-origin-when-cross-origin"
             />
           ) : (
-            <div className="duplicate-comparison__placeholder">
+            <div className="flex aspect-video items-center justify-center rounded-md border border-dashed border-[#c8d1dd] bg-[#f1f3f6] px-3 text-center text-[0.74rem] text-[#718096]">
               Video A loads after you press Play.
             </div>
           )}
-          <div className="duplicate-comparison__video-actions">
-            <label className="duplicate-comparison__select">
+          <div className="flex flex-wrap gap-2">
+            <label className="mt-2 inline-flex cursor-pointer items-center gap-1.5 text-[0.7rem] font-[680] text-[#52617a] has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-55 [&_input]:m-0 [&_input]:accent-[#2463df]">
               <input
                 checked={selected.has(candidate.leftVideoId!)}
                 disabled={deleting}
@@ -469,14 +497,14 @@ function EmbeddedComparison({
               Select A
             </label>
             <button
-              className="duplicate-comparison__open"
+              className={secondaryButtonClass}
               onClick={() => void openInYouTube(candidate.leftVideoId!)}
               type="button"
             >
               Open Video A in YouTube
             </button>
             <button
-              className="duplicate-comparison__delete"
+              className={dangerButtonClass}
               disabled={deleting}
               onClick={() =>
                 startDeletion(
@@ -491,14 +519,15 @@ function EmbeddedComparison({
             </button>
           </div>
         </section>
-        <section className="duplicate-comparison__player">
-          <header>
-            <span>Video B</span>
-            <strong>{candidate.rightTitle}</strong>
-            <code>{candidate.rightVideoId}</code>
+        <section className="grid gap-2.5">
+          <header className="grid gap-1">
+            <span className="text-[0.72rem] font-bold text-[#52617a]">Video B</span>
+            <strong className="overflow-wrap-anywhere text-[0.85rem] text-[#2d3f5d]">{candidate.rightTitle}</strong>
+            <code className="overflow-wrap-anywhere text-[0.68rem] text-[#65758b]">{candidate.rightVideoId}</code>
           </header>
           {shouldLoadComparisonPlayers(playing, previewLoaded) ? (
             <iframe
+              className="aspect-video w-full rounded-md border-0"
               onLoad={() => setReadyPlayerCount((count) => count + 1)}
               ref={rightPlayer}
               src={playerSource(candidate.rightVideoId!)}
@@ -507,12 +536,12 @@ function EmbeddedComparison({
               referrerPolicy="strict-origin-when-cross-origin"
             />
           ) : (
-            <div className="duplicate-comparison__placeholder">
+            <div className="flex aspect-video items-center justify-center rounded-md border border-dashed border-[#c8d1dd] bg-[#f1f3f6] px-3 text-center text-[0.74rem] text-[#718096]">
               Video B loads after you press Play.
             </div>
           )}
-          <div className="duplicate-comparison__video-actions">
-            <label className="duplicate-comparison__select">
+          <div className="flex flex-wrap gap-2">
+            <label className="mt-2 inline-flex cursor-pointer items-center gap-1.5 text-[0.7rem] font-[680] text-[#52617a] has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-55 [&_input]:m-0 [&_input]:accent-[#2463df]">
               <input
                 checked={selected.has(candidate.rightVideoId!)}
                 disabled={deleting}
@@ -531,14 +560,14 @@ function EmbeddedComparison({
               Select B
             </label>
             <button
-              className="duplicate-comparison__open"
+              className={secondaryButtonClass}
               onClick={() => void openInYouTube(candidate.rightVideoId!)}
               type="button"
             >
               Open Video B in YouTube
             </button>
             <button
-              className="duplicate-comparison__delete"
+              className={dangerButtonClass}
               disabled={deleting}
               onClick={() =>
                 startDeletion(
@@ -556,24 +585,24 @@ function EmbeddedComparison({
       </div>
       {pendingDeletion && (
         <section
-          className="duplicate-comparison__delete-confirmation"
+          className={deletionPanelClass}
           aria-labelledby={`duplicate-delete-${candidate.id}`}
         >
-          <p className="eyebrow">PERMANENT, IRREVERSIBLE ACTION</p>
-          <h3 id={`duplicate-delete-${candidate.id}`}>
+          <p className="m-0 text-[0.7rem] font-bold tracking-[0.08em] text-[#a4413b]">PERMANENT, IRREVERSIBLE ACTION</p>
+          <h3 className="m-0 text-[0.93rem] text-[#3e2a2a]" id={`duplicate-delete-${candidate.id}`}>
             Delete {pendingDeletion.label}: “{pendingDeletion.title}”
           </h3>
-          <p>
+          <p className="m-0 text-[0.75rem] leading-relaxed text-[#6e5554]">
             This removes this video from YouTube directly from this duplicate
             card. A temporary deletion mode, an exact typed video ID, and a
             fresh channel-ownership check are required.
           </p>
-          <code>{pendingDeletion.videoId}</code>
+          <code className="w-fit rounded border border-[#efdad7] bg-white px-2 py-1.5 text-[0.75rem] text-[#8e3833]">{pendingDeletion.videoId}</code>
           {!deletionAuthorized && (
-            <div className="duplicate-comparison__authorization">
-              <span>Deletion permission is not active.</span>
+            <div className={deletionAuthorizationClass}>
+              <span className="text-[0.73rem] text-[#8a5450]">Deletion permission is not active.</span>
               <button
-                className="danger-button"
+                className={dangerButtonClass}
                 disabled={authorizingDeletion || deleting || !isTauri}
                 onClick={() => void authorizeDeletion()}
                 type="button"
@@ -585,10 +614,10 @@ function EmbeddedComparison({
             </div>
           )}
           {deletionAuthorized && !deletionSudoActive && (
-            <div className="duplicate-comparison__authorization">
-              <span>Deletion mode is off.</span>
+            <div className={deletionAuthorizationClass}>
+              <span className="text-[0.73rem] text-[#8a5450]">Deletion mode is off.</span>
               <button
-                className="danger-button"
+                className={dangerButtonClass}
                 disabled={deleting || !isTauri}
                 onClick={() => void enableDeletionMode()}
                 type="button"
@@ -598,7 +627,7 @@ function EmbeddedComparison({
             </div>
           )}
           {deletionSudoActive && (
-            <label htmlFor={`duplicate-delete-confirmation-${candidate.id}`}>
+            <label className={deletionLabelClass} htmlFor={`duplicate-delete-confirmation-${candidate.id}`}>
               Type the exact video ID to permanently delete it
               <input
                 id={`duplicate-delete-confirmation-${candidate.id}`}
@@ -625,13 +654,13 @@ function EmbeddedComparison({
             />
           )}
           {(deletionError || deletionAuthorizationError) && (
-            <p className="duplicate-comparison__delete-error" role="alert">
+            <p className="font-[650] text-[#a4413b]" role="alert">
               {deletionError || deletionAuthorizationError}
             </p>
           )}
-          <div className="duplicate-comparison__delete-actions">
+          <div className={deletionActionClass}>
             <button
-              className="secondary-action"
+              className={secondaryButtonClass}
               disabled={deleting}
               onClick={() => {
                 setPendingDeletion(undefined);
@@ -645,7 +674,7 @@ function EmbeddedComparison({
             </button>
             {deletionSudoActive && (
               <button
-                className="danger-button"
+                className={dangerButtonClass}
                 disabled={
                   deleting || deletionConfirmation !== pendingDeletion.videoId
                 }
@@ -658,15 +687,15 @@ function EmbeddedComparison({
           </div>
         </section>
       )}
-      <div className="duplicate-comparison__controls">
+      <div className="grid gap-2 rounded-md border border-[#dce5f1] bg-[#f8fafc] p-2.5 [&>label]:grid [&>label]:gap-1 [&>label]:text-[0.72rem] [&>label]:font-bold [&>label]:text-[#52617a] [&_output]:text-[0.7rem] [&_output]:font-medium [&_output]:text-[#65758b] [&>input]:w-full [&>p]:m-0 [&>p]:text-[0.7rem] [&>p]:leading-snug [&>p]:text-[#65758b]">
         <div
           aria-label="Synchronized comparison playback"
-          className="duplicate-comparison__actions"
+          className="inline-flex gap-1.5"
           role="group"
         >
           <button
             aria-label="Move both videos back 10 seconds"
-            className="comparison-icon-button"
+            className="inline-flex size-9 cursor-pointer items-center justify-center rounded-md border border-[#cdd4df] bg-white p-0 text-[#34405a] transition-colors hover:border-[#aeb9c8] hover:bg-[#f3f5f8] focus-visible:outline-3 focus-visible:outline-[#2d68e847] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:size-[1.18rem]"
             disabled={!previewLoaded || readyPlayerCount < 2}
             onClick={() =>
               setBothPosition(
@@ -680,7 +709,7 @@ function EmbeddedComparison({
           </button>
           <button
             aria-label={playing ? "Pause both videos" : "Play both videos"}
-            className="comparison-icon-button comparison-icon-button--primary"
+            className="inline-flex size-9 cursor-pointer items-center justify-center rounded-md border border-[#2463df] bg-[#2463df] p-0 text-white transition-colors hover:border-[#1b54c6] hover:bg-[#1b54c6] hover:shadow-[0_3px_8px_rgba(31,78,181,0.16)] focus-visible:outline-3 focus-visible:outline-[#2d68e847] focus-visible:outline-offset-2 [&_svg]:size-[1.18rem]"
             onClick={togglePlayback}
             title={playing ? "Pause both videos" : "Play both videos"}
             type="button"
@@ -689,7 +718,7 @@ function EmbeddedComparison({
           </button>
           <button
             aria-label="Move both videos forward 10 seconds"
-            className="comparison-icon-button"
+            className="inline-flex size-9 cursor-pointer items-center justify-center rounded-md border border-[#cdd4df] bg-white p-0 text-[#34405a] transition-colors hover:border-[#aeb9c8] hover:bg-[#f3f5f8] focus-visible:outline-3 focus-visible:outline-[#2d68e847] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:size-[1.18rem]"
             disabled={!previewLoaded || readyPlayerCount < 2}
             onClick={() =>
               setBothPosition(
@@ -1013,17 +1042,17 @@ export function DuplicateReview({
   };
   if (candidates.length === 0)
     return (
-      <p className="duplicate-review__empty duplicate-review__empty--state">
+      <p className="m-0 py-1 text-[0.78rem] text-[#65758b]">
         No duplicate candidates found in this account.
       </p>
     );
   return (
     <div
       aria-busy={searchQuery !== deferredSearchQuery}
-      className="duplicate-review duplicate-review--rail"
+      className="grid gap-3"
     >
       <label
-        className="duplicate-review__search"
+        className="grid gap-1.5 text-[0.74rem] font-bold text-[#465775] [&_input]:w-full [&_input]:max-w-[32rem] [&_input]:rounded-md [&_input]:border [&_input]:border-[#cbd5e3] [&_input]:bg-white [&_input]:px-2.5 [&_input]:py-2 [&_input]:font-medium [&_input]:text-[#27344a] [&_input]:focus:border-[#2463df] [&_input]:focus:outline-3 [&_input]:focus:outline-[#2d68e824]"
         htmlFor="duplicate-title-search"
       >
         Search video titles
@@ -1039,7 +1068,7 @@ export function DuplicateReview({
           value={searchQuery}
         />
       </label>
-      <div className="duplicate-bulk-toolbar">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#d8e4f7] bg-[#f2f6fd] px-3 py-3 max-sm:flex-col max-sm:items-stretch [&>div:first-child]:grid [&>div:first-child]:gap-0.5 [&>div:first-child_strong]:text-[0.8rem] [&>div:first-child_strong]:text-[#314a70] [&>div:first-child_span]:text-[0.71rem] [&>div:first-child_span]:leading-snug [&>div:first-child_span]:text-[#65758b] [&>div:last-child]:flex [&>div:last-child]:flex-wrap [&>div:last-child]:gap-2 max-sm:[&>div:last-child]:flex-col max-sm:[&_button]:w-full">
         <div>
           <strong>{selectedVideos.size} selected for deletion</strong>
           <span>
@@ -1049,7 +1078,7 @@ export function DuplicateReview({
         </div>
         <div>
           <button
-            className="secondary-action"
+            className={secondaryButtonClass}
             disabled={bulkDeleting || selectableVideos.length === 0}
             onClick={() => selectSide("Video A")}
             type="button"
@@ -1057,7 +1086,7 @@ export function DuplicateReview({
             Select all Video A results
           </button>
           <button
-            className="secondary-action"
+            className={secondaryButtonClass}
             disabled={bulkDeleting || selectableVideos.length === 0}
             onClick={() => selectSide("Video B")}
             type="button"
@@ -1065,7 +1094,7 @@ export function DuplicateReview({
             Select all Video B results
           </button>
           <button
-            className="danger-button"
+            className={dangerButtonClass}
             disabled={bulkDeleting || selectedVideos.size === 0}
             onClick={() => {
               setBulkOpen(true);
@@ -1091,20 +1120,20 @@ export function DuplicateReview({
       </div>
       {bulkOpen && (
         <section
-          className="duplicate-comparison__delete-confirmation"
+          className={deletionPanelClass}
           aria-labelledby="bulk-delete-heading"
         >
-          <p className="eyebrow">BULK PERMANENT DELETION</p>
-          <h3 id="bulk-delete-heading">
+          <p className="m-0 text-[0.7rem] font-bold tracking-[0.08em] text-[#a4413b]">BULK PERMANENT DELETION</p>
+          <h3 className="m-0 text-[0.93rem] text-[#3e2a2a]" id="bulk-delete-heading">
             Delete {selectedVideos.size} selected YouTube video
             {selectedVideos.size === 1 ? "" : "s"}
           </h3>
-          <p>
+          <p className="m-0 text-[0.75rem] leading-relaxed text-[#6e5554] [&_code]:mx-0.5 [&_code]:w-fit [&_code]:rounded [&_code]:border [&_code]:border-[#efdad7] [&_code]:bg-white [&_code]:px-2 [&_code]:py-1.5 [&_code]:text-[0.75rem] [&_code]:text-[#8e3833]">
             Each selected video is rechecked against the currently authorized
             channel immediately before deletion. Type <code>{bulkPhrase}</code>{" "}
             to confirm this batch.
           </p>
-          <ul className="duplicate-bulk-selection">
+          <ul className="m-0 grid gap-1 pl-4.5 text-[0.73rem] text-[#654f4e] [&_code]:ml-1 [&_code]:text-[0.68rem]">
             {[...selectedVideos.values()].map((video) => (
               <li key={video.videoId}>
                 {video.label}: {video.title} <code>{video.videoId}</code>
@@ -1122,10 +1151,10 @@ export function DuplicateReview({
             />
           )}
           {!bulkAuthorized && (
-            <div className="duplicate-comparison__authorization">
-              <span>Deletion permission is not active.</span>
+            <div className={deletionAuthorizationClass}>
+              <span className="text-[0.73rem] text-[#8a5450]">Deletion permission is not active.</span>
               <button
-                className="danger-button"
+                className={dangerButtonClass}
                 disabled={bulkAuthorizing || bulkDeleting || !isTauri}
                 onClick={() => void authorizeBulk()}
                 type="button"
@@ -1137,10 +1166,10 @@ export function DuplicateReview({
             </div>
           )}
           {bulkAuthorized && !bulkSudoActive && (
-            <div className="duplicate-comparison__authorization">
-              <span>Deletion mode is off.</span>
+            <div className={deletionAuthorizationClass}>
+              <span className="text-[0.73rem] text-[#8a5450]">Deletion mode is off.</span>
               <button
-                className="danger-button"
+                className={dangerButtonClass}
                 disabled={bulkDeleting || !isTauri}
                 onClick={() => void enableBulkMode()}
                 type="button"
@@ -1150,7 +1179,7 @@ export function DuplicateReview({
             </div>
           )}
           {bulkSudoActive && (
-            <label htmlFor="bulk-delete-confirmation">
+            <label className={deletionLabelClass} htmlFor="bulk-delete-confirmation">
               Type {bulkPhrase} to permanently delete the selected videos
               <input
                 autoComplete="off"
@@ -1164,13 +1193,13 @@ export function DuplicateReview({
             </label>
           )}
           {bulkError && (
-            <p className="duplicate-comparison__delete-error" role="alert">
+            <p className="font-[650] text-[#a4413b]" role="alert">
               {bulkError}
             </p>
           )}
-          <div className="duplicate-comparison__delete-actions">
+          <div className={deletionActionClass}>
             <button
-              className="secondary-action"
+              className={secondaryButtonClass}
               disabled={bulkDeleting}
               onClick={() => {
                 setBulkOpen(false);
@@ -1185,7 +1214,7 @@ export function DuplicateReview({
             </button>
             {bulkSudoActive && (
               <button
-                className="danger-button"
+                className={dangerButtonClass}
                 disabled={bulkDeleting || bulkConfirmation !== bulkPhrase}
                 onClick={() => void deleteSelected()}
                 type="button"
@@ -1200,7 +1229,7 @@ export function DuplicateReview({
       )}
       {filteredCandidates.length === 0 ? (
         <p
-          className="duplicate-review__empty duplicate-review__empty--state"
+          className="m-0 py-1 text-[0.78rem] text-[#65758b]"
           role="status"
         >
           No duplicate video titles match “{searchQuery}”.
@@ -1216,16 +1245,16 @@ export function DuplicateReview({
               candidate.decision?.replaceAll("_", " ") ?? "Unreviewed";
             return (
               <section
-                className="duplicate-group duplicate-group--rail"
+                className="grid gap-3 rounded-lg border border-[#e1e6ee] bg-white p-3.5"
                 data-duplicate-record
                 key={candidate.id}
                 aria-label={`Duplicate candidate: ${candidate.evidence}`}
                 role="listitem"
               >
-                <header className="duplicate-group__header">
-                  <div className="duplicate-group__summary">
+                <header className="flex flex-wrap items-start justify-between gap-2.5 max-sm:flex-col">
+                  <div className="grid gap-1">
                     <span
-                      className={`match-badge match-badge--${isExact ? "exact" : "possible"}`}
+                      className={`w-fit rounded-full px-2 py-1 text-[0.68rem] font-bold ${matchBadgeClasses[isExact ? "exact" : "possible"]}`}
                     >
                       {isExact
                         ? "Exact local match"
@@ -1233,12 +1262,12 @@ export function DuplicateReview({
                           ? "Uploaded-title candidate"
                           : "Review required"}
                     </span>
-                    <p>{candidate.evidence}</p>
+                    <p className="m-0 text-[0.74rem] leading-snug text-[#65758b]">{candidate.evidence}</p>
                   </div>
-                  <div className="duplicate-group__actions">
-                    <span className="duplicate-group__count">{decision}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[0.7rem] font-bold text-[#52617a]">{decision}</span>
                     <button
-                      className="secondary-action"
+                      className={secondaryButtonClass}
                       onClick={() => void onIgnore(candidate.id)}
                       type="button"
                     >
@@ -1260,23 +1289,23 @@ export function DuplicateReview({
                     selected={selectedVideoIds}
                   />
                 ) : (
-                  <div className="duplicate-group__items">
-                    <article className="duplicate-card duplicate-card--rail">
+                  <div>
+                    <article className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-[#e1e6ee] bg-[#fafbfc] p-3 max-sm:grid-cols-[auto_minmax(0,1fr)]">
                       <div
-                        className="duplicate-card__thumbnail"
+                        className="flex size-9 items-center justify-center rounded-full bg-[#edf3ff] text-lg text-[#2463df]"
                         aria-hidden="true"
                       >
                         <span>↔</span>
                       </div>
-                      <div className="duplicate-card__body">
-                        <span className="duplicate-card__source">
+                      <div className="min-w-0">
+                        <span className="text-[0.68rem] font-bold uppercase tracking-wide text-[#65758b]">
                           Managed local media comparison
                         </span>
-                        <h3>{candidate.leftTitle}</h3>
-                        <p>{candidate.rightTitle}</p>
+                        <h3 className="mt-1 overflow-wrap-anywhere text-[0.86rem] text-[#2d3f5d]">{candidate.leftTitle}</h3>
+                        <p className="m-0 overflow-wrap-anywhere text-[0.74rem] text-[#65758b]">{candidate.rightTitle}</p>
                       </div>
-                      <aside className="duplicate-card__actions">
-                        <span className="duplicate-card__review">
+                      <aside className="max-sm:col-span-2">
+                        <span className="text-[0.7rem] leading-snug text-[#65758b]">
                           Deletion requires a separate explicit confirmation.
                         </span>
                       </aside>
