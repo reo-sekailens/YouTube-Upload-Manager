@@ -1,6 +1,7 @@
 @layer theme, base, components, utilities;
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @source "./App.tsx";
 @source "./performance-interactions.tsx";
@@ -30,6 +31,11 @@
   --color-line: #dce1e8;
   --color-danger: #a4413b;
   --color-success: #28714e;
+  --color-control: #ffffff;
+  --color-control-hover: #f1f5f9;
+  --color-subtle-surface: #f8fafc;
+  --color-notice-surface: #eff6ff;
+  --color-notice-ink: #1e3a8a;
   --breakpoint-compact: 51.25rem;
 }
 
@@ -87,7 +93,7 @@
   cursor: pointer;
   border: 1px solid #cbd5e1;
   border-radius: .375rem;
-  background: #fff;
+  background: var(--color-control);
   padding: .625rem .75rem;
   color: #334155;
   font-size: .79rem;
@@ -95,7 +101,7 @@
   line-height: 1.25;
   transition: background .15s, border-color .15s;
 
-  &:hover { border-color: #94a3b8; background: #f1f5f9; }
+  &:hover { border-color: #94a3b8; background: var(--color-control-hover); }
   &:disabled { cursor: not-allowed; opacity: .5; }
 }
 
@@ -119,7 +125,7 @@
   margin-top: 1rem;
   border: 1px solid var(--color-line);
   border-radius: .75rem;
-  background: #fff;
+  background: var(--color-surface);
   padding: 1.25rem;
 }
 
@@ -152,9 +158,9 @@
   margin-top: 1rem;
   border: 1px solid #dbeafe;
   border-radius: .375rem;
-  background: #eff6ff;
+  background: var(--color-notice-surface);
   padding: .75rem .875rem;
-  color: #1e3a8a;
+  color: var(--color-notice-ink);
   font-size: .875rem;
   line-height: 1.625;
 }
@@ -189,7 +195,7 @@
   transform: translate(-50%, -50%);
   border: 1px solid #bfdbfe;
   border-radius: .75rem;
-  background: #fff;
+  background: var(--color-surface);
   padding: 1.25rem;
   box-shadow: 0 25px 50px rgb(15 23 42 / 25%);
 
@@ -208,7 +214,7 @@
   margin-block: 1.25rem;
   border: 1px dashed #cbd5e1;
   border-radius: .5rem;
-  background: #f8fafc;
+  background: var(--color-subtle-surface);
   padding: 1rem;
 
   @media (width < 40rem) {
@@ -235,12 +241,12 @@
   overflow-x: auto;
   border: 1px solid var(--color-line);
   border-radius: .75rem;
-  background: #fff;
+  background: var(--color-surface);
   padding: .75rem;
 
   @media (width < 51.25rem) {
     position: static;
-    display: flex;
+    overflow: visible;
   }
 }
 
@@ -262,7 +268,11 @@
   white-space: nowrap;
   transition: background .15s, color .15s;
 
-  &:hover { background: #f1f5f9; color: #1e293b; }
+  &:hover { background: var(--color-control-hover); color: var(--color-ink); }
+
+  @media (width < 51.25rem) {
+    width: 100%;
+  }
 }
 
 @utility ui-sidebar-tab-active {
@@ -358,7 +368,7 @@
   margin-top: 1rem;
   border: 1px solid var(--color-line);
   border-radius: .75rem;
-  background: #fff;
+  background: var(--color-surface);
   padding: 1.75rem;
   box-shadow: 0 12px 30px rgb(25 35 56 / 4.5%);
 
@@ -413,13 +423,30 @@
     text-rendering: optimizeLegibility;
   }
 
+  :root[data-theme="dark"] {
+    --color-ink: #e7edf8;
+    --color-muted: #aab7cc;
+    --color-surface: #172033;
+    --color-canvas: #0b1220;
+    --color-line: #34425a;
+    --color-danger: #db6d66;
+    --color-success: #56b982;
+    --color-control: #1d293d;
+    --color-control-hover: #293852;
+    --color-subtle-surface: #1d293d;
+    --color-notice-surface: #16294a;
+    --color-notice-ink: #d7e7ff;
+    color: var(--color-ink);
+    background: var(--color-canvas);
+  }
+
   * { box-sizing: border-box; }
 
   body {
     min-width: 320px;
     min-height: 100vh;
     margin: 0;
-    background: #f7f8fa;
+    background: var(--color-canvas);
   }
 
   button, input, select { font: inherit; }
@@ -429,4 +456,75 @@
     outline: 3px solid rgb(45 104 232 / 28%);
     outline-offset: 2px;
   }
+
+  :root[data-theme="dark"] input,
+  :root[data-theme="dark"] select,
+  :root[data-theme="dark"] textarea {
+    border-color: #52627c;
+    background: var(--color-control);
+    color: var(--color-ink);
+  }
+
+  :root[data-theme="dark"] ::placeholder { color: #aab7cc; opacity: 1; }
+
+  :root[data-theme="dark"] [class~="ui-warning"] {
+    border-color: #7c5c16 !important;
+    background: #33280e !important;
+    color: #f8d77a !important;
+  }
+
+  :root[data-theme="dark"] [class~="ui-sidebar-tab"] { color: #c7d2e6 !important; }
+  :root[data-theme="dark"] [class~="ui-sidebar-tab-active"] { background: #17396d !important; color: #d9e8ff !important; }
+  :root[data-theme="dark"] [class~="ui-sidebar-label"],
+  :root[data-theme="dark"] [class~="ui-modal-copy"],
+  :root[data-theme="dark"] [class~="ui-drop-description"],
+  :root[data-theme="dark"] [class~="ui-disclaimer"] { color: var(--color-muted) !important; }
+  :root[data-theme="dark"] [class~="ui-queue-count"] { background: #293852 !important; color: #d6e2f5 !important; }
+  :root[data-theme="dark"] [class~="ui-button-secondary"] {
+    border-color: #71829f !important;
+    background: var(--color-control) !important;
+    color: #e7edf8 !important;
+  }
+  :root[data-theme="dark"] [class~="ui-drop-description"],
+  :root[data-theme="dark"] [class~="ui-section-copy"],
+  :root[data-theme="dark"] [class~="ui-subtle"] { color: #c2cde0 !important; }
+
+  /* Lazy workspaces are already Tailwind utility-only, but their pre-theme
+   * light palette predates the shared tokens. This bridge keeps every mounted
+   * workspace legible while preserving those utilities and their lazy chunks. */
+  :root[data-theme="dark"] [class*="bg-[#f"],
+  :root[data-theme="dark"] [class*="bg-[#e"],
+  :root[data-theme="dark"] [class*="bg-[#d"] {
+    background-color: var(--color-surface) !important;
+  }
+
+  :root[data-theme="dark"] [class*="border-[#"] {
+    border-color: var(--color-line) !important;
+  }
+
+  :root[data-theme="dark"] [class*="text-[#"] {
+    color: var(--color-ink) !important;
+  }
+
+  :root[data-theme="dark"] [class~="bg-white"],
+  :root[data-theme="dark"] [class~="bg-blue-50"],
+  :root[data-theme="dark"] [class~="bg-emerald-50"],
+  :root[data-theme="dark"] [class~="bg-red-50"],
+  :root[data-theme="dark"] [class~="bg-slate-100"],
+  :root[data-theme="dark"] [class~="bg-stone-100"] {
+    background-color: var(--color-surface) !important;
+  }
+
+  :root[data-theme="dark"] [class~="text-blue-700"],
+  :root[data-theme="dark"] [class~="text-emerald-700"],
+  :root[data-theme="dark"] [class~="text-red-700"],
+  :root[data-theme="dark"] [class~="text-slate-600"],
+  :root[data-theme="dark"] [class~="text-stone-600"] {
+    color: var(--color-ink) !important;
+  }
+
+  :root[data-theme="dark"] [class~="bg-[#2463df]"] { background-color: #3678f6 !important; }
+  :root[data-theme="dark"] [class~="bg-[#a4413b]"],
+  :root[data-theme="dark"] [class~="bg-[#b94842]"],
+  :root[data-theme="dark"] [class~="bg-[#c95146]"] { background-color: #c9564f !important; }
 }

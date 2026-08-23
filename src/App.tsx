@@ -50,6 +50,7 @@ import type {
   DedupeActivityEntry,
   DedupeProgressPhase,
 } from "./lib/dedupe-activity";
+import { resolveTheme, type AppTheme } from "./lib/theme";
 
 const emptySnapshot: DashboardSnapshot = {
   revision: 0,
@@ -238,6 +239,16 @@ export default function App({
   /** Test/preview seam; production startup always begins with the safe shell. */
   initialStartup?: StartupBootstrap;
 } = {}) {
+  const [theme, setTheme] = useState<AppTheme>(() => {
+    try {
+      return resolveTheme(
+        window.localStorage.getItem("appearance-theme"),
+        window.matchMedia("(prefers-color-scheme: dark)").matches,
+      );
+    } catch {
+      return "light";
+    }
+  });
   const [startup, setStartup] = useState<StartupBootstrap | undefined>(
     initialStartup,
   );
@@ -284,6 +295,16 @@ export default function App({
   );
   const recoveryModeRef = useRef(false);
   recoveryModeRef.current = Boolean(crashRecovery?.crashDetected || !startupReady);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    try {
+      window.localStorage.setItem("appearance-theme", theme);
+    } catch {
+      // Appearance is a convenience preference; storage failures are harmless.
+    }
+  }, [theme]);
 
   const updateConnection = useCallback((settings: ConnectionSettings) => {
     setConnectionSettings(settings);
@@ -1076,6 +1097,16 @@ export default function App({
           </div>
         </div>
         <div className="flex flex-wrap justify-end gap-2">
+          <button
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} appearance`}
+            aria-pressed={theme === "dark"}
+            className={`${secondaryButtonClass} min-h-9`}
+            onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}
+            title={`Switch to ${theme === "dark" ? "light" : "dark"} appearance`}
+            type="button"
+          >
+            {theme === "dark" ? "Light mode" : "Dark mode"}
+          </button>
           <button
             aria-label="Refresh library"
             className={`${secondaryButtonClass} inline-flex size-9 items-center justify-center p-0`}
