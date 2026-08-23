@@ -654,6 +654,8 @@ struct FolderMonitorSettings {
 #[serde(rename_all = "camelCase")]
 struct FolderMonitorFileActivity {
     item_id: Option<String>,
+    video_id: Option<String>,
+    live_confirmed: bool,
     file_name: String,
     observation_state: String,
     size_bytes: u64,
@@ -1961,6 +1963,87 @@ fn persist_provider_success(
     transaction.commit().map_err(user_error)
 }
 
+/// A resumable-upload response only proves that Google accepted a terminal
+/// request. The returned ID is not a completion receipt until the authenticated
+/// channel can read that exact video resource back from YouTube.
+fn uploaded_video_matches(
+    response: &serde_json::Value,
+    expected_video_id: &str,
+    expected_channel_id: &str,
+    expected_visibility: &str,
+) -> bool {
+    response
+        .get("items")
+        .and_then(|value| value.as_array())
+        .is_some_and(|items| {
+            items.len() == 1
+                && items[0].get("id").and_then(|value| value.as_str()) == Some(expected_video_id)
+                && items[0]
+                    .pointer("/snippet/channelId")
+                    .and_then(|value| value.as_str())
+                    == Some(expected_channel_id)
+                && items[0]
+                    .pointer("/status/privacyStatus")
+                    .and_then(|value| value.as_str())
+                    == Some(expected_visibility)
+        })
+}
+
+fn verify_uploaded_video(
+    state: &AppState,
+    access_token: &str,
+    expected_video_id: &str,
+    expected_channel_id: &str,
+    expected_visibility: &str,
+) -> Result<(), String> {
+    let response = youtube_json(
+        state,
+        access_token,
+        "videos",
+        &[("part", "snippet,status"), ("id", expected_video_id)],
+    )?;
+    if uploaded_video_matches(
+        &response,
+        expected_video_id,
+        expected_channel_id,
+        expected_visibility,
+    ) {
+        Ok(())
+    } else {
+        Err("YouTube did not confirm the returned video ID on the approved channel; the source was retained for reconciliation.".into())
+    }
+}
+
+fn persist_unverified_provider_result(
+    state: &AppState,
+    item_id: &str,
+    expected_channel_id: &str,
+    total_bytes: u64,
+    video_id: &str,
+    detail: &str,
+) -> Result<(), String> {
+    let mut connection = database(state)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(user_error)?;
+    let changed = transaction
+        .execute(
+            "UPDATE upload_items SET status = 'needs_reconciliation', confirmed_bytes = ?1, video_id = ?2, detail = ?3, playlist_status = CASE WHEN playlist_id IS NOT NULL THEN 'pending' ELSE 'not_requested' END, source_delete_status = CASE WHEN delete_source_after_upload = 1 THEN 'waiting_for_youtube_processing' ELSE source_delete_status END, updated_at = ?4 WHERE id = ?5 AND channel_id = ?6 AND status = 'uploading'",
+            params![total_bytes as i64, video_id, detail, now(), item_id, expected_channel_id],
+        )
+        .map_err(user_error)?;
+    if changed != 1 {
+        return Err("The unverified provider result could not be bound to its immutable local upload claim.".into());
+    }
+    audit(
+        &transaction,
+        item_id,
+        "upload_provider_result_unverified",
+        "YouTube returned a video ID, but the authenticated video lookup did not confirm it; source cleanup and optional post-upload work remain blocked",
+    )?;
+    transaction.commit().map_err(user_error)
+}
+
 fn record_source_delete_outcome(
     connection: &Connection,
     item_id: &str,
@@ -2709,13 +2792,30 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<bool, String> {
                 .get("id")
                 .and_then(|value| value.as_str())
                 .ok_or_else(|| "YouTube completed the upload without a video ID.".to_string())?;
-            persist_provider_success(
+            let expected_channel_id = channel_id.as_deref().expect("upload channel was validated");
+            if let Err(error) = verify_uploaded_video(
                 state,
-                item_id,
-                channel_id.as_deref().expect("upload channel was validated"),
-                total_bytes,
+                &access_token,
                 video_id,
-            )?;
+                expected_channel_id,
+                visibility,
+            ) {
+                persist_unverified_provider_result(
+                    state,
+                    item_id,
+                    expected_channel_id,
+                    total_bytes,
+                    video_id,
+                    &error,
+                )?;
+                // The provider has already declared this session terminal.
+                // Retaining it would only cause a later recovery pass to
+                // rediscover the same ambiguous completion; it must never be
+                // used to start a fresh upload from this reconciliation state.
+                clear_upload_session(item_id)?;
+                return Ok(false);
+            }
+            persist_provider_success(state, item_id, expected_channel_id, total_bytes, video_id)?;
             return Ok(true);
         }
         if youtube_daily_upload_limit_response(response) {
@@ -3102,6 +3202,59 @@ fn folder_inventory_refresh_due(connection: &Connection, channel_id: &str) -> Re
         }))
 }
 
+/// A complete authenticated inventory read is also a repair boundary for old
+/// receipts created before post-upload video verification existed. A missing
+/// provider ID is never retried as a new upload; it becomes reconciliation and
+/// is kept out of source cleanup and optional post-upload work.
+fn reconcile_uploaded_items_from_live_inventory(
+    state: &AppState,
+    channel_id: &str,
+    confirmed_video_ids: &HashSet<String>,
+) -> Result<usize, String> {
+    let mut connection = database(state)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(user_error)?;
+    let missing = transaction
+        .prepare(
+            "SELECT id FROM upload_items WHERE channel_id = ?1 AND status = 'uploaded' AND video_id IS NOT NULL",
+        )
+        .map_err(user_error)?
+        .query_map([channel_id], |row| row.get::<_, String>(0))
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?
+        .into_iter()
+        .filter(|item_id| {
+            transaction
+                .query_row(
+                    "SELECT video_id FROM upload_items WHERE id = ?1",
+                    [item_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map(|video_id| !confirmed_video_ids.contains(&video_id))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    let timestamp = now();
+    for item_id in &missing {
+        transaction
+            .execute(
+                "UPDATE upload_items SET status = 'needs_reconciliation', detail = 'YouTube no longer confirms this completed upload ID on the approved channel; the source is retained and no new upload will start automatically.', source_delete_status = CASE WHEN delete_source_after_upload = 1 AND source_delete_status != 'deleted' THEN 'waiting_for_youtube_processing' ELSE source_delete_status END, updated_at = ?1 WHERE id = ?2 AND status = 'uploaded'",
+                params![&timestamp, item_id],
+            )
+            .map_err(user_error)?;
+        audit(
+            &transaction,
+            item_id,
+            "upload_live_verification_missing",
+            "A complete authenticated YouTube inventory did not contain this provider video ID; automatic retry and source cleanup were blocked",
+        )?;
+    }
+    transaction.commit().map_err(user_error)?;
+    Ok(missing.len())
+}
+
 fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
     let _guard = inventory_sync_lock()
         .lock()
@@ -3253,10 +3406,21 @@ fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
             |row| row.get::<_, i64>(0),
         )
         .map_err(user_error)? as usize;
+    let confirmed_video_ids = connection
+        .prepare(
+            "SELECT video_id FROM remote_video_sync_staging WHERE sync_id = ?1 AND channel_id = ?2",
+        )
+        .map_err(user_error)?
+        .query_map(params![&sync_id, channel_id], |row| row.get::<_, String>(0))
+        .map_err(user_error)?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(user_error)?;
     // Keep the last complete inventory until every remote page has been read.
     // A crash or network failure therefore leaves a usable, coherent snapshot.
     drop(connection);
     replace_inventory_from_staging(state, channel_id, &sync_id)?;
+    let repaired =
+        reconcile_uploaded_items_from_live_inventory(state, channel_id, &confirmed_video_ids)?;
     reconcile_source_cleanup_processing_from_inventory(state, channel_id, &processing_by_video_id)?;
     set_connection_detail(
         state,
@@ -3269,6 +3433,13 @@ fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
         "youtube_inventory_synced",
         "Channel upload inventory synced locally",
     )?;
+    if repaired > 0 {
+        audit_global(
+            &connection,
+            "youtube_upload_receipts_reconciled",
+            &format!("{repaired} completed upload receipt(s) were moved to reconciliation after YouTube did not confirm their video IDs"),
+        )?;
+    }
     drop(connection);
     let _ = ensure_upload_postprocess_worker(state.clone());
     Ok(count)
@@ -5813,26 +5984,28 @@ fn folder_monitor_overview(connection: &Connection) -> Result<FolderMonitorOverv
         });
     };
     let files = connection
-        .prepare("SELECT observations.file_path, uploads.id, observations.state, observations.size_bytes, observations.updated_at, uploads.title, uploads.status, uploads.confirmed_bytes, uploads.total_bytes, uploads.detail FROM folder_monitor_observations AS observations LEFT JOIN upload_items AS uploads ON uploads.id = observations.upload_item_id WHERE observations.channel_id = ?1 ORDER BY observations.updated_at DESC LIMIT 200")
+        .prepare("SELECT observations.file_path, uploads.id, uploads.video_id, EXISTS(SELECT 1 FROM remote_videos AS remote WHERE remote.video_id = uploads.video_id AND remote.channel_id = observations.channel_id AND remote.upload_status IN ('uploaded', 'processed')), observations.state, observations.size_bytes, observations.updated_at, uploads.title, uploads.status, uploads.confirmed_bytes, uploads.total_bytes, uploads.detail FROM folder_monitor_observations AS observations LEFT JOIN upload_items AS uploads ON uploads.id = observations.upload_item_id WHERE observations.channel_id = ?1 ORDER BY observations.updated_at DESC LIMIT 200")
         .map_err(user_error)?
         .query_map([channel_id], |row| {
             let file_path = row.get::<_, String>(0)?;
             Ok(FolderMonitorFileActivity {
                 item_id: row.get(1)?,
+                video_id: row.get(2)?,
+                live_confirmed: row.get::<_, i64>(3)? != 0,
                 file_name: Path::new(&file_path)
                     .file_name()
                     .and_then(|value| value.to_str())
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or("Unnamed file")
                     .to_string(),
-                observation_state: row.get(2)?,
-                size_bytes: row.get::<_, i64>(3)? as u64,
-                updated_at: row.get(4)?,
-                upload_title: row.get(5)?,
-                upload_status: row.get(6)?,
-                confirmed_bytes: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
-                total_bytes: row.get::<_, Option<i64>>(8)?.map(|value| value as u64),
-                detail: row.get(9)?,
+                observation_state: row.get(4)?,
+                size_bytes: row.get::<_, i64>(5)? as u64,
+                updated_at: row.get(6)?,
+                upload_title: row.get(7)?,
+                upload_status: row.get(8)?,
+                confirmed_bytes: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
+                total_bytes: row.get::<_, Option<i64>>(10)?.map(|value| value as u64),
+                detail: row.get(11)?,
             })
         })
         .map_err(user_error)?
@@ -8774,6 +8947,15 @@ fn request_video_deletion(
             "Sync the active channel library and choose a current video before requesting deletion."
                 .to_string()
         })?;
+    create_deletion_request(&connection, &channel_id, &video_id, &title)
+}
+
+fn create_deletion_request(
+    connection: &Connection,
+    channel_id: &str,
+    video_id: &str,
+    title: &str,
+) -> Result<DeletionRequest, String> {
     let id = Uuid::new_v4().to_string();
     let detail =
         "Deletion requested locally. A separately re-authorized execution step is required.";
@@ -8791,10 +8973,83 @@ fn request_video_deletion(
     connection
         .query_row(
             "SELECT id, video_id, title, status, detail, updated_at FROM deletion_requests WHERE video_id = ?1 AND channel_id = ?2",
-            params![&video_id, &channel_id],
+            params![video_id, channel_id],
             row_to_deletion_request,
         )
         .map_err(user_error)
+}
+
+/// Permanently removes one watched local source, never its YouTube video. The
+/// item must still be an uploaded, active-channel folder observation whose
+/// recorded YouTube ID is present in the authenticated inventory.
+fn delete_folder_monitor_uploaded_source_impl(
+    state: &AppState,
+    item_id: &str,
+    confirmation: &str,
+) -> Result<(), String> {
+    let connection = database(state)?;
+    let channel_id = connection_settings(&connection)?
+        .active_channel_id
+        .ok_or_else(|| {
+            "Connect the active YouTube channel before deleting a local watched file.".to_string()
+        })?;
+    let watched_path: String = connection
+        .query_row(
+            "SELECT observations.file_path FROM folder_monitor_observations AS observations JOIN upload_items AS uploads ON uploads.id = observations.upload_item_id JOIN remote_videos AS remote ON remote.video_id = uploads.video_id AND remote.channel_id = observations.channel_id WHERE observations.upload_item_id = ?1 AND observations.channel_id = ?2 AND uploads.channel_id = ?2 AND uploads.source_path = observations.file_path AND uploads.status = 'uploaded' AND remote.upload_status IN ('uploaded', 'processed')",
+            params![item_id, &channel_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "This watched file is no longer an uploaded, live-confirmed source on the active YouTube channel. Refresh the folder monitor before deleting it.".to_string())?;
+    let file_name = Path::new(&watched_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "The watched local file has an unsupported name.".to_string())?;
+    if confirmation.trim() != file_name {
+        return Err("Type the exact local filename before deleting it.".into());
+    }
+    connection
+        .execute(
+            "UPDATE upload_items SET source_delete_status = 'processing_verified', updated_at = ?1 WHERE id = ?2 AND channel_id = ?3 AND status = 'uploaded'",
+            params![now(), item_id, &channel_id],
+        )
+        .map_err(user_error)?;
+    audit(
+        &connection,
+        item_id,
+        "folder_monitor_local_source_delete_requested",
+        "Operator confirmed deletion of a live-confirmed watched local source; the YouTube video was retained.",
+    )?;
+    drop(connection);
+    finalize_confirmed_source_cleanup(state, item_id)?;
+    let connection = database(state)?;
+    let outcome: Option<String> = connection
+        .query_row(
+            "SELECT source_delete_status FROM upload_items WHERE id = ?1 AND channel_id = ?2",
+            params![item_id, &channel_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(user_error)?;
+    if outcome.as_deref() == Some("deleted") {
+        Ok(())
+    } else {
+        Err("The local watched file was retained because its safety checks did not pass.".into())
+    }
+}
+
+#[tauri::command]
+async fn delete_folder_monitor_uploaded_source(
+    state: State<'_, AppState>,
+    item_id: String,
+    confirmation: String,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_folder_monitor_uploaded_source_impl(&state, &item_id, &confirmation)
+    })
+    .await
+    .map_err(|_| "Local watched-file deletion stopped unexpectedly.".to_string())?
 }
 
 #[tauri::command]
@@ -9889,6 +10144,7 @@ pub fn run() {
                     rename_remote_videos,
                     list_deletion_requests,
                     request_video_deletion,
+                    delete_folder_monitor_uploaded_source,
                     cancel_deletion_request,
                     clear_deletion_requests,
                     begin_deletion_authorization,
@@ -12324,6 +12580,18 @@ mod tests {
             params![root.join("private-source").join("clip.mp4").to_string_lossy(), now()],
         ).unwrap();
         connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, workspace_path, size_bytes, status, video_id, confirmed_bytes, total_bytes, created_at, updated_at) VALUES ('live-folder-item', 'Live clip', 'live.mp4', 'Channel A', 'channel-a', 'managed.media', 64, 'uploaded', 'live-video', 64, 64, ?1, ?1)",
+            [now()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO folder_monitor_observations (channel_id, channel_name, file_path, size_bytes, modified_key, state, upload_item_id, first_seen_at, updated_at) VALUES ('channel-a', 'Channel A', ?1, 64, 'stable', 'uploaded', 'live-folder-item', ?2, ?2)",
+            params![root.join("private-source").join("live.mp4").to_string_lossy(), now()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO remote_videos (video_id, channel_name, channel_id, title, upload_status, updated_at) VALUES ('live-video', 'Channel A', 'channel-a', 'Live clip', 'uploaded', ?1)",
+            [now()],
+        ).unwrap();
+        connection.execute(
             "INSERT INTO folder_monitor_observations (channel_id, channel_name, file_path, size_bytes, modified_key, state, first_seen_at, updated_at) VALUES ('channel-b', 'Channel B', 'other.mp4', 16, 'stable', 'queued', ?1, ?1)",
             [now()],
         ).unwrap();
@@ -12334,16 +12602,81 @@ mod tests {
 
         let overview = folder_monitor_overview(&connection).unwrap();
         let rendered = serde_json::to_string(&overview).unwrap();
-        assert_eq!(overview.files.len(), 1);
-        assert_eq!(overview.files[0].item_id.as_deref(), Some("folder-item"));
-        assert_eq!(overview.files[0].file_name, "clip.mp4");
-        assert_eq!(
-            overview.files[0].upload_status.as_deref(),
-            Some("uploading")
-        );
+        assert_eq!(overview.files.len(), 2);
+        let uploading = overview
+            .files
+            .iter()
+            .find(|file| file.item_id.as_deref() == Some("folder-item"))
+            .unwrap();
+        assert_eq!(uploading.file_name, "clip.mp4");
+        assert_eq!(uploading.upload_status.as_deref(), Some("uploading"));
+        assert!(!uploading.live_confirmed);
+        let live = overview
+            .files
+            .iter()
+            .find(|file| file.item_id.as_deref() == Some("live-folder-item"))
+            .unwrap();
+        assert_eq!(live.video_id.as_deref(), Some("live-video"));
+        assert!(live.live_confirmed);
         assert_eq!(overview.logs.len(), 1);
         assert!(!rendered.contains("private-source\\\\clip.mp4"));
         assert!(!rendered.contains("other.mp4"));
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_monitor_local_deletion_requires_a_live_confirmed_uploaded_watched_item() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let watched_source = root.join("watched.mp4");
+        let watched_contents = b"watched local source";
+        fs::write(&watched_source, watched_contents).unwrap();
+        let watched_digest = blake3::hash(watched_contents).to_hex().to_string();
+        let connection = database(&state).unwrap();
+        let timestamp = now();
+        connection.execute(
+            "INSERT INTO connection_settings (singleton, active_channel, active_channel_id, connection_detail, updated_at) VALUES (1, 'Channel A', 'channel-a', 'Connected', ?1)",
+            [&timestamp],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, source_path, workspace_path, size_bytes, digest, status, video_id, confirmed_bytes, total_bytes, created_at, updated_at) VALUES ('watched-live', 'Watched live', 'watched.mp4', 'Channel A', 'channel-a', ?1, 'managed.media', ?2, ?3, 'uploaded', 'live-video', ?2, ?2, ?4, ?4)",
+            params![watched_source.to_string_lossy(), watched_contents.len() as i64, watched_digest, timestamp],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO folder_monitor_observations (channel_id, channel_name, file_path, size_bytes, modified_key, state, upload_item_id, first_seen_at, updated_at) VALUES ('channel-a', 'Channel A', ?1, ?2, 'stable', 'uploaded', 'watched-live', ?3, ?3)",
+            params![watched_source.to_string_lossy(), watched_contents.len() as i64, timestamp],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO remote_videos (video_id, channel_name, channel_id, title, upload_status, updated_at) VALUES ('live-video', 'Channel A', 'channel-a', 'Watched live', 'uploaded', ?1)",
+            [&timestamp],
+        ).unwrap();
+        drop(connection);
+
+        assert!(
+            delete_folder_monitor_uploaded_source_impl(&state, "watched-live", "wrong.mp4")
+                .is_err()
+        );
+        assert!(watched_source.exists());
+        delete_folder_monitor_uploaded_source_impl(&state, "watched-live", "watched.mp4").unwrap();
+        assert!(!watched_source.exists());
+        let connection = database(&state).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT source_delete_status FROM upload_items WHERE id = 'watched-live'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "deleted"
+        );
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
@@ -13563,6 +13896,146 @@ mod tests {
             after_failure,
             ("uploaded".into(), "video-a".into(), "failed".into())
         );
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uploaded_video_lookup_requires_the_exact_channel_and_visibility() {
+        let matching = serde_json::json!({
+            "items": [{
+                "id": "video-a",
+                "snippet": { "channelId": "channel-a" },
+                "status": { "privacyStatus": "unlisted" }
+            }]
+        });
+        assert!(uploaded_video_matches(
+            &matching,
+            "video-a",
+            "channel-a",
+            "unlisted"
+        ));
+        assert!(!uploaded_video_matches(
+            &matching,
+            "video-a",
+            "channel-b",
+            "unlisted"
+        ));
+        assert!(!uploaded_video_matches(
+            &matching,
+            "video-a",
+            "channel-a",
+            "private"
+        ));
+        assert!(!uploaded_video_matches(
+            &serde_json::json!({ "items": [] }),
+            "video-a",
+            "channel-a",
+            "unlisted"
+        ));
+    }
+
+    #[test]
+    fn missing_live_video_receipt_enters_reconciliation_without_cleanup() {
+        let root = std::env::temp_dir().join(format!(
+            "youtube-uploader-live-verification-{}",
+            Uuid::new_v4()
+        ));
+        let media = root.join("media");
+        fs::create_dir_all(&media).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: media,
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let connection = database(&state).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items(id, title, file_name, channel_id, workspace_path, size_bytes, status, confirmed_bytes, total_bytes, delete_source_after_upload, source_delete_status, created_at, updated_at) VALUES('unverified', 'Unverified', 'fixture.mp4', 'channel-a', 'fixture.mp4', 10, 'uploading', 0, 10, 1, NULL, ?1, ?1)",
+            [now()],
+        ).unwrap();
+        drop(connection);
+
+        persist_unverified_provider_result(
+            &state,
+            "unverified",
+            "channel-a",
+            10,
+            "missing-video",
+            "YouTube did not confirm the returned video ID on the approved channel; the source was retained for reconciliation.",
+        ).unwrap();
+
+        let connection = database(&state).unwrap();
+        let receipt: (String, String, String) = connection.query_row(
+            "SELECT status, video_id, source_delete_status FROM upload_items WHERE id = 'unverified'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(
+            receipt,
+            (
+                "needs_reconciliation".into(),
+                "missing-video".into(),
+                "waiting_for_youtube_processing".into(),
+            )
+        );
+        assert_eq!(connection.query_row(
+            "SELECT COUNT(*) FROM audit_events WHERE item_id = 'unverified' AND kind = 'upload_provider_result_unverified'",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn complete_live_inventory_repairs_a_missing_completed_receipt() {
+        let root =
+            std::env::temp_dir().join(format!("youtube-uploader-live-repair-{}", Uuid::new_v4()));
+        let media = root.join("media");
+        fs::create_dir_all(&media).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: media,
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let connection = database(&state).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items(id, title, file_name, channel_id, workspace_path, size_bytes, status, total_bytes, video_id, delete_source_after_upload, source_delete_status, created_at, updated_at) VALUES('missing-live', 'Missing', 'fixture.mp4', 'channel-a', 'fixture.mp4', 10, 'uploaded', 10, 'missing-id', 1, 'pending', ?1, ?1)",
+            [now()],
+        ).unwrap();
+        drop(connection);
+
+        assert_eq!(
+            reconcile_uploaded_items_from_live_inventory(
+                &state,
+                "channel-a",
+                &HashSet::from(["another-id".to_string()]),
+            )
+            .unwrap(),
+            1
+        );
+        let connection = database(&state).unwrap();
+        let receipt: (String, String) = connection
+            .query_row(
+                "SELECT status, source_delete_status FROM upload_items WHERE id = 'missing-live'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            receipt,
+            (
+                "needs_reconciliation".into(),
+                "waiting_for_youtube_processing".into(),
+            )
+        );
+        assert_eq!(connection.query_row(
+            "SELECT COUNT(*) FROM audit_events WHERE item_id = 'missing-live' AND kind = 'upload_live_verification_missing'",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }

@@ -8,6 +8,7 @@ import {
   listYouTubePlaylists,
   loadFolderMonitorOverview,
   requeueCancelledFolderMonitorFiles,
+  deleteFolderMonitorUploadedSource,
   scanFolderMonitorNow,
 } from "../lib/local";
 import type {
@@ -97,6 +98,9 @@ export function FolderMonitorPanel({
     "",
   );
   const [creatingPlaylist, setCreatingPlaylist] = useState(false);
+  const [deletionQueue, setDeletionQueue] = useState<FolderMonitorFileActivity[]>([]);
+  const [deletionConfirmation, setDeletionConfirmation] = useState("");
+  const [deletionSubmitting, setDeletionSubmitting] = useState(false);
   const invalidationTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -284,7 +288,54 @@ export function FolderMonitorPanel({
       ),
     [files],
   );
+  const uploadedFiles = useMemo(
+    () =>
+      files.filter(
+        (file) =>
+          file.itemId &&
+          file.videoId &&
+          file.liveConfirmed &&
+          file.uploadStatus === "uploaded",
+      ),
+    [files],
+  );
   const recentFiles = useMemo(() => files.slice(0, 24), [files]);
+
+  const openDeletionReview = (selected: FolderMonitorFileActivity[]) => {
+    if (!isTauri || busy || deletionSubmitting || selected.length === 0) return;
+    setDeletionQueue(selected);
+    setDeletionConfirmation("");
+  };
+
+  const deleteLocalSource = async () => {
+    const target = deletionQueue[0];
+    if (!isTauri || !target?.itemId || deletionSubmitting)
+      return;
+    setDeletionSubmitting(true);
+    try {
+      await deleteFolderMonitorUploadedSource(target.itemId, deletionConfirmation);
+      const remaining = deletionQueue.slice(1);
+      setDeletionQueue(remaining);
+      setDeletionConfirmation("");
+      const refreshed = await loadFolderMonitorOverview();
+      setSettings(refreshed.settings);
+      setFiles(refreshed.files);
+      setLogs(refreshed.logs);
+      onNotice(
+        remaining.length > 0
+          ? `Deleted the local source for “${target.fileName}”. Confirm the next local watched file.`
+          : "Local source deletion completed. The YouTube video and managed app copy were retained.",
+      );
+    } catch (error) {
+      onNotice(
+        error instanceof Error
+          ? error.message
+          : "The local watched file could not be deleted.",
+      );
+    } finally {
+      setDeletionSubmitting(false);
+    }
+  };
 
   const requeueCancelled = async (itemIds: string[]) => {
     if (!isTauri || busy || itemIds.length === 0) return;
@@ -513,6 +564,56 @@ export function FolderMonitorPanel({
                         >
                           Queue again
                         </button>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </details>
+            <details className="mt-3 border-t border-[#dfe7f2] pt-2">
+              <summary className="cursor-pointer text-[0.72rem] font-bold text-[#355776]">Uploaded to YouTube ({uploadedFiles.length})</summary>
+              <p className="my-2 text-[0.68rem] leading-snug text-[#68788e]">Only watched files whose completed upload still appears in the authenticated active-channel YouTube inventory are shown. Delete removes the local watched source only; the YouTube video and managed app copy are retained.</p>
+              {uploadedFiles.length === 0 ? (
+                <p className="mt-2 mb-0 text-[0.7rem] leading-snug text-[#75849a]">No watched-folder uploads are currently confirmed by YouTube.</p>
+              ) : (
+                <>
+                  <button
+                    className="rounded-md border border-[#e5c2c0] bg-white px-3 py-2 text-[0.79rem] font-[680] text-[#a4413b] transition-colors hover:border-[#d89d98] hover:bg-[#fff5f4] disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={busy || deletionSubmitting}
+                    onClick={() => openDeletionReview(uploadedFiles)}
+                    type="button"
+                  >
+                    Delete all local files ({uploadedFiles.length})…
+                  </button>
+                  {deletionQueue[0] && (
+                    <div className="mt-2 rounded-md border border-[#e5c2c0] bg-[#fff8f7] p-2.5" role="dialog" aria-label="Confirm local watched file deletion">
+                      <strong className="block text-[0.72rem] text-[#8f3731]">Delete local file {uploadedFiles.length - deletionQueue.length + 1} of {uploadedFiles.length}</strong>
+                      <p className="mt-1 mb-2 text-[0.68rem] leading-snug text-[#7b514d]">Type <code className="rounded bg-white px-1 py-0.5 text-[#8f3731]">{deletionQueue[0].fileName}</code> to permanently delete that local watched file. The YouTube video is not deleted.</p>
+                      <div className="flex flex-wrap gap-2">
+                        <input
+                          aria-label="Exact local filename"
+                          className="min-w-[13rem] flex-1 rounded-md border border-[#d9b8b4] bg-white px-2.5 py-2 text-[0.74rem] text-[#503532]"
+                          disabled={deletionSubmitting}
+                          onChange={(event) => setDeletionConfirmation(event.target.value)}
+                          placeholder="Exact local filename"
+                          value={deletionConfirmation}
+                        />
+                        <button className="rounded-md border border-[#cbd3df] bg-white px-3 py-2 text-[0.74rem] font-[680] text-[#34405a] disabled:cursor-not-allowed disabled:opacity-50" disabled={deletionSubmitting} onClick={() => { setDeletionQueue([]); setDeletionConfirmation(""); }} type="button">Cancel</button>
+                        <button className="rounded-md border border-[#b94842] bg-[#b94842] px-3 py-2 text-[0.74rem] font-[680] text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={deletionSubmitting || deletionConfirmation.trim() !== deletionQueue[0].fileName} onClick={() => void deleteLocalSource()} type="button">{deletionSubmitting ? "Deleting…" : "Delete local file"}</button>
+                      </div>
+                    </div>
+                  )}
+                  <ul className="mt-2 grid max-h-56 list-none gap-1.5 overflow-auto p-0">
+                    {uploadedFiles.map((file) => (
+                      <li className="flex items-center justify-between gap-2 border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={`${file.itemId}-${file.videoId}`}>
+                        <div className="min-w-0">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <strong className="min-w-0 truncate text-[0.72rem] text-[#2f4262]" title={file.fileName}>{file.uploadTitle ?? file.fileName}</strong>
+                            <span className="text-[0.66rem] font-bold text-[#26714e]">YouTube confirmed</span>
+                          </div>
+                          <p className="mt-1 mb-0 text-[0.66rem] leading-snug text-[#68788e]">{file.fileName} · video ID {file.videoId}</p>
+                        </div>
+                        <button className="shrink-0 rounded-md border border-[#e5c2c0] bg-white px-3 py-2 text-[0.79rem] font-[680] text-[#a4413b] disabled:cursor-not-allowed disabled:opacity-50" disabled={busy || deletionSubmitting} onClick={() => openDeletionReview([file])} type="button">Delete local file…</button>
                       </li>
                     ))}
                   </ul>

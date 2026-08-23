@@ -345,6 +345,17 @@ describe("manual upload source cleanup command", () => {
       confirmation: "original.mp4",
     });
   });
+
+  it("targets only a confirmed watched local source for folder-monitor cleanup", async () => {
+    const { deleteFolderMonitorUploadedSource } = await import("./local");
+
+    await deleteFolderMonitorUploadedSource("watched-item", "camera.mp4");
+
+    expect(invoke).toHaveBeenCalledWith("delete_folder_monitor_uploaded_source", {
+      itemId: "watched-item",
+      confirmation: "camera.mp4",
+    });
+  });
 });
 
 describe("manual upload intake settings", () => {

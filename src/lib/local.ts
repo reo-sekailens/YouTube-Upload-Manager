@@ -544,6 +544,17 @@ export async function requestVideoDeletion(
   });
 }
 
+/** Permanently removes one exact local watched source after YouTube confirmation. */
+export async function deleteFolderMonitorUploadedSource(
+  itemId: string,
+  confirmation: string,
+): Promise<void> {
+  return invoke("delete_folder_monitor_uploaded_source", {
+    itemId,
+    confirmation,
+  });
+}
+
 export async function cancelDeletionRequest(id: string): Promise<void> {
   return invoke<void>("cancel_deletion_request", { id });
 }
