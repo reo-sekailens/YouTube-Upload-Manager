@@ -110,6 +110,7 @@ controllers, bridge types, and recovery tests.
 
 ## Follow-ups
 
-- TASK112 owns final interrupted-profile, standard unsigned-production,
-  signed-production, and live-provider certification. The instrumented unsigned
-  package closes the settled-idle counter slice only.
+- TASK112's empty and interrupted instrumented packages both recorded zero in
+  all six settled-idle dimensions across 160 launches each. The standard
+  unsigned desktop smoke also passed. Signed-production and live-provider
+  certification remain unavailable external boundaries.

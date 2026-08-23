@@ -115,6 +115,7 @@ post-processing persistence, local mock provider, and concurrency tests.
 
 ## Follow-ups
 
-- TASK112 owns standard/signed packaged transfer measurements and an explicitly approved
-  non-production Google/YouTube canary. The local benchmark does not establish
-  internet, provider-processing, quota, or production-channel throughput.
+- TASK112 verifies the final ordinary unsigned package and preserves signed and
+  explicitly approved non-production Google/YouTube canaries as unavailable
+  external boundaries. The local benchmark does not establish internet,
+  provider-processing, quota, or production-channel throughput.

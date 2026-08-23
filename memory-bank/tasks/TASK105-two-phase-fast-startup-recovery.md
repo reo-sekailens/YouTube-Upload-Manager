@@ -69,6 +69,9 @@ fixtures prove parity.
   shell receipt before allowing deferred startup completion. Across 80 cold and
   80 warm runs, safe-shell paint was 2,970/3,286 ms cold and 158/406 ms warm
   (p50/p95); native readiness was 1,865/2,321 ms and 503/743 ms; first Batch
-  paint was 4,103/4,378 ms and 967/1,198 ms. The final interrupted packaged
-  comparison remains TASK112 evidence. Signed production and live-provider
-  behavior are not inferred.
+  paint was 4,103/4,378 ms and 967/1,198 ms.
+- The authoritative interrupted 256 GB package recorded all 160 safe-shell
+  receipts. Cold safe-shell p50/p95 changed -2.39%/+4.96% and first-Batch
+  p50/p95 changed +6.51%/+7.97% versus empty, passing the 10% materiality gate
+  with zero media bytes. Signed production and live-provider behavior are not
+  inferred.

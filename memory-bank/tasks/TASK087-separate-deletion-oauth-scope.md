@@ -21,5 +21,7 @@ consent and authorize it only through the dedicated deletion flow.
   deletion scope retains it and a focused regression test passes.
 - Deletion authorization now stores and refreshes a distinct OS-protected
   credential, requires the already connected immutable channel, and clears on
-  explicit disable, disconnect, new ordinary connection, or expiry.
-- Focused scope-separation and expiry-removal regressions pass.
+  disconnect or a new ordinary connection. Ending or expiring the local
+  15-minute mode retains that protected credential, so re-entry does not
+  require another Google consent screen.
+- Focused scope-separation and expiry-session regressions pass.

@@ -212,6 +212,8 @@ export type FolderMonitorSettings = {
 
 /** Safe, folder-scoped activity projection. Source paths never enter the webview. */
 export type FolderMonitorFileActivity = {
+  /** Opaque local identifier used only to requeue this already-authorized job. */
+  itemId?: string;
   fileName: string;
   observationState: string;
   sizeBytes: number;
@@ -301,6 +303,13 @@ export type RemoteVideo = {
   /** YouTube processing state; only `processed` videos are dedupe evidence. */
   uploadStatus?: string;
   updatedAt: string;
+};
+
+/** A review-bound title change. The native layer rechecks both channel ownership and the previous title before updating YouTube. */
+export type VideoTitleRename = {
+  videoId: string;
+  previousTitle: string;
+  title: string;
 };
 
 /** A local, auditable deletion workflow record. A request is not a deletion result. */

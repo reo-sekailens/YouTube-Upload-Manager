@@ -203,6 +203,27 @@
   font-size: 0.72rem;
   font-weight: 720;
 }
+.folder-monitor__cancelled-copy {
+  color: #68788e;
+  font-size: 0.68rem;
+  line-height: 1.4;
+  margin: 0.48rem 0;
+}
+.folder-monitor__cancelled-files > .secondary-action {
+  margin-top: 0.08rem;
+}
+.folder-monitor__cancelled-item {
+  align-items: center;
+  display: flex;
+  gap: 0.6rem;
+  justify-content: space-between;
+}
+.folder-monitor__cancelled-item > div {
+  min-width: 0;
+}
+.folder-monitor__cancelled-item .secondary-action {
+  flex: 0 0 auto;
+}
 .folder-monitor__log-list li {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -319,4 +340,3 @@
     gap: 0.25rem;
   }
 }
-

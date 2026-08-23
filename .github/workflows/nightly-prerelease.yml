@@ -16,10 +16,11 @@ concurrency:
 
 jobs:
   prepare_nightly:
-    name: Allocate nightly release letter
+    name: Allocate nightly release number
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.release.outputs.tag }}
+      title: ${{ steps.release.outputs.title }}
     steps:
       - uses: actions/checkout@v5
       - id: release
@@ -29,7 +30,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          alphabet=abcdefghijklmnopqrstuvwxyz
           app_version="$(awk -F '"' '/^\[package\]/{in_package=1; next} in_package && /^version = / {print $2; exit}' src-tauri/Cargo.toml)"
           test -n "$app_version"
           prefix="v${app_version}-nightly."
@@ -38,26 +38,28 @@ jobs:
           while IFS= read -r tag; do
             [[ "$tag" == "$prefix"* ]] || continue
             suffix="${tag#"$prefix"}"
-            [[ "$suffix" =~ ^[a-z]+$ ]] || continue
-            value=0
-            for ((position = 0; position < ${#suffix}; position += 1)); do
-              character="${suffix:position:1}"
-              printf -v code '%d' "'$character"
-              value=$((value * 26 + code - 96))
-            done
+            if [[ "$suffix" =~ ^[1-9][0-9]*$ ]]; then
+              value=$((10#$suffix))
+            # Migrate older letter-based nightlies (a=1, z=26, aa=27)
+            # without reusing a previously published build number.
+            elif [[ "$suffix" =~ ^[a-z]+$ ]]; then
+              value=0
+              for ((position = 0; position < ${#suffix}; position += 1)); do
+                character="${suffix:position:1}"
+                printf -v code '%d' "'$character"
+                value=$((value * 26 + code - 96))
+              done
+            else
+              continue
+            fi
             if ((value > highest)); then
               highest=$value
             fi
           done <<< "$tags"
 
-          next=$((highest + 1))
-          suffix=""
-          while ((next > 0)); do
-            next=$((next - 1))
-            suffix="${alphabet:next % 26:1}$suffix"
-            next=$((next / 26))
-          done
-          echo "tag=${prefix}${suffix}" >> "$GITHUB_OUTPUT"
+          build_number=$((highest + 1))
+          echo "tag=${prefix}${build_number}" >> "$GITHUB_OUTPUT"
+          echo "title=YouTube Upload Manager v${app_version} — Nightly #${build_number}" >> "$GITHUB_OUTPUT"
 
   build:
     name: ${{ matrix.name }}
@@ -220,6 +222,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
           TAG: ${{ needs.prepare_nightly.outputs.tag }}
+          TITLE: ${{ needs.prepare_nightly.outputs.title }}
         run: |
           set -euo pipefail
           declare -a assets=()
@@ -280,29 +283,63 @@ jobs:
           done < <(find release-assets -type f -print0)
           test "${#assets[@]}" -gt 0
 
+          download_link() {
+            local wanted="$1"
+            local spec asset label
+            for spec in "${assets[@]}"; do
+              asset="${spec%%#*}"
+              label="${spec#*#}"
+              if [[ "$label" == "$wanted" ]]; then
+                printf '[%s](https://github.com/%s/releases/download/%s/%s)' \
+                  "$label" "$GH_REPO" "$TAG" "$(basename "$asset")"
+                return 0
+              fi
+            done
+            printf '%s (not available in this nightly)' "$wanted"
+          }
+
+          commit_message="$(gh api "repos/$GH_REPO/commits/$SHA" --jq '.commit.message')"
+          commit_title="$(printf '%s\n' "$commit_message" | head -n 1)"
+          commit_description="$(printf '%s\n' "$commit_message" | tail -n +2 | sed '/./,$!d')"
+          short_sha="${SHA:0:12}"
           notes_file="$(mktemp)"
           cat > "$notes_file" <<EOF
+          ## Build source
+
+          - **Commit:** [\`${short_sha}\`](https://github.com/${GH_REPO}/commit/${SHA})
+          - **Title:** ${commit_title}
+
+          EOF
+          if [[ -n "$commit_description" ]]; then
+            cat >> "$notes_file" <<EOF
+          **Description**
+
+          ${commit_description}
+
+          EOF
+          fi
+          cat >> "$notes_file" <<EOF
           ## Which download should I use?
 
           ### Windows
 
-          - **Windows x64 installer (recommended):** Run this on a normal 64-bit Windows PC to install the app and add standard Start-menu integration.
-          - **Windows x64 portable ZIP:** Extract it anywhere you can write, then run **YouTube-Upload-Manager.exe**. No installer or administrator access is required. Windows WebView2 is still required.
+          - **$(download_link 'Windows x64 installer (recommended)'):** Run this on a normal 64-bit Windows PC to install the app and add standard Start-menu integration.
+          - **$(download_link 'Windows x64 portable ZIP (extract and run)'):** Extract it anywhere you can write, then run **YouTube-Upload-Manager.exe**. No installer or administrator access is required. Windows WebView2 is still required.
 
           ### Linux
 
-          - **Linux x64 portable AppImage:** Mark it executable, then run it directly. Use this when you do not want to install a package.
-          - **Linux x64 Debian package:** Use this on Debian, Ubuntu, or a compatible distribution when you prefer package-manager installation.
+          - **$(download_link 'Linux x64 portable AppImage (run directly)'):** Mark it executable, then run it directly. Use this when you do not want to install a package.
+          - **$(download_link 'Linux x64 Debian package (install with your package manager)'):** Use this on Debian, Ubuntu, or a compatible distribution when you prefer package-manager installation.
 
           ### macOS
 
           - Choose **Apple Silicon** for M-series Macs (M1, M2, M3, M4) and **Intel** only for older Intel Macs.
-          - **Disk image:** Open it and install the app normally.
-          - **Portable app ZIP:** Extract it, then open the contained `.app` bundle without an installer.
+          - **$(download_link 'macOS Apple Silicon disk image (install)')** or **$(download_link 'macOS Intel disk image (install)'):** Open it and install the app normally.
+          - **$(download_link 'macOS Apple Silicon portable app ZIP (extract and open)')** or **$(download_link 'macOS Intel portable app ZIP (extract and open)'):** Extract it, then open the contained `.app` bundle without an installer.
 
           ### Android
 
-          - **Android universal debug APK:** Install it directly on an Android device. It is a debug build, not a Play Store release.
+          - **$(download_link 'Android universal debug APK (install on Android)'):** Install it directly on an Android device. It is a debug build, not a Play Store release.
 
           ## Important
 
@@ -314,7 +351,7 @@ jobs:
           EOF
           gh release create "$TAG" "${assets[@]}" \
             --target "$SHA" \
-            --title "Nightly build ${TAG#*-nightly.}" \
+            --title "$TITLE" \
             --notes-file "$notes_file" \
             --prerelease
 

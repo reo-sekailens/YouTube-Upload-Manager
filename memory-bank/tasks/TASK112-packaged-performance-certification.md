@@ -2,7 +2,7 @@
 
 ## Status
 
-in_progress
+completed
 
 ## Objective
 
@@ -113,10 +113,21 @@ for each actually exercised platform.
 - The package was `NotSigned` and used the compile-time isolated performance
   profile. This closes the instrumented unsigned-package slice only, not a
   standard unsigned production install, signed production, or live provider.
-- **Final interrupted report placeholder:** add the authoritative
-  `interrupted-256gb` JSON/Markdown paths, hashes, p50/p95 safe-shell/native/
-  Batch timings, integrity/cardinality receipts, idle counters, and the
-  empty-versus-interrupted materiality calculation after the final run seals.
+- The authoritative interrupted report is
+  `I:\YouTube-Upload-Manager-Certification-20260823\runs\interrupted-v4-authoritative\output\packaged-windows-interrupted-256gb.json`
+  (813,009 bytes, SHA-256
+  `947088598093BB283A20AEB7C9E9DFE851F7FB9533007D68034EC1739AAAF5B1`);
+  its Markdown SHA-256 is
+  `CC44686F901A8DC8E18DA9985C2BC6F651FCC6D3BC49B65BF2D4080F1A6D4279`.
+- Across 80 cold and 80 warm interrupted launches, every safe-shell receipt was
+  present and all six settled-idle deltas were zero. Cold safe-shell p50/p95
+  was 2,899/3,449 ms, native-ready 787/1,019 ms, and first Batch
+  4,370/4,727 ms; warm values were 305/720, 558/1,021, and 1,550/2,035 ms.
+- Every clone began with one `uploading` row declaring 256,000,000,000 bytes and
+  zero media/sensitive bindings, then passed `quick_check` with one
+  `needs_reconciliation` item, zero `uploading` items, and two recovery audit
+  receipts. Cold first-Batch delta versus empty was +6.51%/+7.97% p50/p95,
+  inside the 10% materiality gate.
 
 ## Browser interaction certification slice
 
@@ -147,11 +158,20 @@ for each actually exercised platform.
   failed, five ignored release-only benchmarks; 6/6 FFprobe tests; frontend
   bundle gate at 230,478 B raw / 71,657 B gzip and CSS at 38,470 B.
 - Local browser: passed for the 10,000-row Batch interaction slice only.
-- Unsigned instrumented Windows package: empty-profile startup and settled idle
-  passed; interrupted-profile result is pending insertion above.
-- Standard unsigned Windows production package/install: **pending**. Record
-  executable, installer, portable ZIP, FFprobe, and license hashes plus an
-  installed smoke receipt after the final ordinary build.
+- Unsigned instrumented Windows package: empty and interrupted-profile startup,
+  recovery, integrity, and settled idle passed.
+- Standard unsigned Windows production package: passed. Executable
+  `84F39ED1F7827C43BAB5DD2481D503F321D0A1A8A0BB9D816A955BBE7C2C4AA9`
+  (19,988,480 bytes), NSIS
+  `4D40D8DDD5FD4A4A7A0213F0E81006D93FBF5CE8DA312DB4462E12071D89E5C8`
+  (26,669,567 bytes), and portable ZIP
+  `01D9C0F691844052F9D24700DCFFCD98C5F087028EB1A52400303E68D45B712E`
+  (37,565,048 bytes) were verified. PE machine was `0x8664`; ZIP readback
+  matched the app, FFprobe, and license; the runner rejected the ordinary
+  executable as non-harness.
+- Standard unsigned desktop smoke: passed at the exact retained executable/PID.
+  The active Batch workspace rendered a real 81-item profile as `1–32 of 81`.
+  No interaction or provider action was performed, and the exact process exited.
 - Signed Windows production: unavailable; no local code-signing certificate.
 - macOS, Linux, Android, and iOS packaged runtime: unavailable on this host.
 - Live Google OAuth/YouTube: not exercised; no approved non-production canary
@@ -160,3 +180,6 @@ for each actually exercised platform.
   reference used a non-equivalent first-Batch marker and storage/WebView profile,
   while the only local NVMe volume failed the 10%-free-space rule. No 50%
   startup or NVMe copy-speed claim is made from those incomparable samples.
+- TASK112 is complete for the available source/browser/local-native and
+  unsigned Windows scope. The unavailable signed, platform, provider, and
+  equivalent-NVMe levels remain explicit external evidence gaps.

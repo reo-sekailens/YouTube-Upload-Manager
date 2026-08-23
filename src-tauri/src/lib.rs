@@ -564,6 +564,14 @@ struct RemoteVideo {
     updated_at: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VideoTitleRename {
+    video_id: String,
+    previous_title: String,
+    title: String,
+}
+
 const PORTABLE_ARCHIVE_VERSION: u8 = 1;
 const PORTABLE_ARCHIVE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -645,6 +653,7 @@ struct FolderMonitorSettings {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FolderMonitorFileActivity {
+    item_id: Option<String>,
     file_name: String,
     observation_state: String,
     size_bytes: u64,
@@ -1323,10 +1332,9 @@ fn clear_expired_deletion_authorization(connection: &Connection) -> Result<bool,
     if !authorized || expires_at.is_none() || deletion_sudo_is_active(expires_at.as_deref()) {
         return Ok(false);
     }
-    let _ = clear_refresh_token(deletion_refresh_token_entry());
     connection
         .execute(
-            "UPDATE connection_settings SET deletion_authorized = 0, deletion_sudo_until = NULL, connection_detail = 'Deletion permission expired and was removed from this device.', updated_at = ?1 WHERE singleton = 1",
+            "UPDATE connection_settings SET deletion_sudo_until = NULL, connection_detail = 'Video-management mode ended. The separately authorized credential remains protected on this device.', updated_at = ?1 WHERE singleton = 1",
             [now()],
         )
         .map_err(user_error)?;
@@ -2374,12 +2382,13 @@ fn query_upload_session(
 
 fn upload_item(state: &AppState, item_id: &str) -> Result<bool, String> {
     let connection = database(state)?;
-    let (title, source_path, workspace_path, total_bytes, expected_digest, _channel_name, channel_id, source_modified_key, requested_visibility, made_for_kids): (
+    let (title, source_path, workspace_path, total_bytes, expected_digest, background_hash_status, _channel_name, channel_id, source_modified_key, requested_visibility, made_for_kids): (
         String,
         Option<String>,
         String,
         u64,
         Option<String>,
+        String,
         Option<String>,
         Option<String>,
         Option<String>,
@@ -2387,7 +2396,7 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<bool, String> {
         bool,
     ) = connection
         .query_row(
-            "SELECT title, source_path, workspace_path, total_bytes, digest, channel_name, channel_id, source_modified_key, visibility, made_for_kids FROM upload_items WHERE id = ?1 AND status IN ('dispatching', 'needs_reconciliation')",
+            "SELECT title, source_path, workspace_path, total_bytes, digest, background_hash_status, channel_name, channel_id, source_modified_key, visibility, made_for_kids FROM upload_items WHERE id = ?1 AND status IN ('dispatching', 'needs_reconciliation')",
             [item_id],
             |row| {
                 Ok((
@@ -2400,22 +2409,45 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<bool, String> {
                     row.get(6)?,
                     row.get(7)?,
                     row.get(8)?,
-                    row.get::<_, i64>(9)? != 0,
+                    row.get(9)?,
+                    row.get::<_, i64>(10)? != 0,
                 ))
             },
         )
         .map_err(|_| "This upload is no longer eligible to run.".to_string())?;
-    let watched_folder_item = source_modified_key.is_some();
+    let watched_folder_item = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM folder_monitor_observations WHERE upload_item_id = ?1)",
+            [item_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(user_error)?
+        != 0;
     let is_direct_reference = source_path.as_deref() == Some(workspace_path.as_str());
     if is_direct_reference {
         let expected_signature = source_modified_key
             .as_ref()
             .map(|modified_key| (total_bytes, modified_key.clone()));
-        let source_result =
-            verify_reference_source(Path::new(&workspace_path), expected_signature.as_ref());
-        let valid = source_result.is_ok_and(|(signature, digest)| {
-            signature.0 == total_bytes && expected_digest.as_deref() == Some(digest.as_str())
-        });
+        let awaiting_background_hash = expected_digest.is_none()
+            && matches!(background_hash_status.as_str(), "pending" | "running");
+        let valid = if awaiting_background_hash {
+            open_reference_source(Path::new(&workspace_path))
+                .and_then(|source| {
+                    monitored_file_signature(&source.metadata().map_err(user_error)?)
+                })
+                .is_ok_and(|signature| {
+                    signature.0 == total_bytes
+                        && expected_signature
+                            .as_ref()
+                            .is_none_or(|expected| &signature == expected)
+                })
+        } else {
+            verify_reference_source(Path::new(&workspace_path), expected_signature.as_ref())
+                .is_ok_and(|(signature, digest)| {
+                    signature.0 == total_bytes
+                        && expected_digest.as_deref() == Some(digest.as_str())
+                })
+        };
         if !valid {
             let detail = if watched_folder_item {
                 "Watched source changed or disappeared after its stability check; it was not uploaded."
@@ -5634,25 +5666,26 @@ fn folder_monitor_overview(connection: &Connection) -> Result<FolderMonitorOverv
         });
     };
     let files = connection
-        .prepare("SELECT observations.file_path, observations.state, observations.size_bytes, observations.updated_at, uploads.title, uploads.status, uploads.confirmed_bytes, uploads.total_bytes, uploads.detail FROM folder_monitor_observations AS observations LEFT JOIN upload_items AS uploads ON uploads.id = observations.upload_item_id WHERE observations.channel_id = ?1 ORDER BY observations.updated_at DESC LIMIT 200")
+        .prepare("SELECT observations.file_path, uploads.id, observations.state, observations.size_bytes, observations.updated_at, uploads.title, uploads.status, uploads.confirmed_bytes, uploads.total_bytes, uploads.detail FROM folder_monitor_observations AS observations LEFT JOIN upload_items AS uploads ON uploads.id = observations.upload_item_id WHERE observations.channel_id = ?1 ORDER BY observations.updated_at DESC LIMIT 200")
         .map_err(user_error)?
         .query_map([channel_id], |row| {
             let file_path = row.get::<_, String>(0)?;
             Ok(FolderMonitorFileActivity {
+                item_id: row.get(1)?,
                 file_name: Path::new(&file_path)
                     .file_name()
                     .and_then(|value| value.to_str())
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or("Unnamed file")
                     .to_string(),
-                observation_state: row.get(1)?,
-                size_bytes: row.get::<_, i64>(2)? as u64,
-                updated_at: row.get(3)?,
-                upload_title: row.get(4)?,
-                upload_status: row.get(5)?,
-                confirmed_bytes: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
-                total_bytes: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
-                detail: row.get(8)?,
+                observation_state: row.get(2)?,
+                size_bytes: row.get::<_, i64>(3)? as u64,
+                updated_at: row.get(4)?,
+                upload_title: row.get(5)?,
+                upload_status: row.get(6)?,
+                confirmed_bytes: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
+                total_bytes: row.get::<_, Option<i64>>(8)?.map(|value| value as u64),
+                detail: row.get(9)?,
             })
         })
         .map_err(user_error)?
@@ -5726,6 +5759,15 @@ fn is_supported_monitored_video(path: &Path) -> bool {
         .is_some_and(|extension| SUPPORTED_VIDEO_EXTENSIONS.contains(&extension.as_str()))
 }
 
+/// Derive the operator-facing YouTube title from a selected filename while
+/// keeping the original filename intact for local file operations.
+fn upload_title_from_source(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Untitled video")
+        .replace('_', " ")
+}
+
 fn monitored_files(folder: &Path) -> Result<Vec<MonitoredFile>, String> {
     let mut files = Vec::new();
     for result in fs::read_dir(folder).map_err(user_error)? {
@@ -5766,9 +5808,13 @@ fn monitored_files(folder: &Path) -> Result<Vec<MonitoredFile>, String> {
 fn reference_watched_source(
     source_path: &Path,
     expected_signature: &(u64, String),
-) -> Result<(PathBuf, (u64, String), String), String> {
-    let (signature, digest) = verify_reference_source(source_path, Some(expected_signature))?;
-    Ok((source_path.to_path_buf(), signature, digest))
+) -> Result<(PathBuf, (u64, String)), String> {
+    let source = open_reference_source(source_path)?;
+    let signature = monitored_file_signature(&source.metadata().map_err(user_error)?)?;
+    if &signature != expected_signature {
+        return Err("The watched source changed after its stability check.".into());
+    }
+    Ok((source_path.to_path_buf(), signature))
 }
 
 fn monitor_authorized(
@@ -5884,7 +5930,7 @@ fn queue_monitored_item(
 }
 
 fn ingest_stable_monitored_file(
-    _state: &AppState,
+    state: &AppState,
     connection: &Connection,
     folder_path: &str,
     channel_name: &str,
@@ -5896,13 +5942,9 @@ fn ingest_stable_monitored_file(
     file: &MonitoredFile,
     start_deep_verification: bool,
 ) -> Result<MonitorFileOutcome, String> {
-    let title = file
-        .path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("Untitled video");
+    let title = upload_title_from_source(&file.path);
     let channel_id = monitored_channel_id(connection, folder_path, channel_name)?;
-    if light_dedupe_title_match(connection, &channel_id, title, "", &HashSet::new())?.is_some() {
+    if light_dedupe_title_match(connection, &channel_id, &title, "", &HashSet::new())?.is_some() {
         set_observation_state(
             connection,
             file,
@@ -5923,38 +5965,10 @@ fn ingest_stable_monitored_file(
         });
     }
     let expected_signature = (file.size_bytes, file.modified_key.clone());
-    let (workspace_path, workspace_signature, digest) =
+    let (workspace_path, workspace_signature) =
         reference_watched_source(&file.path, &expected_signature)?;
     if let Err(error) = validate_youtube_upload_limits(&workspace_path, file.size_bytes) {
         return Err(error);
-    }
-    let exact_duplicate: Option<String> = connection
-        .query_row(
-            "SELECT id FROM upload_items WHERE digest = ?1 AND status = 'uploaded' AND (channel_id = ?2 OR channel_id IS NULL) ORDER BY created_at ASC LIMIT 1",
-            params![digest, channel_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(user_error)?;
-    if let Some(existing_id) = exact_duplicate {
-        set_observation_state(
-            connection,
-            file,
-            channel_name,
-            "duplicate",
-            Some(&digest),
-            None,
-        )?;
-        audit_global_scoped(
-            connection,
-            channel_name,
-            "folder_monitor_snapshot_duplicate_stopped",
-            &format!("Managed watched-source snapshot matched completed local upload {existing_id}; no provider dispatch was created"),
-        )?;
-        return Ok(MonitorFileOutcome {
-            disposition: MonitorDisposition::Skipped,
-            dispatch_item_id: None,
-        });
     }
     let item_id = Uuid::new_v4().to_string();
     set_observation_state(
@@ -5968,7 +5982,7 @@ fn ingest_stable_monitored_file(
     let timestamp = now();
     connection
         .execute(
-            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, source_path, workspace_path, size_bytes, digest, background_hash_status, source_modified_key, imported_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'complete', ?10, ?8, 'draft', ?8, ?11, ?12, ?13, ?14, ?15, ?16, ?16, 'Stable watched source was verified in place with BLAKE3 and queued without a managed copy')",
+        "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, source_path, workspace_path, size_bytes, digest, background_hash_status, source_modified_key, imported_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, 'pending', ?9, ?8, 'draft', ?8, ?10, ?11, ?12, ?13, ?14, ?15, ?15, 'Stable watched source queued immediately; deep BLAKE3 verification continues in the background.')",
             params![
                 item_id,
                 title,
@@ -5978,7 +5992,6 @@ fn ingest_stable_monitored_file(
                 file.path.to_string_lossy(),
                 workspace_path.to_string_lossy(),
                 file.size_bytes as i64,
-                digest,
                 workspace_signature.1,
                 visibility,
                 made_for_kids as i64,
@@ -5993,7 +6006,7 @@ fn ingest_stable_monitored_file(
         connection,
         &item_id,
         "folder_monitor_source_referenced",
-        "Stable watched file was verified in place before upload dispatch",
+        "Stable watched file was queued before background BLAKE3 verification",
     )?;
     let outcome =
         queue_monitored_item(connection, &item_id, folder_path, channel_name, visibility)?;
@@ -6010,7 +6023,9 @@ fn ingest_stable_monitored_file(
         None,
         Some(&item_id),
     )?;
-    let _ = start_deep_verification;
+    if start_deep_verification && !matches!(outcome.disposition, MonitorDisposition::Paused) {
+        resume_watched_hash_verifications(state.clone());
+    }
     Ok(outcome)
 }
 
@@ -6081,7 +6096,7 @@ fn verify_watched_hash_in_background(state: &AppState, item_id: &str) -> Result<
 
     let source = Path::new(&source_path);
     let result = (|| {
-        let (hashed_bytes, digest) = digest_file(source)?;
+        let (hashed_bytes, digest) = digest_file_with_upload_priority(state, source)?;
         let metadata = fs::metadata(source).map_err(user_error)?;
         let (current_size, current_modified_key) = monitored_file_signature(&metadata)?;
         if hashed_bytes != expected_size
@@ -6689,6 +6704,96 @@ fn process_existing_folder_files_impl(
         ),
         scanned.last_file_name.as_deref(),
     )
+}
+
+/// Restores operator-cancelled watched uploads without reviving duplicate or
+/// integrity-safety cancellations. Existing resumable checkpoints remain on
+/// the canonical item so the scheduler can continue from the provider range.
+fn requeue_cancelled_folder_monitor_files_impl(
+    state: &AppState,
+    requested_item_ids: Vec<String>,
+    dispatch_uploads: bool,
+) -> Result<usize, String> {
+    let _guard = state
+        .folder_monitor_lock
+        .lock()
+        .map_err(|_| "The folder monitor lock is unavailable.".to_string())?;
+    let connection = database(state)?;
+    let settings = folder_monitor_settings(&connection)?;
+    if !settings.enabled {
+        return Err("Enable the watched folder before requeueing its cancelled files.".into());
+    }
+    let folder_path = settings
+        .folder_path
+        .as_deref()
+        .ok_or_else(|| "The enabled folder monitor has no folder path.".to_string())?;
+    let channel_name = settings
+        .channel_name
+        .as_deref()
+        .ok_or_else(|| "The enabled folder monitor has no channel binding.".to_string())?;
+    let channel_id = settings
+        .channel_id
+        .as_deref()
+        .ok_or_else(|| "Reconnect YouTube before requeueing watched-folder files.".to_string())?;
+    if !monitor_authorized(&connection, folder_path, channel_name)? {
+        return Err("The watched-folder channel is no longer active. Reconnect YouTube before requeueing files.".into());
+    }
+
+    let requested = requested_item_ids
+        .into_iter()
+        .filter(|item_id| !item_id.trim().is_empty())
+        .collect::<BTreeSet<_>>();
+    let eligible_item_ids = connection
+        .prepare("SELECT uploads.id FROM folder_monitor_observations AS observations JOIN upload_items AS uploads ON uploads.id = observations.upload_item_id WHERE observations.channel_id = ?1 AND uploads.channel_id = ?1 AND uploads.status = 'cancelled' AND observations.state NOT IN ('duplicate', 'duplicate_title', 'hash_failed', 'rejected') AND uploads.background_hash_status NOT IN ('duplicate', 'duplicate_after_upload', 'failed') ORDER BY uploads.created_at ASC")
+        .map_err(user_error)?
+        .query_map([channel_id], |row| row.get::<_, String>(0))
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?
+        .into_iter()
+        .filter(|item_id| requested.is_empty() || requested.contains(item_id))
+        .collect::<Vec<_>>();
+    if eligible_item_ids.is_empty() {
+        return Err("No eligible cancelled watched-folder files are available to queue again.".into());
+    }
+
+    let timestamp = now();
+    let mut requeued = 0_usize;
+    for item_id in &eligible_item_ids {
+        let changed = connection
+            .execute(
+                "UPDATE upload_items SET status = 'queued', detail = 'Requeued from watched-folder cancelled files; upload will resume automatically.', updated_at = ?1 WHERE id = ?2 AND channel_id = ?3 AND status = 'cancelled'",
+                params![timestamp, item_id, channel_id],
+            )
+            .map_err(user_error)?;
+        if changed == 0 {
+            continue;
+        }
+        connection
+            .execute(
+                "UPDATE folder_monitor_observations SET state = 'queued', updated_at = ?1 WHERE channel_id = ?2 AND upload_item_id = ?3",
+                params![timestamp, channel_id, item_id],
+            )
+            .map_err(user_error)?;
+        requeued += 1;
+    }
+    if requeued == 0 {
+        return Err("The selected watched-folder files were changed before they could be queued again. Refresh the folder view and retry.".into());
+    }
+    audit_global_scoped(
+        &connection,
+        channel_name,
+        "folder_monitor_cancelled_files_requeued",
+        &format!("Operator requeued {requeued} eligible cancelled watched-folder upload(s)"),
+    )?;
+    drop(connection);
+
+    resume_watched_hash_verifications(state.clone());
+    if dispatch_uploads {
+        ensure_quota_resume_worker(state.clone())?;
+        let _ = start_queued_uploads_impl(state);
+    }
+    Ok(requeued)
 }
 
 fn enable_folder_monitor_impl(
@@ -7599,6 +7704,19 @@ async fn process_existing_folder_files(
         .map_err(|_| "Existing watched-folder processing stopped unexpectedly.".to_string())?
 }
 
+#[tauri::command]
+async fn requeue_cancelled_folder_monitor_files(
+    item_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        requeue_cancelled_folder_monitor_files_impl(&state, item_ids, true)
+    })
+    .await
+    .map_err(|_| "Requeueing cancelled watched-folder files stopped unexpectedly.".to_string())?
+}
+
 fn dashboard_snapshot_with_connection(
     connection: &Connection,
     settings: &ConnectionSettings,
@@ -8011,20 +8129,17 @@ fn enable_deletion_sudo_mode(state: State<'_, AppState>) -> Result<ConnectionSet
 
 #[tauri::command]
 fn disable_deletion_sudo_mode(state: State<'_, AppState>) -> Result<ConnectionSettings, String> {
-    let _ = clear_refresh_token(deletion_refresh_token_entry());
-    provider_transport(&state)
-        .invalidate_access_token(provider_transport::AccessTokenKind::Deletion);
     let connection = database(&state)?;
     connection
         .execute(
-            "UPDATE connection_settings SET deletion_authorized = 0, deletion_sudo_until = NULL, updated_at = ?1 WHERE singleton = 1",
+            "UPDATE connection_settings SET deletion_sudo_until = NULL, updated_at = ?1 WHERE singleton = 1",
             params![now()],
         )
         .map_err(user_error)?;
     audit_global(
         &connection,
         "youtube_deletion_sudo_disabled",
-        "Operator exited temporary deletion mode",
+        "Operator exited temporary deletion mode; the protected management credential remains available",
     )?;
     connection_settings(&connection)
 }
@@ -8530,6 +8645,197 @@ fn active_channel_id(state: &AppState, access_token: &str) -> Result<String, Str
     .ok_or_else(|| "YouTube did not return the active channel identity.".to_string())
 }
 
+fn validate_video_title_rename(change: &VideoTitleRename) -> Result<(), String> {
+    if change.video_id.trim().is_empty() || change.previous_title.trim().is_empty() {
+        return Err("Refresh the saved library and choose current videos before renaming.".into());
+    }
+    if change.title.trim().is_empty() {
+        return Err("A YouTube video title cannot be empty.".into());
+    }
+    if change.title.chars().count() > 100 {
+        return Err("YouTube video titles can contain at most 100 characters.".into());
+    }
+    if change.title.chars().any(char::is_control) {
+        return Err("A YouTube video title cannot contain control characters.".into());
+    }
+    if change.title == change.previous_title {
+        return Err("Each selected video needs a changed title.".into());
+    }
+    Ok(())
+}
+
+fn video_title_update_body(video_id: &str, title: &str, category_id: &str) -> serde_json::Value {
+    serde_json::json!({ "id": video_id, "snippet": { "title": title, "categoryId": category_id } })
+}
+
+fn youtube_title_update_error(status: u16) -> String {
+    match status {
+        400 => "YouTube rejected this title or its current metadata. Refresh the library and review the title again.".into(),
+        401 => "The video-management permission expired or was revoked. Grant it again, then retry the remaining titles.".into(),
+        403 => "Google denied this video-management update. Confirm the YouTube Data API and the separate video-management permission, then retry.".into(),
+        404 => "The selected video is no longer available in the active channel. Refresh the library before retrying.".into(),
+        429 => "YouTube is rate-limiting title changes. Wait before retrying the remaining titles.".into(),
+        500..=599 => "YouTube is temporarily unavailable. The remaining titles were left unchanged; retry later.".into(),
+        _ => "YouTube rejected this title change. Refresh the library before retrying.".into(),
+    }
+}
+
+fn rename_remote_videos_impl(
+    changes: Vec<VideoTitleRename>,
+    state: &AppState,
+) -> Result<Vec<RemoteVideo>, String> {
+    if changes.is_empty() {
+        return Err("Select at least one changed video title to apply.".into());
+    }
+    if changes.len() > 100 {
+        return Err("Apply no more than 100 reviewed title changes at a time.".into());
+    }
+    let mut selected_ids = HashSet::new();
+    for change in &changes {
+        validate_video_title_rename(change)?;
+        if !selected_ids.insert(change.video_id.as_str()) {
+            return Err("Each selected YouTube video may be renamed only once per review.".into());
+        }
+    }
+
+    // Title edits are provider mutations, so serialize them with deletion. They
+    // use the separately granted management credential but do not delete media.
+    let _execution_guard = deletion_execution_lock(state)
+        .lock()
+        .map_err(|_| "YouTube video management is unavailable.".to_string())?;
+    let connection = database(state)?;
+    clear_expired_deletion_authorization(&connection)?;
+    let settings = connection_settings(&connection)?;
+    if !settings.deletion_authorized || !settings.deletion_sudo_active {
+        return Err("Grant video-management permission and enter its temporary 15-minute mode before applying title changes.".into());
+    }
+    let saved_channel_id = settings.active_channel_id.as_deref().ok_or_else(|| {
+        "The active YouTube connection has no immutable channel identity.".to_string()
+    })?;
+    let access_token = refreshed_deletion_access_token(state)?;
+    if active_channel_id(state, &access_token)? != saved_channel_id {
+        return Err(
+            "The separately authorized YouTube channel no longer matches this saved library."
+                .into(),
+        );
+    }
+
+    let mut renamed = Vec::with_capacity(changes.len());
+    for change in changes {
+        let saved_title: String = connection
+            .query_row(
+                "SELECT title FROM remote_videos WHERE video_id = ?1 AND channel_id = ?2",
+                params![&change.video_id, saved_channel_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "A selected video is no longer in this channel's saved library. Refresh and review again.".to_string())?;
+        if saved_title != change.previous_title {
+            return Err(
+                "A saved video title changed after this preview. Refresh and review again.".into(),
+            );
+        }
+        let response = youtube_json(
+            state,
+            &access_token,
+            "videos",
+            &[("part", "snippet"), ("id", change.video_id.as_str())],
+        )?;
+        let snippet = response
+            .get("items")
+            .and_then(|value| value.as_array())
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("snippet"))
+            .cloned()
+            .ok_or_else(|| {
+                "A selected YouTube video is unavailable; no title was changed.".to_string()
+            })?;
+        if snippet.get("channelId").and_then(|value| value.as_str()) != Some(saved_channel_id) {
+            return Err(
+                "A selected video is not owned by the currently authorized channel.".into(),
+            );
+        }
+        if snippet.get("title").and_then(|value| value.as_str())
+            != Some(change.previous_title.as_str())
+        {
+            return Err(
+                "A YouTube title changed after the preview. Refresh and review again.".into(),
+            );
+        }
+        let category_id = snippet
+            .get("categoryId")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                "YouTube did not return the video's category. Refresh the library before renaming."
+                    .to_string()
+            })?;
+        let update_response = provider_transport(state)
+            .control_client()?
+            .put("https://www.googleapis.com/youtube/v3/videos")
+            .query(&[("part", "snippet")])
+            .bearer_auth(&access_token)
+            .json(&video_title_update_body(&change.video_id, &change.title, category_id))
+            .send()
+            .map_err(|_| "YouTube could not be reached while changing a title. Refresh the library before retrying.".to_string())?;
+        if !update_response.status().is_success() {
+            return Err(youtube_title_update_error(
+                update_response.status().as_u16(),
+            ));
+        }
+        let updated_title = update_response
+            .json::<serde_json::Value>()
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/snippet/title")
+                    .and_then(|title| title.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or(change.title);
+        let keys = title_matching::keys(&updated_title);
+        let updated_at = now();
+        connection.execute(
+            "UPDATE remote_videos SET title = ?1, normalized_title = ?2, canonical_title = ?3, has_copy_marker = ?4, numeric_title_key = ?5, title_keys_version = ?6, updated_at = ?7 WHERE video_id = ?8 AND channel_id = ?9",
+            params![updated_title, keys.normalized, keys.canonical, keys.has_copy_marker as i64, keys.numeric, title_matching::TITLE_KEYS_VERSION, updated_at, &change.video_id, saved_channel_id],
+        ).map_err(user_error)?;
+        renamed.push(RemoteVideo {
+            video_id: change.video_id,
+            title: updated_title,
+            duration: None,
+            privacy_status: None,
+            upload_status: None,
+            updated_at,
+        });
+    }
+    connection.execute(
+        "INSERT INTO channel_generations(channel_id, inventory_generation, upload_generation, updated_at) VALUES (?1, 1, 0, ?2) ON CONFLICT(channel_id) DO UPDATE SET inventory_generation = inventory_generation + 1, updated_at = excluded.updated_at",
+        params![saved_channel_id, now()],
+    ).map_err(user_error)?;
+    audit_global(
+        &connection,
+        "youtube_titles_renamed",
+        &format!(
+            "Operator applied {} reviewed YouTube video title change(s)",
+            renamed.len()
+        ),
+    )?;
+    Ok(renamed)
+}
+
+#[tauri::command]
+async fn rename_remote_videos(
+    changes: Vec<VideoTitleRename>,
+    state: State<'_, AppState>,
+) -> Result<Vec<RemoteVideo>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || rename_remote_videos_impl(changes, &state))
+        .await
+        .map_err(|_| {
+            "YouTube title changes stopped unexpectedly; refresh the library before retrying."
+                .to_string()
+        })?
+}
+
 fn execute_deletion_request_impl(
     id: String,
     confirmation: String,
@@ -8690,9 +8996,10 @@ fn import_asset_impl(
     let (playlist_id, playlist_title) =
         valid_playlist_selection(raw_playlist_id, raw_playlist_title)?;
 
-    let (signature, digest) = verify_reference_source(&source, None)?;
+    let reference = open_reference_source(&source)?;
+    let signature = monitored_file_signature(&reference.metadata().map_err(user_error)?)?;
     if signature.0 != metadata.len() {
-        return Err("The selected source changed before it could be verified.".into());
+        return Err("The selected source changed before it could be queued.".into());
     }
     let id = Uuid::new_v4().to_string();
     let file_name = source
@@ -8700,28 +9007,26 @@ fn import_asset_impl(
         .and_then(|value| value.to_str())
         .ok_or_else(|| "The selected file has no supported name.".to_string())?
         .to_string();
-    let title = source
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("Untitled video")
-        .to_string();
+    let title = upload_title_from_source(&source);
     let title_keys = title_matching::keys(&title);
     let timestamp = now();
     let connection = database(state)?;
 
     connection
         .execute(
-            "INSERT INTO upload_items (id, title, normalized_title, canonical_title, has_copy_marker, numeric_title_key, title_keys_version, file_name, source_path, workspace_path, size_bytes, digest, imported_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, ?11, ?10, 'draft', ?10, ?12, ?13, ?14, ?15, ?16, ?17, ?17, 'Original source verified in place; ready for review')",
-            params![id, title, title_keys.normalized, title_keys.canonical, title_keys.has_copy_marker as i64, title_keys.numeric, title_matching::TITLE_KEYS_VERSION, file_name, path, metadata.len() as i64, digest, visibility, settings.made_for_kids as i64, settings.delete_source_after_upload as i64, playlist_id, playlist_title, timestamp],
+            "INSERT INTO upload_items (id, title, normalized_title, canonical_title, has_copy_marker, numeric_title_key, title_keys_version, file_name, source_path, workspace_path, size_bytes, digest, background_hash_status, source_modified_key, imported_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, NULL, 'pending', ?11, ?10, 'draft', ?10, ?12, ?13, ?14, ?15, ?16, ?17, ?17, 'Source queued immediately; deep BLAKE3 verification continues in the background.')",
+            params![id, title, title_keys.normalized, title_keys.canonical, title_keys.has_copy_marker as i64, title_keys.numeric, title_matching::TITLE_KEYS_VERSION, file_name, path, signature.0 as i64, signature.1, visibility, settings.made_for_kids as i64, settings.delete_source_after_upload as i64, playlist_id, playlist_title, timestamp],
         )
         .map_err(user_error)?;
     audit(
         &connection,
         &id,
-        "asset_reference_verified",
-        "Original media was verified in place with operator-reviewed audience, visibility, and playlist settings",
+        "asset_reference_queued_for_background_verification",
+        "Original media passed the title gate and was queued while deep BLAKE3 verification continues in the background",
     )?;
-    find_item(&connection, &id)
+    let item = find_item(&connection, &id)?;
+    drop(connection);
+    Ok(item)
 }
 
 #[tauri::command]
@@ -8731,12 +9036,17 @@ async fn import_asset(
     state: State<'_, AppState>,
 ) -> Result<UploadItem, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || import_asset_impl(path, settings, &state))
-        .await
-        .map_err(|_| {
-            "Local media import stopped unexpectedly; its checkpoint will be recovered on launch."
-                .to_string()
-        })?
+    let hash_state = state.clone();
+    let item = tauri::async_runtime::spawn_blocking(move || {
+        import_asset_impl(path, settings, &state)
+    })
+    .await
+    .map_err(|_| {
+        "Local media import stopped unexpectedly; its checkpoint will be recovered on launch."
+            .to_string()
+    })??;
+    resume_watched_hash_verifications(hash_state);
+    Ok(item)
 }
 
 fn safe_batch_file_name(path: &str, ordinal: usize) -> String {
@@ -8872,14 +9182,19 @@ async fn import_and_queue_batch(
     state: State<'_, AppState>,
 ) -> Result<BatchImportReceipt, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let hash_state = state.clone();
+    let receipt = tauri::async_runtime::spawn_blocking(move || {
         import_and_queue_batch_impl(paths, settings, &state)
     })
     .await
     .map_err(|_| {
         "The local intake batch stopped unexpectedly; completed imports remain recoverable."
             .to_string()
-    })?
+    })??;
+    // Begin deep verification only after the whole batch has passed its fast
+    // title gate and returned its queue result to the UI.
+    resume_watched_hash_verifications(hash_state);
+    Ok(receipt)
 }
 
 fn set_item_visibility_impl(
@@ -9312,6 +9627,7 @@ pub fn run() {
                     disable_folder_monitor,
                     scan_folder_monitor_now,
                     process_existing_folder_files,
+                    requeue_cancelled_folder_monitor_files,
                     load_connection_settings,
                     load_manual_upload_defaults,
                     save_manual_upload_defaults,
@@ -9335,6 +9651,7 @@ pub fn run() {
                     delete_preflight_duplicate_file,
                     resolve_upload_title_duplicates,
                     list_remote_videos,
+                    rename_remote_videos,
                     list_deletion_requests,
                     request_video_deletion,
                     cancel_deletion_request,
@@ -10276,7 +10593,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_deletion_authorization_is_removed_before_reentry() {
+    fn expired_deletion_mode_keeps_the_protected_authorization_for_reentry() {
         let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("media")).unwrap();
         let state = AppState {
@@ -10300,7 +10617,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(flags.0, 0);
+        assert_eq!(flags.0, 1);
         assert_eq!(flags.1, None);
         drop(connection);
         fs::remove_dir_all(root).unwrap();
@@ -11097,6 +11414,39 @@ mod tests {
     }
 
     #[test]
+    fn upload_title_from_source_replaces_filename_underscores() {
+        assert_eq!(
+            upload_title_from_source(Path::new("C:/Videos/My_upload_2026.mp4")),
+            "My upload 2026"
+        );
+        assert_eq!(
+            upload_title_from_source(Path::new("C:/Videos/No_underscores.mov")),
+            "No underscores"
+        );
+    }
+
+    #[test]
+    fn title_rename_validation_rejects_unsafe_or_unchanged_titles() {
+        let valid = VideoTitleRename {
+            video_id: "video-1".into(),
+            previous_title: "Before".into(),
+            title: "After".into(),
+        };
+        assert!(validate_video_title_rename(&valid).is_ok());
+        assert!(validate_video_title_rename(&VideoTitleRename {
+            title: "Before".into(),
+            ..valid
+        })
+        .is_err());
+        assert!(validate_video_title_rename(&VideoTitleRename {
+            video_id: "video-2".into(),
+            previous_title: "Before".into(),
+            title: " ".into(),
+        })
+        .is_err());
+    }
+
+    #[test]
     fn light_dedupe_catches_matching_titles_in_the_current_batch_and_active_queue() {
         let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
         let state = AppState {
@@ -11294,12 +11644,26 @@ mod tests {
                 .unwrap(),
             "queued"
         );
-        let (source_path, workspace_path, partial_path): (String, String, Option<String>) =
+        let (source_path, workspace_path, partial_path, digest, hash_status): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        ) =
             connection
                 .query_row(
-                    "SELECT source_path, workspace_path, partial_path FROM upload_items",
+                    "SELECT source_path, workspace_path, partial_path, digest, background_hash_status FROM upload_items",
                     [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
                 )
                 .unwrap();
         assert_eq!(
@@ -11309,6 +11673,8 @@ mod tests {
         assert_eq!(workspace_path, source_path);
         assert!(Path::new(&workspace_path).is_file());
         assert!(partial_path.is_none());
+        assert!(digest.is_none());
+        assert_eq!(hash_status, "pending");
         assert_eq!(
             connection
                 .query_row(
@@ -11339,15 +11705,13 @@ mod tests {
         };
         fs::create_dir_all(&state.media_directory).unwrap();
         let source = root.join("watched.mp4");
-        let verified = b"verified-watched-source";
-        fs::write(&source, verified).unwrap();
+        fs::write(&source, b"verified-watched-source").unwrap();
         let signature = monitored_file_signature(&fs::metadata(&source).unwrap()).unwrap();
 
-        let (workspace, _, digest) = reference_watched_source(&source, &signature).unwrap();
+        let (workspace, _) = reference_watched_source(&source, &signature).unwrap();
         fs::write(&source, b"replacement-watched-source").unwrap();
 
         assert_eq!(workspace, source);
-        assert_eq!(digest, blake3::hash(verified).to_hex().to_string());
         assert!(reference_watched_source(&source, &signature).is_err());
         assert!(fs::read_dir(&state.media_directory)
             .unwrap()
@@ -11635,6 +11999,7 @@ mod tests {
         let overview = folder_monitor_overview(&connection).unwrap();
         let rendered = serde_json::to_string(&overview).unwrap();
         assert_eq!(overview.files.len(), 1);
+        assert_eq!(overview.files[0].item_id.as_deref(), Some("folder-item"));
         assert_eq!(overview.files[0].file_name, "clip.mp4");
         assert_eq!(
             overview.files[0].upload_status.as_deref(),
@@ -11643,6 +12008,56 @@ mod tests {
         assert_eq!(overview.logs.len(), 1);
         assert!(!rendered.contains("private-source\\\\clip.mp4"));
         assert!(!rendered.contains("other.mp4"));
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn requeue_cancelled_folder_monitor_files_restores_only_eligible_active_channel_jobs() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let connection = database(&state).unwrap();
+        let timestamp = now();
+        connection.execute(
+            "INSERT INTO connection_settings (singleton, active_channel, active_channel_id, connection_detail, updated_at) VALUES (1, 'Channel A', 'channel-a', 'Connected', ?1)",
+            [&timestamp],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO folder_monitor_settings (singleton, enabled, folder_path, channel_name, channel_id, visibility, status, detail, updated_at) VALUES (1, 1, ?1, 'Channel A', 'channel-a', 'unlisted', 'watching', 'Watching', ?2)",
+            params![root.to_string_lossy(), timestamp],
+        ).unwrap();
+        for (id, channel_id) in [("eligible-a", "channel-a"), ("eligible-b", "channel-a"), ("duplicate", "channel-a"), ("other-channel", "channel-b")] {
+            connection.execute(
+                "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, workspace_path, size_bytes, status, confirmed_bytes, total_bytes, background_hash_status, detail, created_at, updated_at) VALUES (?1, ?1, ?1, 'Channel A', ?2, ?1, 10, 'cancelled', 0, 10, 'complete', 'Cancelled', ?3, ?3)",
+                params![id, channel_id, timestamp],
+            ).unwrap();
+        }
+        for (id, channel_id, state_name) in [("eligible-a", "channel-a", "dispatched"), ("eligible-b", "channel-a", "queued"), ("duplicate", "channel-a", "duplicate"), ("other-channel", "channel-b", "dispatched")] {
+            connection.execute(
+                "INSERT INTO folder_monitor_observations (channel_id, channel_name, file_path, size_bytes, modified_key, state, upload_item_id, first_seen_at, updated_at) VALUES (?1, 'Channel A', ?2, 10, 'stable', ?3, ?4, ?5, ?5)",
+                params![channel_id, format!("{id}.mp4"), state_name, id, timestamp],
+            ).unwrap();
+        }
+        drop(connection);
+
+        assert_eq!(requeue_cancelled_folder_monitor_files_impl(&state, Vec::new(), false).unwrap(), 2);
+
+        let connection = database(&state).unwrap();
+        for id in ["eligible-a", "eligible-b"] {
+            assert_eq!(connection.query_row("SELECT status FROM upload_items WHERE id = ?1", [id], |row| row.get::<_, String>(0)).unwrap(), "queued");
+            assert_eq!(connection.query_row("SELECT state FROM folder_monitor_observations WHERE upload_item_id = ?1", [id], |row| row.get::<_, String>(0)).unwrap(), "queued");
+        }
+        for id in ["duplicate", "other-channel"] {
+            assert_eq!(connection.query_row("SELECT status FROM upload_items WHERE id = ?1", [id], |row| row.get::<_, String>(0)).unwrap(), "cancelled");
+        }
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM audit_events WHERE kind = 'folder_monitor_cancelled_files_requeued'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
@@ -11722,6 +12137,16 @@ mod tests {
         let second_scan = scan_folder_monitor_impl(&state, false).unwrap();
         assert_eq!(second_scan.status, "watching");
         assert!(second_scan.detail.contains("Queued"));
+        let item_id: String = connection
+            .query_row(
+                "SELECT id FROM upload_items WHERE file_name = 'first.mp4'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+        verify_watched_hash_in_background(&state, &item_id).unwrap();
+        let connection = database(&state).unwrap();
         let (item_id, status, channel_name, channel_id, digest): (
             String,
             String,
@@ -11772,8 +12197,18 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap(),
-            2
+            3
         );
+        let duplicate_item_id: String = connection
+            .query_row(
+                "SELECT id FROM upload_items WHERE file_name = 'second.mp4'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+        verify_watched_hash_in_background(&state, &duplicate_item_id).unwrap();
+        let connection = database(&state).unwrap();
         assert_eq!(
             connection
                 .query_row(
@@ -11801,7 +12236,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap(),
-            2
+            3
         );
         assert_eq!(
             connection
@@ -11839,7 +12274,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap(),
-            2
+            3
         );
         connection
             .execute(
@@ -12811,6 +13246,49 @@ mod tests {
         let serialized = serde_json::to_string(&receipt).unwrap();
         assert!(!serialized.contains(&root.to_string_lossy().to_string()));
         drop(receipt);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manual_import_defers_blake3_until_after_the_item_is_available() {
+        let root =
+            std::env::temp_dir().join(format!("youtube-uploader-manual-intake-{}", Uuid::new_v4()));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let source = root.join("manual_upload.mp4");
+        fs::write(&source, b"manual intake fixture").unwrap();
+
+        let item = import_asset_impl(
+            source.to_string_lossy().into_owned(),
+            ManualUploadSettings {
+                made_for_kids: false,
+                visibility: "private".into(),
+                playlist_id: None,
+                playlist_title: None,
+                delete_source_after_upload: false,
+            },
+            &state,
+        )
+        .unwrap();
+
+        let connection = database(&state).unwrap();
+        let (digest, hash_status, source_modified_key): (Option<String>, String, Option<String>) =
+            connection
+                .query_row(
+                    "SELECT digest, background_hash_status, source_modified_key FROM upload_items WHERE id = ?1",
+                    [&item.id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+        assert!(digest.is_none());
+        assert_eq!(hash_status, "pending");
+        assert!(source_modified_key.is_some());
+        drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -139,8 +139,11 @@ ingest/hash/copy scheduler, packaging workflow, and media fixtures.
   FFprobe PE (`3A7E2DC003DC2CD1472827E4C7C4F056AE1AE0AE7C5BBC580C99B49827351BA4`,
   82,668,032 bytes) and license
   (`8CEB4B9EE5ADEDDE47B31E975C1D90C73AD27B6B165A1DCD80C7C545EB65B903`,
-  35,147 bytes). Standard portable/installer readback remains a TASK112
-  production-artifact boundary rather than reopening the runtime task.
+  35,147 bytes).
+- The final ordinary unsigned portable ZIP read back exactly the x64 production
+  executable, FFprobe, and license. The extracted application hash matched the
+  retained executable, the PE machine was `0x8664`, and the sidecar/license
+  hashes and sizes matched the pinned values above.
 - Healthy-headroom NVMe throughput remains unverified because the only local
   NVMe volume did not satisfy the 10%-free-space rule. The earlier near-full
   C: samples are diagnostic only; no equivalent-NVMe speed claim is made.

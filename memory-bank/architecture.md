@@ -189,6 +189,14 @@ separate levels. The final healthy-headroom packaged timings were captured on a
 SATA HDD; the historical system-NVMe baseline used non-equivalent milestone,
 WebView-profile, and headroom conditions, so no 50% comparison is inferred.
 
+The available Windows boundary is complete: both empty and synthetic
+interrupted-256 GB instrumented matrices passed their integrity, safe-shell,
+materiality, and zero-idle-work gates, while the ordinary unsigned x64 package
+passed executable/installer/portable hash checks, exact ZIP sidecar/license
+readback, harness isolation, and exact-path desktop rendering of a real
+81-item Batch profile with a 32-row page. This does not imply signing,
+non-Windows packaging, live OAuth/provider behavior, or equivalent-NVMe speed.
+
 ## Decisions pending
 
 - Single-operator versus tenant-aware data model.

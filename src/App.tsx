@@ -57,11 +57,13 @@ const emptySnapshot: DashboardSnapshot = {
   duplicates: [],
   pendingTitleDuplicates: [],
 };
+const pluralS = (count: number) => (count === 1 ? "" : "s");
 const workspaceTabs = [
   ["batch", "Batch uploads"],
   ["monitor", "Folder monitor"],
   ["dedupe", "Duplicate review"],
   ["transfer", "Export and import"],
+  ["rename", "Rename videos"],
   ["deletion", "Video deletion"],
   ["account", "Connected account"],
   ["about", "About and support"],
@@ -117,6 +119,7 @@ const DeletionReview = lazy(() =>
     default: module.DeletionReview,
   })),
 );
+const VideoTitleRename = lazy(() => import("./components/VideoTitleRename"));
 const DedupeActivityPanel = lazy(() =>
   import("./components/DedupeActivityPanel").then((module) => ({
     default: module.DedupeActivityPanel,
@@ -319,6 +322,15 @@ export default function App({
     await refresh();
   }, [refresh]);
 
+  const updateSnapshotItem = useCallback((updated: UploadItem) => {
+    setSnapshot((current) => ({
+      ...current,
+      items: current.items.map((item) =>
+        item.id === updated.id ? updated : item,
+      ),
+    }));
+  }, []);
+
   const applyStartup = useCallback((next: StartupBootstrap) => {
     setStartup(next);
     stateChannelIdRef.current = next.snapshot.activeChannelId;
@@ -348,7 +360,7 @@ export default function App({
         document.getElementById(`workspace-tab-button-${nextTab}`)?.focus();
       });
     },
-    [activeTab, setActiveTab],
+    [activeTab],
   );
 
   const logDedupeActivity = useCallback(
@@ -475,15 +487,16 @@ export default function App({
         setPreflightScan(scan);
         setNotice(
           mode === "light"
-            ? `Fast filename match started for ${paths.length} file${paths.length === 1 ? "" : "s"}.`
-            : `Deep BLAKE3 match started for ${paths.length} file${paths.length === 1 ? "" : "s"}.`,
+            ? `Fast filename match started for ${paths.length} file${pluralS(paths.length)}.`
+            : `Deep BLAKE3 match started for ${paths.length} file${pluralS(paths.length)}.`,
         );
       } catch (error) {
         if (runId !== preflightRunId.current) return;
         setNotice(
-          error instanceof Error
-            ? error.message
-            : "The selected files could not be checked for duplicates.",
+          operatorErrorMessage(
+            error,
+            "The selected files could not be checked for duplicates.",
+          ),
         );
       } finally {
         if (runId === preflightRunId.current) setPreflightBusy(false);
@@ -510,7 +523,7 @@ export default function App({
             file.uploadedTitleMatches.length > 0,
         ).length;
         setNotice(
-          `${scan.completedFiles} file${scan.completedFiles === 1 ? "" : "s"} checked before ingest. ${matches} need${matches === 1 ? "s" : ""} duplicate review.`,
+          `${scan.completedFiles} file${pluralS(scan.completedFiles)} checked before ingest. ${matches} need${matches === 1 ? "s" : ""} duplicate review.`,
         );
       }
     } catch {
@@ -615,26 +628,26 @@ export default function App({
             (item) => item.status === "failed",
           )?.detail;
           setNotice(
-            `${receipt.failedCount} video${receipt.failedCount === 1 ? "" : "s"} could not be imported. ${firstFailure ?? ""}`.trim(),
+            `${receipt.failedCount} video${pluralS(receipt.failedCount)} could not be imported. ${firstFailure ?? ""}`.trim(),
           );
           return;
         }
         if (receipt.detail) {
           setNotice(
-            `${receipt.importedCount} video${receipt.importedCount === 1 ? "" : "s"} safely imported to this device. ${receipt.detail}`,
+            `${receipt.importedCount} video${pluralS(receipt.importedCount)} safely imported to this device. ${receipt.detail}`,
           );
           return;
         }
         const importNotice = receipt.duplicateCount > 0
-          ? `${receipt.importedCount} video${receipt.importedCount === 1 ? "" : "s"} imported locally. ${receipt.duplicateCount} light duplicate match${receipt.duplicateCount === 1 ? " needs" : "es need"} your decision.`
+          ? `${receipt.importedCount} video${pluralS(receipt.importedCount)} imported locally. ${receipt.duplicateCount} light duplicate match${receipt.duplicateCount === 1 ? " needs" : "es need"} your decision.`
           : receipt.queuedCount > 0
-            ? `${receipt.importedCount} video${receipt.importedCount === 1 ? "" : "s"} imported and ${receipt.queuedCount} queued locally.`
-            : `${receipt.importedCount} video${receipt.importedCount === 1 ? "" : "s"} safely imported to this device. Connect YouTube to start uploading them.`;
+            ? `${receipt.importedCount} video${pluralS(receipt.importedCount)} imported and ${receipt.queuedCount} queued locally.`
+            : `${receipt.importedCount} video${pluralS(receipt.importedCount)} safely imported to this device. Connect YouTube to start uploading them.`;
         const firstFailure = receipt.items.find(
           (item) => item.status === "failed",
         )?.detail;
         const failuresNotice = receipt.failedCount > 0
-          ? ` ${receipt.failedCount} item${receipt.failedCount === 1 ? "" : "s"} need attention.${firstFailure ? ` ${firstFailure}` : ""}`
+          ? ` ${receipt.failedCount} item${pluralS(receipt.failedCount)} need attention.${firstFailure ? ` ${firstFailure}` : ""}`
           : "";
         setNotice(
           `${importNotice}${receipt.queuedCount > 0 ? " Uploads start automatically when capacity is available." : ""}${failuresNotice}`.trim(),
@@ -741,19 +754,14 @@ export default function App({
         return;
       }
       const updated = await queueItem(item.id);
-      setSnapshot((current) => ({
-        ...current,
-        items: current.items.map((candidate) =>
-          candidate.id === updated.id ? updated : candidate,
-        ),
-      }));
+      updateSnapshotItem(updated);
       setNotice(
         `${updated.fileName} is queued and will start automatically when capacity is available.`,
       );
     } finally {
       setBusy(false);
     }
-  }, [refresh]);
+  }, [refresh, updateSnapshotItem]);
 
   const chooseFilesForPreflight = useCallback(async (mode: "light" | "deep") => {
     if (!isTauri) {
@@ -781,9 +789,7 @@ export default function App({
       );
     } catch (error) {
       setNotice(
-        error instanceof Error
-          ? error.message
-          : "The duplicate decision could not be saved.",
+        operatorErrorMessage(error, "The duplicate decision could not be saved."),
       );
       await refresh();
     } finally {
@@ -798,23 +804,16 @@ export default function App({
     setBusy(true);
     try {
       const updated = await setItemVisibility(item.id, visibility);
-      setSnapshot((current) => ({
-        ...current,
-        items: current.items.map((candidate) =>
-          candidate.id === updated.id ? updated : candidate,
-        ),
-      }));
+      updateSnapshotItem(updated);
       setNotice(`${updated.fileName} will upload as ${visibility}.`);
     } catch (error) {
       setNotice(
-        error instanceof Error
-          ? error.message
-          : "The upload visibility could not be changed.",
+        operatorErrorMessage(error, "The upload visibility could not be changed."),
       );
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [updateSnapshotItem]);
 
   const changeSourceCleanup = useCallback(async (
     item: UploadItem,
@@ -826,12 +825,7 @@ export default function App({
         item.id,
         deleteSourceAfterUpload,
       );
-      setSnapshot((current) => ({
-        ...current,
-        items: current.items.map((candidate) =>
-          candidate.id === updated.id ? updated : candidate,
-        ),
-      }));
+      updateSnapshotItem(updated);
       setNotice(
         deleteSourceAfterUpload
           ? `${updated.fileName} will delete its original source only after YouTube confirms the upload.`
@@ -839,14 +833,12 @@ export default function App({
       );
     } catch (error) {
       setNotice(
-        error instanceof Error
-          ? error.message
-          : "The source cleanup choice could not be saved.",
+        operatorErrorMessage(error, "The source cleanup choice could not be saved."),
       );
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [updateSnapshotItem]);
 
   const deleteOriginalAfterUpload = useCallback(async (
     item: UploadItem,
@@ -861,9 +853,7 @@ export default function App({
       );
     } catch (error) {
       setNotice(
-        error instanceof Error
-          ? error.message
-          : "The original source could not be deleted.",
+        operatorErrorMessage(error, "The original source could not be deleted."),
       );
     } finally {
       setBusy(false);
@@ -885,7 +875,7 @@ export default function App({
       updateConnection(await loadConnectionSettings());
       setLibraryRefreshVersion((version) => version + 1);
       setNotice(
-        `Library refreshed: ${synced} YouTube video${synced === 1 ? "" : "s"} saved locally for ${channel}.${started > 0 ? ` ${started} queued upload${started === 1 ? "" : "s"} started.` : " Automatic upload dispatch was checked."}`,
+        `Library refreshed: ${synced} YouTube video${pluralS(synced)} saved locally for ${channel}.${started > 0 ? ` ${started} queued upload${pluralS(started)} started.` : " Automatic upload dispatch was checked."}`,
       );
     } catch (error) {
       setNotice(
@@ -921,7 +911,7 @@ export default function App({
       const synced = await syncChannelInventory();
       logDedupeActivity(
         "success",
-        `Synced ${synced} uploaded video${synced === 1 ? "" : "s"} into this device's channel inventory.`,
+        `Synced ${synced} uploaded video${pluralS(synced)} into this device's channel inventory.`,
       );
       setDedupePhase("rebuilding");
       logDedupeActivity(
@@ -932,17 +922,17 @@ export default function App({
       const candidateCount = refreshed.duplicates.length;
       logDedupeActivity(
         "success",
-        `Ready for review: ${candidateCount} duplicate candidate${candidateCount === 1 ? "" : "s"}. No videos were removed.`,
+        `Ready for review: ${candidateCount} duplicate candidate${pluralS(candidateCount)}. No videos were removed.`,
       );
       setDedupePhase("complete");
       setNotice(
-        `Dedupe complete for ${channel}: ${synced} uploaded video${synced === 1 ? "" : "s"} checked and ${candidateCount} candidate${candidateCount === 1 ? "" : "s"} ready for review.`,
+        `Dedupe complete for ${channel}: ${synced} uploaded video${pluralS(synced)} checked and ${candidateCount} candidate${pluralS(candidateCount)} ready for review.`,
       );
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "The YouTube library could not be synchronized.";
+      const message = operatorErrorMessage(
+        error,
+        "The YouTube library could not be synchronized.",
+      );
       setDedupePhase("error");
       logDedupeActivity("error", `Dedupe stopped: ${message}`);
       setNotice(`Dedupe could not run: ${message}`);
@@ -962,9 +952,10 @@ export default function App({
       );
     } catch (error) {
       setNotice(
-        error instanceof Error
-          ? error.message
-          : "The duplicate review decision could not be saved.",
+        operatorErrorMessage(
+          error,
+          "The duplicate review decision could not be saved.",
+        ),
       );
     } finally {
       setBusy(false);
@@ -989,9 +980,7 @@ export default function App({
       }
     } catch (error) {
       setNotice(
-        error instanceof Error
-          ? error.message
-          : "Ignored duplicate matches could not be restored.",
+        operatorErrorMessage(error, "Ignored duplicate matches could not be restored."),
       );
     } finally {
       setBusy(false);
@@ -1011,7 +1000,7 @@ export default function App({
     async (count: number) => {
       await refresh();
       setNotice(
-        `YouTube confirmed permanent deletion of ${count} selected video${count === 1 ? "" : "s"}. Local execution receipts were saved.`,
+        `YouTube confirmed permanent deletion of ${count} selected video${pluralS(count)}. Local execution receipts were saved.`,
       );
     },
     [refresh],
@@ -1212,15 +1201,18 @@ export default function App({
               </section>
             }
           >
-          {activeTab === "batch" && (
-            <section
-            aria-labelledby="workspace-tab-button-batch"
+          <section
+            aria-labelledby={`workspace-tab-button-${activeTab}`}
             className="workspace-tab"
-            data-performance-batch-content="ready"
-            id="workspace-tab-batch"
+            data-performance-batch-content={
+              activeTab === "batch" ? "ready" : undefined
+            }
+            id={`workspace-tab-${activeTab}`}
             role="tabpanel"
             tabIndex={0}
           >
+          {activeTab === "batch" && (
+            <>
             <UploadTitleDuplicateReview
               busy={busy}
               candidates={snapshot.pendingTitleDuplicates}
@@ -1242,7 +1234,7 @@ export default function App({
                 <div className="queue-workspace__actions">
                   <span className="item-count">
                     {snapshot.items.length} saved item
-                    {snapshot.items.length === 1 ? "" : "s"}
+                    {pluralS(snapshot.items.length)}
                   </span>
                   <button
                     className="text-button"
@@ -1287,34 +1279,20 @@ export default function App({
                 onDeleteUploadedSource={deleteOriginalAfterUpload}
               />
             </section>
-            </section>
+            </>
           )}
 
           {activeTab === "monitor" && (
-            <section
-            aria-labelledby="workspace-tab-button-monitor"
-            className="workspace-tab"
-            id="workspace-tab-monitor"
-            role="tabpanel"
-            tabIndex={0}
-          >
             <FolderMonitorPanel
               activeChannel={snapshot.activeChannel}
               activeChannelId={snapshot.activeChannelId}
               onNotice={setNotice}
               onQueueRefresh={refreshQueue}
             />
-            </section>
           )}
 
           {activeTab === "dedupe" && (
-            <section
-            aria-labelledby="workspace-tab-button-dedupe"
-            className="workspace-tab"
-            id="workspace-tab-dedupe"
-            role="tabpanel"
-            tabIndex={0}
-          >
+            <>
             <PreIngestDuplicatePanel
               busy={preflightBusy}
               fileCount={preflightFileCount}
@@ -1373,17 +1351,10 @@ export default function App({
                 phase={dedupePhase}
               />
             </section>
-            </section>
+            </>
           )}
 
           {activeTab === "deletion" && (
-            <section
-            aria-labelledby="workspace-tab-button-deletion"
-            className="workspace-tab"
-            id="workspace-tab-deletion"
-            role="tabpanel"
-            tabIndex={0}
-          >
             <section className="panel" aria-labelledby="deletion-heading">
               <div className="section-heading">
                 <div>
@@ -1399,47 +1370,31 @@ export default function App({
                 refreshVersion={libraryRefreshVersion}
               />
             </section>
-            </section>
+          )}
+
+          {activeTab === "rename" && (
+            <VideoTitleRename
+              activeChannel={snapshot.activeChannel}
+              onNotice={setNotice}
+              refreshVersion={libraryRefreshVersion}
+            />
           )}
 
           {activeTab === "transfer" && (
-            <section
-            aria-labelledby="workspace-tab-button-transfer"
-            className="workspace-tab"
-            id="workspace-tab-transfer"
-            role="tabpanel"
-            tabIndex={0}
-          >
             <TransferPanel
               onConnectionChange={updateConnection}
               onNotice={setNotice}
             />
-            </section>
           )}
 
           {activeTab === "account" && (
-            <section
-            aria-labelledby="workspace-tab-button-account"
-            className="workspace-tab"
-            id="workspace-tab-account"
-            role="tabpanel"
-            tabIndex={0}
-          >
             <ConnectionPanel onConnectionChange={updateConnection} />
-            </section>
           )}
 
           {activeTab === "about" && (
-            <section
-            aria-labelledby="workspace-tab-button-about"
-            className="workspace-tab"
-            id="workspace-tab-about"
-            role="tabpanel"
-            tabIndex={0}
-          >
             <DiagnosticsPanel />
-            </section>
           )}
+          </section>
           </Suspense>
         </div>
       </div>

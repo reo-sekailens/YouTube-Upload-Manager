@@ -68,3 +68,11 @@ Build and hash-verify the current Windows x64 NSIS and MSI installers.
     SHA-256 `1308E03E337F0AD66100197CB2996AC6A79630C0B1DA48C287A9A94EA16C3C29`.
   - MSI `YouTube Upload Manager_0.1.9_x64_en-US.msi` — 36,323,328 bytes;
     SHA-256 `ACF1AA8F406DD15FFE8EFE7A5AA2669C19D92BF885DFE3DAF4EBA6BED5FF0FC7`.
+- The regex video-title rename workspace was packaged as the current unsigned
+  x64 NSIS installer on 2026-08-23:
+  `YouTube Upload Manager_0.1.9_x64-setup.exe` — 26,670,794 bytes;
+  SHA-256 `3D21543ADED8D1A8A64E053DDC73F397B374C492033D6AF102BE6C63259B5E5F`.
+  Authenticode status is `NotSigned`.
+- The persistent video-management-permission repair was packaged as the current
+  unsigned x64 NSIS installer on 2026-08-23; SHA-256
+  `8009AC7616CB5DBFD31311C6A361516B5139783D0AB368C96D7D28F0477857E8`.

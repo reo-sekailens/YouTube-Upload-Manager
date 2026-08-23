@@ -43,15 +43,17 @@ describe("folder monitor commands", () => {
   });
 
   it("uses narrow native commands for disable and operator-requested scans", async () => {
-    const { disableFolderMonitor, processExistingFolderFiles, scanFolderMonitorNow } = await import("./local");
+    const { disableFolderMonitor, processExistingFolderFiles, requeueCancelledFolderMonitorFiles, scanFolderMonitorNow } = await import("./local");
 
     await disableFolderMonitor();
     await scanFolderMonitorNow();
     await processExistingFolderFiles();
+    await requeueCancelledFolderMonitorFiles(["watched-item-1"]);
 
     expect(invoke).toHaveBeenNthCalledWith(1, "disable_folder_monitor");
     expect(invoke).toHaveBeenNthCalledWith(2, "scan_folder_monitor_now");
     expect(invoke).toHaveBeenNthCalledWith(3, "process_existing_folder_files");
+    expect(invoke).toHaveBeenNthCalledWith(4, "requeue_cancelled_folder_monitor_files", { itemIds: ["watched-item-1"] });
   });
 
   it("returns a safe disabled state in browser preview mode", async () => {

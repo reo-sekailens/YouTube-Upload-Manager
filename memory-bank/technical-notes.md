@@ -51,6 +51,12 @@
   measured launches recorded zero deltas for periodic invokes, database opens,
   SQLite statements, event messages, worker threads, and FFprobe processes in
   the bounded two-second settled-idle window.
+- The matching interrupted-256 GB package uses one channel-less synthetic
+  `uploading` row declaring 256,000,000,000 bytes and writes zero media. Across
+  80 cold and 80 warm launches every safe-shell value was present, SQLite
+  classified the row into `needs_reconciliation`, and all six settled-idle
+  deltas were zero. Cold first-Batch p50/p95 changed +6.51%/+7.97% versus the
+  authoritative empty profile, within the 10% materiality criterion.
 - Each manual dedupe run records device-local operator activity: start, channel-inventory synchronization, synchronized count, local normalized-title candidate rebuild, final candidate count, and safe errors. The UI reports only command boundaries exposed by the native layer; it never invents per-video progress, and it explicitly states that dedupe removes no video.
 - Dedupe activity includes an accessible determinate three-step phase bar: inventory synchronization, local candidate rebuild, and review readiness. Its values are phase completion, not a fabricated count or elapsed-time estimate; failure visibly remains incomplete.
 - The desktop CSP permits `frame-src https://www.youtube.com` solely for the lazy duplicate-comparison player frames. A separate Tauri WebviewWindow opens directly to YouTube for operator sign-in and has no application capability because only `main` is capability-scoped. The app does not access credentials or browser data; individual video embed and third-party-cookie availability remains controlled by YouTube.
@@ -107,7 +113,16 @@
   the final integrated performance-harness native suite passed 127 tests with zero failures and
   five intentionally ignored release-only benchmarks. This is source/native
   behavior evidence, not packaged startup, installer, or live-provider proof.
-- Nightly Windows portable packaging now includes the prepared `ffprobe.exe` and `ffprobe-license.txt`, verifies the sidecar PE machine is x64, and verifies all three portable ZIP entries. Mobile configs continue to null desktop sidecar/resources. Fresh installer and portable extraction inspection remains a packaged-certification boundary rather than a source/config claim.
+- Nightly Windows portable packaging includes the prepared `ffprobe.exe` and
+  `ffprobe-license.txt`, verifies the sidecar PE machine is x64, and verifies
+  all three portable ZIP entries. Mobile configs continue to null desktop
+  sidecar/resources.
+- Final ordinary unsigned production evidence closes that Windows artifact
+  boundary: the executable is x64 PE `0x8664`; the portable ZIP reads back
+  exactly the matching app, FFprobe, and license; and exact-path desktop smoke
+  rendered a real 81-item Batch profile with the 32-row page bound. The runner
+  rejects the ordinary executable as non-harness. Signing, other platforms,
+  and live-provider behavior remain separate unverified boundaries.
 - Native intake rejects a file before managed copying or queue creation when it exceeds YouTube's published 256 GB maximum or its detected duration exceeds 12 hours. Desktop derives duration through the bundled hidden FFprobe sidecar with ISO-BMFF fallback; Android and iOS use the ISO-BMFF path available without a sidecar. Manual partial-import notices retain the actionable limit reason, while watched-folder observations are marked rejected rather than retried indefinitely.
 - Existing persisted baseline observations migrate to the ordinary observed state during a scan, so older monitor configurations also resume automatic intake without an operator-only **Process existing files** action. Stable files still use current-inventory duplicate checks, direct source reference, resumable queue, and source-cleanup safeguards before dispatch.
 - Every upload path uses one native light-dedupe gate: manual single-file and batch intake, queued retries/resumes, and watched folders. It re-syncs processed YouTube titles before dispatch, compares normalized separators/duplicate-copy suffixes/capture sequences, and also compares other titles in the same local batch or active channel queue. A watched-folder light match is withheld before source hashing and queue creation. Potential false positives remain an explicit, persisted Upload anyway choice; failed synchronization blocks dispatch rather than uploading blind.

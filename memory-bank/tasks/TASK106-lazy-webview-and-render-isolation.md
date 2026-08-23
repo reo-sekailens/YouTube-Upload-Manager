@@ -66,4 +66,8 @@ configuration, and component/browser performance tests.
 - The final local-browser 10,000-row Batch run measured 40 searches at 44/87 ms
   p50/p95 and 40 clear interactions at 42/85 ms, mounted at most 32 rows, and
   recorded zero interaction Long Tasks and runtime errors. This is browser
-  evidence; signed packaged-Tauri validation remains part of TASK112.
+  interaction evidence.
+- The standard unsigned Tauri executable rendered a real device-local 81-item
+  Batch profile as `1–32 of 81` during exact-path desktop smoke, confirming the
+  32-row mounted bound in the ordinary packaged runtime. No interaction or
+  provider operation was performed; signed production remains unverified.

@@ -7,6 +7,7 @@ import {
   isTauri,
   listYouTubePlaylists,
   loadFolderMonitorOverview,
+  requeueCancelledFolderMonitorFiles,
   scanFolderMonitorNow,
 } from "../lib/local";
 import type {
@@ -271,7 +272,43 @@ export function FolderMonitorPanel({
     () => files.filter((file) => ["draft", "queued", "needs_reconciliation"].includes(file.uploadStatus ?? file.observationState)),
     [files],
   );
+  const cancelledFiles = useMemo(
+    () =>
+      files.filter(
+        (file) =>
+          file.uploadStatus === "cancelled" &&
+          file.itemId &&
+          !["duplicate", "duplicate_title", "hash_failed", "rejected"].includes(
+            file.observationState,
+          ),
+      ),
+    [files],
+  );
   const recentFiles = useMemo(() => files.slice(0, 24), [files]);
+
+  const requeueCancelled = async (itemIds: string[]) => {
+    if (!isTauri || busy || itemIds.length === 0) return;
+    setBusy(true);
+    try {
+      const requeued = await requeueCancelledFolderMonitorFiles(itemIds);
+      const refreshed = await loadFolderMonitorOverview();
+      setSettings(refreshed.settings);
+      setFiles(refreshed.files);
+      setLogs(refreshed.logs);
+      await onQueueRefresh();
+      onNotice(
+        `${requeued} cancelled watched-folder ${requeued === 1 ? "file was" : "files were"} queued again and will resume automatically.`,
+      );
+    } catch (error) {
+      onNotice(
+        error instanceof Error
+          ? error.message
+          : "The cancelled watched-folder files could not be queued again.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <section
@@ -361,7 +398,7 @@ export function FolderMonitorPanel({
             {settings.detail}
           </p>
           <p className="folder-monitor__automatic">
-            Automatic scanning wakes only when saved monitor work is due while this app is running.
+            Automatic scanning checks this folder every 5 seconds while monitoring is enabled and the app is running.
           </p>
           <section className="folder-monitor__live" aria-labelledby="folder-monitor-live-heading">
             <div className="folder-monitor__live-heading">
@@ -440,6 +477,45 @@ export function FolderMonitorPanel({
                   </li>
                 ))}
               </ul>
+            </details>
+            <details className="folder-monitor__activity-log folder-monitor__cancelled-files">
+              <summary>Cancelled watched files ({cancelledFiles.length})</summary>
+              {cancelledFiles.length === 0 ? (
+                <p className="folder-monitor__activity-empty">No eligible cancelled watched-folder files are waiting to be queued again.</p>
+              ) : (
+                <>
+                  <p className="folder-monitor__cancelled-copy">Cancelled files stay out of the queue until you explicitly add them back. Duplicate and integrity-safety stops cannot be requeued here.</p>
+                  <button
+                    className="secondary-action"
+                    disabled={busy}
+                    onClick={() => void requeueCancelled(cancelledFiles.flatMap((file) => file.itemId ? [file.itemId] : []))}
+                    type="button"
+                  >
+                    {busy ? "Working…" : `Queue all ${cancelledFiles.length} again`}
+                  </button>
+                  <ul className="folder-monitor__activity-list">
+                    {cancelledFiles.map((file) => (
+                      <li className="folder-monitor__activity-item folder-monitor__cancelled-item" key={`${file.itemId}-${file.updatedAt}`}>
+                        <div>
+                          <div className="folder-monitor__activity-row">
+                            <strong title={file.fileName}>{file.fileName}</strong>
+                            <span>cancelled</span>
+                          </div>
+                          <p>{formatBytes(file.sizeBytes)} · cancelled {formatScanTime(file.updatedAt)}</p>
+                        </div>
+                        <button
+                          className="secondary-action"
+                          disabled={busy}
+                          onClick={() => void requeueCancelled(file.itemId ? [file.itemId] : [])}
+                          type="button"
+                        >
+                          Queue again
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
             </details>
           </section>
           <div className="folder-monitor__actions">

@@ -20,9 +20,10 @@ fn main() {
                                 .chars()
                                 .all(|character| character.is_ascii_digit() || character == '.')
                             && !suffix.is_empty()
-                            && suffix
+                            && (suffix
                                 .chars()
                                 .all(|character| character.is_ascii_lowercase())
+                                || suffix.chars().all(|character| character.is_ascii_digit()))
                     })
         })
         .unwrap_or_else(|| "regular".to_string());

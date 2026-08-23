@@ -120,6 +120,7 @@ folders, batch bridge commands, persistence indexes, and scale fixtures.
 
 - Paged Batch rendering is covered by the final 10,000-row browser harness;
   populated preflight deep-metadata expansion remains a rendered-app follow-up.
-- TASK112 owns packaged startup/operation timing and any explicitly approved
-  non-production Google/YouTube canary. Local fixture results are not packaged
-  or live-provider certification.
+- TASK112 closes available unsigned Windows startup and standard-package smoke,
+  including the real 81-item Batch page bound. Local data fixtures still do not
+  establish live Google/YouTube inventory or provider timing; an approved
+  non-production canary remains unavailable.

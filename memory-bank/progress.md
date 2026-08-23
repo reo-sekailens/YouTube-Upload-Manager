@@ -1,8 +1,9 @@
 # Progress
 
-## 2026-08-23 — Performance implementation complete; final package certification active
+## 2026-08-23 — Performance implementation and available Windows certification complete
 
-- TASK103 through TASK111 are complete. The final integrated checks passed
+- TASK102 through TASK112 are complete for the available evidence scope. The
+  final integrated checks passed
   75/75 frontend tests, 127 native tests with zero failures and five ignored
   release-only benchmarks, 6/6 FFprobe preparation tests, and the deterministic
   frontend/query/worker gates. Initial assets are 230,478 B JavaScript raw,
@@ -19,12 +20,21 @@
   candidates. The production copy path uses the fastest tested safe
   non-regressing variant, 1 MiB standard opens, while preserving final
   `sync_all`, resume reconstruction, cancellation, and bounded scheduling.
-- TASK102 and TASK112 remain in progress until the authoritative interrupted
-  profile and final ordinary unsigned production package/install/smoke receipts
-  are added. Signed production, non-Windows packages, live Google/YouTube, and
-  equivalent healthy-headroom NVMe evidence remain unavailable and are not
-  inferred from local or instrumented-package success. The historical startup
-  marker/storage/WebView semantics are non-equivalent, so no 50% claim is made.
+- The authoritative interrupted 256 GB matrix passed 80 cold and 80 warm runs
+  with no missing safe-shell value, no idle violation, zero media bytes, clean
+  SQLite integrity/cardinality, and recovery into one
+  `needs_reconciliation` item. Cold first-Batch delta versus empty was only
+  +6.51%/+7.97% p50/p95, inside the 10% materiality gate.
+- The standard unsigned x64 executable, NSIS installer, and portable ZIP were
+  hash verified; the PE machine is `0x8664`, and ZIP readback matched the app,
+  FFprobe, and license. Exact-path desktop smoke rendered the active Batch
+  workspace from a real 81-item profile as `1–32 of 81`; no interaction or
+  provider action was performed.
+- TASK102 and TASK112 are complete for available local/source/browser and
+  unsigned Windows evidence. Signed production, non-Windows packages, live
+  Google/YouTube, and equivalent healthy-headroom NVMe evidence remain
+  unavailable and are not inferred. The historical startup marker/storage/
+  WebView semantics are non-equivalent, so no 50% claim is made.
 - Consolidated evidence:
   `memory-bank/certification/performance-certification-2026-08-23.md`.
 

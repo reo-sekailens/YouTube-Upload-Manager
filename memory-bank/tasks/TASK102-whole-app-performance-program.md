@@ -2,7 +2,7 @@
 
 ## Status
 
-in_progress
+completed
 
 ## Objective
 
@@ -78,8 +78,15 @@ performance evidence.
 - The local-browser 10,000-row Batch harness passed 40 searches at 44/87 ms
   p50/p95 and 40 clear interactions at 42/85 ms, with at most 32 mounted rows,
   zero interaction Long Tasks, and zero runtime errors.
-- The master task remains `in_progress` until TASK112 adds the final
-  interrupted-profile result and a standard unsigned package/smoke result. A
-  signed-production package, live Google/YouTube canary, non-Windows packages,
-  and equivalent healthy-headroom NVMe comparison remain separate unavailable
-  evidence boundaries, not implied failures of the implemented local paths.
+- TASK112's authoritative interrupted profile passed: cold first-Batch p50/p95
+  changed only +6.51%/+7.97% versus the authoritative empty profile, within the
+  10% materiality criterion, with zero missing safe-shell receipts and zero
+  settled-idle violations across 160 launches.
+- The ordinary unsigned x64 production executable, NSIS installer, and portable
+  ZIP were hash verified. ZIP readback matched the x64 executable, FFprobe, and
+  license, and an exact-path desktop smoke rendered the real 81-item Batch
+  profile with `1–32 of 81` pagination.
+- The program is complete for available local/source/browser and unsigned
+  Windows evidence. Signed production, live Google/YouTube, non-Windows
+  packages, and an equivalent healthy-headroom NVMe comparison remain separate
+  unavailable external evidence boundaries, not implied results.

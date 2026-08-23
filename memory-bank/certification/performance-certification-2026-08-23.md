@@ -2,13 +2,13 @@
 
 ## Outcome
 
-The app-wide performance implementation in TASK103 through TASK111 is complete
-and locally verified. The final certification is **in progress**: the
-authoritative unsigned performance-harness empty profile and the local-browser
-10,000-row interaction fixture pass, while the authoritative interrupted
-profile and final ordinary unsigned production package/smoke receipts still
-need to be inserted. Signed production, non-Windows packages, live Google/
-YouTube, and an equivalent healthy-headroom NVMe comparison were unavailable.
+The app-wide performance implementation and the available local/unsigned
+Windows certification are **complete**. TASK103 through TASK112 pass their
+available source, browser, local-native, unsigned instrumented-package, and
+standard unsigned-package acceptance slices. Signed production, non-Windows
+packages, live Google/YouTube, and an equivalent healthy-headroom NVMe
+comparison were unavailable and remain explicitly unverified external evidence
+boundaries.
 
 No benchmark artifact contains credentials, OAuth responses, channel IDs,
 source paths, filenames, media contents, resumable-session URIs, or provider
@@ -20,8 +20,8 @@ payloads.
 | --- | --- | --- |
 | Local source/build | passed | 75/75 frontend tests; 127 native tests, 0 failed, 5 ignored release-only benchmarks; 6/6 FFprobe tests; deterministic bundle/query/worker gates |
 | Local browser | passed, scoped | Real Batch `QueueTable`, 10,000 synthetic rows, 40 search and 40 clear interactions; not SQLite/WebView2/provider proof |
-| Unsigned instrumented Windows package | passed for empty; interrupted pending | Real packaged Tauri/WebView2 startup, safe-shell receipt, Batch paint, SQLite integrity/cardinality, settled idle, storage provenance |
-| Standard unsigned Windows production | pending | Final executable/installer/portable hashes, sidecar/license readback, installation and visible smoke receipt not yet inserted |
+| Unsigned instrumented Windows package | passed | Empty and interrupted-256 GB Tauri/WebView2 startup, safe-shell receipt, Batch paint, SQLite integrity/cardinality, settled idle, storage provenance |
+| Standard unsigned Windows production | passed | Exact artifacts hash verified; x64 PE and portable contents verified; exact-path desktop process rendered the real 81-item Batch profile with 32-row pagination |
 | Signed Windows production | unavailable | No local code-signing certificate |
 | macOS/Linux/Android/iOS package | unavailable | Required host/toolchains/devices were not available |
 | Live Google/YouTube | not exercised | No approved non-production account/OAuth canary was supplied |
@@ -95,20 +95,49 @@ The executable was Authenticode `NotSigned` and used the isolated
 `performance-harness` profile. It is packaged runtime evidence, not a standard
 production install or signed release.
 
-## Unsigned packaged Windows — interrupted 256 GB profile
+## Unsigned packaged Windows — authoritative interrupted 256 GB profile
 
-**Authoritative final result placeholder — do not infer or copy the earlier
-pre-safe-shell run.** Insert all of the following when the final run seals:
+Evidence:
 
-- JSON and Markdown absolute paths, byte sizes, and SHA-256 hashes.
-- Executable/installer/build-manifest hashes and equality with the empty run.
-- 80 cold and 80 warm safe-shell/native-ready/first-Batch p50/p95 values.
-- Zero-media fixture proof for declared size 256,000,000,000 bytes.
-- Pre/post `quick_check`, upload/reconciliation/audit cardinality, and sensitive
-  binding count.
-- All six settled-idle deltas and storage headroom receipts.
-- Empty-versus-interrupted safe-shell materiality using the final criterion and
-  a clear pass/fail result.
+- JSON:
+  `I:\YouTube-Upload-Manager-Certification-20260823\runs\interrupted-v4-authoritative\output\packaged-windows-interrupted-256gb.json`
+  — 813,009 B — SHA-256
+  `947088598093BB283A20AEB7C9E9DFE851F7FB9533007D68034EC1739AAAF5B1`.
+- Markdown:
+  `I:\YouTube-Upload-Manager-Certification-20260823\runs\interrupted-v4-authoritative\output\packaged-windows-interrupted-256gb.md`
+  — 2,261 B — SHA-256
+  `CC44686F901A8DC8E18DA9985C2BC6F651FCC6D3BC49B65BF2D4080F1A6D4279`.
+- The executable, installer, build manifest, source, lockfile, FFprobe, and
+  license hashes exactly match the authoritative empty-profile package.
+
+The same two-block method measured 80 cold and 80 warm launches with no removed
+outliers. The closed SQLite template contained one pre-existing `uploading` row
+declaring 256,000,000,000 bytes, zero source/media bytes, no channel or secure
+binding, and passed `quick_check`. Each measured clone began with that exact
+cardinality and ended with one `needs_reconciliation` item, zero `uploading`
+items, two restart-reconciliation audit receipts, the same declared byte count,
+zero sensitive bindings, and `quick_check: ok`.
+
+| Interrupted-profile metric | Cold p50 | Cold p95 | Warm p50 | Warm p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Safe-shell paint, acknowledged by native | 2,899 ms | 3,449 ms | 305 ms | 720 ms |
+| Native ready | 787 ms | 1,019 ms | 558 ms | 1,021 ms |
+| First Batch paint | 4,370 ms | 4,727 ms | 1,550 ms | 2,035 ms |
+| Idle CPU during two seconds | 0 ms | 16 ms | 0 ms | 16 ms |
+| Native invokes | 7 | 7 | 7 | 7 |
+| Database opens | 7 | 7 | 7 | 7 |
+| SQLite statements | 62 | 62 | 62 | 62 |
+
+All 160 safe-shell values were present. Every run recorded zero settled-idle
+periodic invokes, database opens, SQLite statements, event messages, worker
+threads, and FFprobe processes. Storage headroom passed before and after on the
+same `I:` HDD.
+
+Against the authoritative empty profile, cold safe-shell p50 changed -2.39%
+and p95 +4.96%; cold first-Batch p50 changed +6.51% and p95 +7.97%. Both stay
+inside the 10% materiality criterion. The simulated 256 GB declaration
+therefore does not materially delay the cold safe shell or first usable Batch
+workspace, and it writes no synthetic media.
 
 ## Local-browser 10,000-row interaction evidence
 
@@ -161,6 +190,37 @@ The package pins x64 FFprobe SHA-256
 `8CEB4B9EE5ADEDDE47B31E975C1D90C73AD27B6B165A1DCD80C7C545EB65B903`
 (35,147 B).
 
+## Standard unsigned Windows production package and smoke
+
+Retained artifacts:
+
+- Executable:
+  `I:\YouTube-Upload-Manager-Certification-20260823\artifacts\production-unsigned\youtube-upload-manager.exe`
+  — 19,988,480 B — SHA-256
+  `84F39ED1F7827C43BAB5DD2481D503F321D0A1A8A0BB9D816A955BBE7C2C4AA9`.
+- NSIS installer:
+  `I:\YouTube-Upload-Manager-Certification-20260823\artifacts\production-unsigned\YouTube Upload Manager_0.1.9_x64-setup.exe`
+  — 26,669,567 B — SHA-256
+  `4D40D8DDD5FD4A4A7A0213F0E81006D93FBF5CE8DA312DB4462E12071D89E5C8`.
+- Portable ZIP:
+  `I:\YouTube-Upload-Manager-Certification-20260823\artifacts\production-unsigned\YouTube-Upload-Manager_0.1.9_x64-portable-unsigned.zip`
+  — 37,565,048 B — SHA-256
+  `01D9C0F691844052F9D24700DCFFCD98C5F087028EB1A52400303E68D45B712E`.
+
+The production executable is x64 PE machine `0x8664`. ZIP readback contains
+exactly `youtube-upload-manager.exe`, `ffprobe.exe`, and
+`ffprobe-license.txt`; extracted hashes and sizes match the retained production
+executable and pinned sidecar/license above. The performance runner rejects the
+ordinary executable as a non-harness build, proving the production artifact
+does not expose the instrumented harness contract.
+
+The exact retained production executable path and process ID were verified at
+desktop smoke. It rendered the active Batch workspace from a real local
+81-item profile and paginated it as `1–32 of 81`, directly confirming the
+32-row mounted bound in the standard Tauri runtime. No destructive, provider,
+or other interaction was performed. The exact process exited, and UI automation
+stopped at the operator's request.
+
 ## Comparison boundary and remaining receipts
 
 The frozen historical startup baseline used a different first-Batch marker,
@@ -174,13 +234,9 @@ An equivalent healthy-headroom NVMe run also remains unavailable because the
 only local NVMe volume did not meet the 10%-free-space rule. Earlier near-full
 NVMe copy samples are diagnostic only.
 
-Before TASK102/TASK112 can close, add:
-
-1. the authoritative final interrupted-profile section above;
-2. the final ordinary unsigned production executable/installer/portable hashes,
-   FFprobe/license readback, installation result, visible smoke result, and
-   screenshot;
-3. an exact statement of any remaining external signed/platform/provider gates.
-
-These missing evidence levels do not invalidate the completed local source,
-browser, loopback, durable-HDD, or unsigned instrumented empty-profile results.
+TASK102 and TASK112 are complete for the available local and unsigned Windows
+scope. Their completion does not assert the unavailable healthy-NVMe 50%
+comparison, signing, non-Windows packaged runtimes, or live-provider behavior.
+Those evidence levels require external storage headroom, certificates,
+platforms/devices, and an explicitly approved non-production Google/YouTube
+canary respectively.

@@ -27,11 +27,12 @@ describe("workspace render isolation", () => {
 
     expect(markup).toContain('id="workspace-tab-batch"');
     expect(markup).toContain('aria-selected="true"');
-    expect(markup.match(/role="tab"/g)).toHaveLength(7);
+    expect(markup.match(/role="tab"/g)).toHaveLength(8);
     expect(markup.match(/role="tabpanel"/g)).toHaveLength(1);
     for (const inactive of [
       "monitor",
       "dedupe",
+      "rename",
       "deletion",
       "transfer",
       "account",

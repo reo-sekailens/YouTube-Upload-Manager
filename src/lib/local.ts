@@ -492,6 +492,13 @@ export async function processExistingFolderFiles(): Promise<FolderMonitorSetting
   return invoke<FolderMonitorSettings>("process_existing_folder_files");
 }
 
+/** Restores eligible operator-cancelled watched-folder uploads and wakes automatic dispatch. */
+export async function requeueCancelledFolderMonitorFiles(
+  itemIds: string[] = [],
+): Promise<number> {
+  return invoke<number>("requeue_cancelled_folder_monitor_files", { itemIds });
+}
+
 export async function loadConnectionSettings(): Promise<ConnectionSettings> {
   if (!isTauri) return { connected: false };
   return invoke<ConnectionSettings>("load_connection_settings");

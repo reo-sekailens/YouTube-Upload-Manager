@@ -105,7 +105,7 @@ bank architecture/technical documentation.
 
 ## Follow-up boundaries
 
-- TASK110 owns the retained healthy-HDD copy decision and unsigned harness
-  sidecar provenance. TASK112 owns standard unsigned-production, signed,
-  recovery, installer, portable, and provider certification; none is inferred
-  from source/module extraction.
+- TASK110 owns the retained healthy-HDD copy decision and sidecar provenance.
+  TASK112 closes the available unsigned Windows recovery, installer, portable,
+  and desktop-smoke boundary. Signed, other-platform, and provider evidence
+  remains unavailable and is not inferred from source/module extraction.

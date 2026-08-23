@@ -72,7 +72,8 @@ None.
   reference.
 - `memory-bank/certification/performance-certification-2026-08-23.md` records
   the authoritative unsigned packaged empty-profile and browser interaction
-  results. TASK112 owns the final interrupted and production-package boundary.
+  results. TASK112 adds the passing interrupted matrix and standard unsigned
+  production-package/desktop-smoke boundary.
 - The historical startup reference remains retained, but it used a different
   first-Batch marker, shared/low-headroom storage conditions, and non-equivalent
   WebView profile semantics. It is therefore descriptive baseline evidence,

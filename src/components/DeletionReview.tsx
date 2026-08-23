@@ -57,6 +57,7 @@ export function DeletionReview({ activeChannel, activeChannelId, busy = false, i
     false,
   );
   const [loading, setLoading] = useState(false);
+  const [executing, setExecuting] = useState(false);
   const [inventorySearch, setInventorySearch] = useRetainedWorkspaceState(
     "deletion.inventory-search",
     "",
@@ -219,7 +220,7 @@ export function DeletionReview({ activeChannel, activeChannelId, busy = false, i
   };
   const executeRequest = async () => {
     if (!executionRequest || executionConfirmation !== executionRequest.videoId) return;
-    setLoading(true);
+    setExecuting(true);
     try {
       const completed = await executeDeletionRequest(executionRequest.id, executionConfirmation);
       setRequests((current) => current.map((candidate) => candidate.id === completed.id ? completed : candidate));
@@ -227,7 +228,7 @@ export function DeletionReview({ activeChannel, activeChannelId, busy = false, i
       closeExecutionConfirmation();
       onNotice(`YouTube confirmed permanent deletion of ${completed.videoId}. The local execution receipt was saved.`);
     } catch (error) { onNotice(error instanceof Error ? error.message : "YouTube did not confirm the deletion; the saved request will be reconciled rather than restarted."); }
-    finally { setLoading(false); }
+    finally { setExecuting(false); }
   };
 
   const pendingRequests = useMemo(() => requests.filter(isPending), [requests]);
@@ -364,7 +365,7 @@ export function DeletionReview({ activeChannel, activeChannelId, busy = false, i
       </section>
     )}
     {selected && <section className="deletion-confirmation" aria-labelledby="deletion-confirmation-heading"><p className="eyebrow">REQUEST CONFIRMATION</p><h3 id="deletion-confirmation-heading">Request deletion for “{selected.title}”</h3><p>{reviewQueue.length > 0 ? `${reviewQueue.length + 1} selected videos remain in this review queue. Confirm each video ID separately.` : "This creates a local pending request only. Type the full video ID below to prove this is the intended video."}</p><code>{selected.videoId}</code><label htmlFor="delete-video-confirmation">Video ID confirmation</label><input id="delete-video-confirmation" autoComplete="off" autoFocus value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder={selected.videoId} spellCheck={false} /><div className="deletion-confirmation__actions"><button className="secondary-action" disabled={disabled} onClick={closeRequestConfirmation} type="button">Cancel selected review</button><button className="danger-button" disabled={disabled || confirmation !== selected.videoId} onClick={() => void createRequest()} type="button">Create local request{reviewQueue.length > 0 ? " and continue" : ""}</button></div></section>}
-    {executionRequest && <section className="deletion-confirmation deletion-confirmation--final" aria-labelledby="execution-confirmation-heading"><p className="eyebrow">PERMANENT, IRREVERSIBLE ACTION</p><h3 id="execution-confirmation-heading">Delete “{executionRequest.title}” from YouTube</h3><p>This calls YouTube’s delete endpoint. The video cannot be restored by this app. Type the exact video ID a second time to execute this permanent deletion.</p><code>{executionRequest.videoId}</code><label htmlFor="execute-delete-video-confirmation">Exact video ID for permanent deletion</label><input id="execute-delete-video-confirmation" autoComplete="off" autoFocus value={executionConfirmation} onChange={(event) => setExecutionConfirmation(event.target.value)} placeholder={executionRequest.videoId} spellCheck={false} /><div className="deletion-confirmation__actions"><button className="secondary-action" disabled={disabled} onClick={closeExecutionConfirmation} type="button">Keep video</button><button className="danger-button" disabled={disabled || executionConfirmation !== executionRequest.videoId} onClick={() => void executeRequest()} type="button">Delete permanently from YouTube</button></div></section>}
+    {executionRequest && <section aria-busy={executing} className="deletion-confirmation deletion-confirmation--final" aria-labelledby="execution-confirmation-heading"><p className="eyebrow">PERMANENT, IRREVERSIBLE ACTION</p><h3 id="execution-confirmation-heading">Delete “{executionRequest.title}” from YouTube</h3><p>{executing ? "Deleting on YouTube. You can keep reviewing the local library while this request completes." : "This calls YouTube’s delete endpoint. The video cannot be restored by this app. Type the exact video ID a second time to execute this permanent deletion."}</p><code>{executionRequest.videoId}</code><label htmlFor="execute-delete-video-confirmation">Exact video ID for permanent deletion</label><input id="execute-delete-video-confirmation" autoComplete="off" autoFocus disabled={executing} value={executionConfirmation} onChange={(event) => setExecutionConfirmation(event.target.value)} placeholder={executionRequest.videoId} spellCheck={false} /><div className="deletion-confirmation__actions"><button className="secondary-action" disabled={disabled || executing} onClick={closeExecutionConfirmation} type="button">Keep video</button><button className="danger-button" disabled={disabled || executing || executionConfirmation !== executionRequest.videoId} onClick={() => void executeRequest()} type="button">{executing ? "Deleting…" : "Delete permanently from YouTube"}</button></div></section>}
     <div
       aria-busy={loading || inventorySearch !== deferredInventorySearch}
       className="remote-video-list"
