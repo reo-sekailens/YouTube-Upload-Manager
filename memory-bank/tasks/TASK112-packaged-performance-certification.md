@@ -96,38 +96,57 @@ for each actually exercised platform.
   asserts the Node executable, installed Tauri CLI path, complete argument and
   environment propagation, plus the absence of `npm.cmd` and shell execution.
 - The authoritative unsigned instrumented package is
-  `youtube-upload-manager-performance-harness.exe`, 20,034,048 bytes, SHA-256
-  `6CEC897CFE1D83FE7B4F73452974E7ACD7668C4158BF234086DCB7CE4163CB2D`.
-  Its unsigned NSIS installer is 26,685,288 bytes, SHA-256
-  `04D7E400EAB5146756AA40697A90DEE3C07F99CB56933F105310A3DAC4BB1D59`.
+  `youtube-upload-manager-performance-harness.exe`, 20,100,096 bytes, SHA-256
+  `7C49DA881BEFED4BF6B655386519C1512066F4AB45154EE08C18E5D8EFBFFE43`.
+  Its unsigned NSIS installer is 26,704,228 bytes, SHA-256
+  `3DB142E5B55C386013782C966AFDB170F4DFC306E0B32603B403894E5CA4F90B`;
+  build-manifest SHA-256 is
+  `AFACFC0FD5FEFD5AB0EC4FA2C647A3EBC0742EC785609861CEF8D0D414C9910F`.
+- The frozen source snapshot is
+  `I:\YouTube-Upload-Manager-Certification-20260823\source-current-main-48fa-task114`.
+  Its manifest records commit `68a69935160d27e20c21d54b71922fbd92739a9a`,
+  dirty-status SHA-256
+  `35F110ADC3F3A861CCB49DB191C462C497A465135A431F88920676A448704E09`,
+  and later containing `main` commit
+  `555b1fac5e8f89a7ab6bc53f6f3a83b8a3a54e77`. Later Tailwind/action-icon UI
+  migrations are outside this final-v3 artifact.
 - The authoritative empty-profile report contains two reversed 40-run blocks,
   five untimed warmups per mode, 80 measured cold and 80 measured warm launches,
   nearest-rank statistics, raw chronological receipts, and zero removed
-  outliers. The JSON SHA-256 is
-  `7C21E5DE0BEA98ED9B583B7A994208C5209E903CE6927D08CF0A11E91F98F90E`.
+  outliers. The JSON is 811,056 bytes with SHA-256
+  `B5A65FE21783FBD6197BDFA1444A0FEE92CF1EBB2D22087E16FEC3650A95DCFA`;
+  Markdown SHA-256 is
+  `B80CA0D8A4677B94BF570FF333E0B4083DB4071FE36ADD34BD8DACB98DE530D5`.
 - On the healthy-headroom `I:` SATA HDD, empty-profile safe-shell paint was
-  2,970/3,286 ms cold and 158/406 ms warm (p50/p95); native readiness was
-  1,865/2,321 ms and 503/743 ms; first Batch paint was 4,103/4,378 ms and
-  967/1,198 ms. All six settled-idle deltas were zero in every run. Cold and
-  warm SQLite statement counts were exactly 109 and 23 respectively.
+  3,098/3,806 ms cold and 323/613 ms warm (p50/p95); native readiness was
+  2,588/3,155 ms and 1,060/2,419 ms; first Batch paint was 4,628/5,270 ms and
+  1,652/2,983 ms. All six settled-idle counter maxima were zero.
+- One preceding final-v3 empty attempt was correctly rejected during block 2
+  because one native idle duration fell outside 1,900–2,200 ms. No aggregate
+  was emitted. Its note SHA-256 is
+  `48D730623D0915AB4C8681E497E5260BB3019FB4572BB32363148187BBE66162`.
 - The package was `NotSigned` and used the compile-time isolated performance
   profile. This closes the instrumented unsigned-package slice only, not a
   standard unsigned production install, signed production, or live provider.
 - The authoritative interrupted report is
-  `I:\YouTube-Upload-Manager-Certification-20260823\runs\interrupted-v4-authoritative\output\packaged-windows-interrupted-256gb.json`
-  (813,009 bytes, SHA-256
-  `947088598093BB283A20AEB7C9E9DFE851F7FB9533007D68034EC1739AAAF5B1`);
+  `I:\YouTube-Upload-Manager-Certification-20260823\runs\final-v3-interrupted-authoritative\output\packaged-windows-interrupted-256gb.json`
+  (813,880 bytes, SHA-256
+  `0E70B5AE291B3F6B0DCE14AF7C50FED9BEBE84A86FAEE2B6A58F6493A3244953`);
   its Markdown SHA-256 is
-  `CC44686F901A8DC8E18DA9985C2BC6F651FCC6D3BC49B65BF2D4080F1A6D4279`.
+  `2363FFF3F01A45A80272BD8FCD311F354D65A3E57D678139D910C278D351D1AE`.
 - Across 80 cold and 80 warm interrupted launches, every safe-shell receipt was
-  present and all six settled-idle deltas were zero. Cold safe-shell p50/p95
-  was 2,899/3,449 ms, native-ready 787/1,019 ms, and first Batch
-  4,370/4,727 ms; warm values were 305/720, 558/1,021, and 1,550/2,035 ms.
+  present and all six settled-idle counter maxima were zero. Cold safe-shell
+  p50/p95 was 3,029/3,458 ms, native-ready 1,225/1,695 ms, and first Batch
+  4,865/5,485 ms; warm values were 407/621, 991/1,339, and 1,955/2,441 ms.
 - Every clone began with one `uploading` row declaring 256,000,000,000 bytes and
   zero media/sensitive bindings, then passed `quick_check` with one
   `needs_reconciliation` item, zero `uploading` items, and two recovery audit
-  receipts. Cold first-Batch delta versus empty was +6.51%/+7.97% p50/p95,
-  inside the 10% materiality gate.
+  receipts. Cold safe-shell delta versus final-v3 empty was -2.23%/-9.14% and
+  first-Batch was +5.12%/+4.08% p50/p95, inside the 10% materiality gate.
+- The earlier `current-*` v1 matrices remain failed diagnostics: interrupted
+  first-Batch was +14.10%/+16.79% versus the bracketing empty mean. The repair
+  reuses one database connection for interrupted rows, skips secure-store
+  lookup for unscoped rows, and pre-scans legacy UUID media before DB open.
 
 ## Browser interaction certification slice
 

@@ -1,3 +1,5 @@
+import { ChevronLeft, ChevronRight } from "lucide-react";
+
 type PaginationControlsProps = {
   label: string;
   page: number;
@@ -25,23 +27,25 @@ export function PaginationControls({
       </span>
       <div className="flex items-center gap-2">
         <button
-          className="cursor-pointer rounded px-1.5 py-1 text-[0.72rem] font-[680] text-[#344a67] hover:bg-[#f3f5f8] focus-visible:outline-3 focus-visible:outline-[#2d68e847] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-55"
+          className="inline-flex cursor-pointer items-center gap-0.5 rounded px-1.5 py-1 text-[0.72rem] font-[680] text-[#344a67] hover:bg-[#f3f5f8] focus-visible:outline-3 focus-visible:outline-[#2d68e847] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-55"
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
           type="button"
         >
+          <ChevronLeft aria-hidden="true" size={14} strokeWidth={2.25} />
           Previous
         </button>
         <span>
           Page {page} of {pageCount}
         </span>
         <button
-          className="cursor-pointer rounded px-1.5 py-1 text-[0.72rem] font-[680] text-[#344a67] hover:bg-[#f3f5f8] focus-visible:outline-3 focus-visible:outline-[#2d68e847] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-55"
+          className="inline-flex cursor-pointer items-center gap-0.5 rounded px-1.5 py-1 text-[0.72rem] font-[680] text-[#344a67] hover:bg-[#f3f5f8] focus-visible:outline-3 focus-visible:outline-[#2d68e847] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-55"
           disabled={page >= pageCount}
           onClick={() => onPageChange(page + 1)}
           type="button"
         >
           Next
+          <ChevronRight aria-hidden="true" size={14} strokeWidth={2.25} />
         </button>
       </div>
     </nav>

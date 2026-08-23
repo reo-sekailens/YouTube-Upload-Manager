@@ -65,15 +65,19 @@ None.
   loopback `308 Range` benchmark for file-read, current-shaped, and pooled
   streaming modes. The tracked baseline records its redacted p50/p95 and copy/
   memory characteristics; TASK108 owns the final throughput gate.
-- The final optimized local checks passed 75/75 frontend tests, 127 native
-  tests with zero failures and five ignored release-only benchmarks, 6/6
-  FFprobe tests, and deterministic bundle/query/worker gates. TASK108's upload
+- The frozen final-v3 local checks passed TypeScript, 16 frontend files/87
+  tests, 140 native tests with zero failures and five ignored release-only
+  benchmarks, 6/6 FFprobe tests, and deterministic bundle/query/worker gates.
+  Initial assets passed at 228,995 B JavaScript raw, 71,496 B gzip, and
+  38,470 B CSS. TASK108's upload
   fixture passed at 204.516/239.985 ms p50/p95 and 2.0429x its pooled-streaming
   reference.
 - `memory-bank/certification/performance-certification-2026-08-23.md` records
-  the authoritative unsigned packaged empty-profile and browser interaction
-  results. TASK112 adds the passing interrupted matrix and standard unsigned
-  production-package/desktop-smoke boundary.
+  the authoritative final-v3 unsigned empty/interrupted matrices and browser
+  interaction result. The runner correctly rejected one preceding empty attempt
+  when a settled-idle duration fell outside 1,900–2,200 ms and emitted no
+  aggregate. TASK112 adds standard unsigned production artifact integrity;
+  final-v3 ordinary-executable launch remains unexercised.
 - The historical startup reference remains retained, but it used a different
   first-Batch marker, shared/low-headroom storage conditions, and non-equivalent
   WebView profile semantics. It is therefore descriptive baseline evidence,

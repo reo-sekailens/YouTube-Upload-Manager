@@ -9643,21 +9643,43 @@ fn queue_item(id: String, state: State<'_, AppState>) -> Result<UploadItem, Stri
     Ok(item)
 }
 
-#[tauri::command]
-fn clear_upload_queue(state: State<'_, AppState>) -> Result<usize, String> {
-    let connection = database(&state)?;
-    let changed = connection.execute(
-        "UPDATE upload_items SET status = 'cancelled', detail = 'Operator removed this local upload job from the queue. The original media remains in its chosen location; an in-flight request stops at its next checkpoint.', updated_at = ?1 WHERE status IN ('importing', 'draft', 'queued', 'dispatching', 'uploading', 'needs_reconciliation', 'failed')",
-        [now()],
-    ).map_err(user_error)?;
+fn clear_upload_queue_impl(state: &AppState) -> Result<usize, String> {
+    let connection = database(state)?;
+    let settings = connection_settings(&connection)?;
+    let changed = if let Some(channel_id) = settings.active_channel_id.as_deref() {
+        connection.execute(
+            "UPDATE upload_items SET status = 'cancelled', detail = 'Operator removed this local upload job from the queue. Original files, BLAKE3 evidence, and local records remain; an in-flight request stops at its next checkpoint.', updated_at = ?1 WHERE channel_id = ?2 AND status IN ('importing', 'draft', 'queued', 'dispatching', 'uploading', 'needs_reconciliation', 'failed')",
+            params![now(), channel_id],
+        )
+    } else {
+        connection.execute(
+            "UPDATE upload_items SET status = 'cancelled', detail = 'Operator removed this local upload job from the queue. Original files, BLAKE3 evidence, and local records remain; an in-flight request stops at its next checkpoint.', updated_at = ?1 WHERE (channel_id IS NULL OR channel_id = '') AND status IN ('importing', 'draft', 'queued', 'dispatching', 'uploading', 'needs_reconciliation', 'failed')",
+            [now()],
+        )
+    }
+    .map_err(user_error)?;
     if changed > 0 {
-        audit_global(
-            &connection,
-            "upload_queue_cleared",
-            "Operator cleared local upload jobs without deleting original media",
-        )?;
+        if let Some(channel_name) = settings.active_channel.as_deref() {
+            audit_global_scoped(
+                &connection,
+                channel_name,
+                "upload_queue_cleared",
+                "Operator cleared the current local queue without deleting original files, BLAKE3 evidence, or local records",
+            )?;
+        } else {
+            audit_global(
+                &connection,
+                "upload_queue_cleared",
+                "Operator cleared the unbound local queue without deleting original files, BLAKE3 evidence, or local records",
+            )?;
+        }
     }
     Ok(changed)
+}
+
+#[tauri::command]
+fn clear_upload_queue(state: State<'_, AppState>) -> Result<usize, String> {
+    clear_upload_queue_impl(&state)
 }
 
 #[tauri::command]
@@ -13676,6 +13698,103 @@ mod tests {
         let serialized = serde_json::to_string(&receipt).unwrap();
         assert!(!serialized.contains(&root.to_string_lossy().to_string()));
         drop(receipt);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clearing_current_queue_retains_evidence_and_other_channel_records() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let connection = database(&state).unwrap();
+        let timestamp = now();
+        connection.execute(
+            "INSERT INTO connection_settings (singleton, active_channel, active_channel_id, updated_at) VALUES (1, 'Channel A', 'channel-a', ?1)",
+            [&timestamp],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, source_path, workspace_path, size_bytes, digest, status, confirmed_bytes, total_bytes, resumable_session_uri, video_id, created_at, updated_at) VALUES ('active', 'Active', 'active.mp4', 'Channel A', 'channel-a', 'source-active.mp4', 'workspace-active.mp4', 10, 'digest-active', 'queued', 4, 10, 'checkpoint-active', 'video-active', ?1, ?1)",
+            [&timestamp],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES ('other', 'Other', 'other.mp4', 'Channel B', 'channel-b', 'workspace-other.mp4', 11, 'digest-other', 'queued', 11, ?1, ?1)",
+            [&timestamp],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, workspace_path, size_bytes, digest, status, total_bytes, video_id, created_at, updated_at) VALUES ('uploaded', 'Uploaded', 'uploaded.mp4', 'Channel A', 'channel-a', 'workspace-uploaded.mp4', 12, 'digest-uploaded', 'uploaded', 12, 'video-uploaded', ?1, ?1)",
+            [&timestamp],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO remote_videos (video_id, channel_name, channel_id, title, updated_at) VALUES ('remote-other', 'Channel B', 'channel-b', 'Remote other', ?1)",
+            [&timestamp],
+        ).unwrap();
+        drop(connection);
+
+        assert_eq!(clear_upload_queue_impl(&state).unwrap(), 1);
+
+        let connection = database(&state).unwrap();
+        let active: (String, String, String, String, Option<String>) = connection.query_row(
+            "SELECT status, digest, source_path, workspace_path, resumable_session_uri FROM upload_items WHERE id = 'active'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).unwrap();
+        assert_eq!(
+            active,
+            (
+                "cancelled".into(),
+                "digest-active".into(),
+                "source-active.mp4".into(),
+                "workspace-active.mp4".into(),
+                Some("checkpoint-active".into())
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status FROM upload_items WHERE id = 'other'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "queued"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status FROM upload_items WHERE id = 'uploaded'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "uploaded"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM upload_items", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM remote_videos WHERE video_id = 'remote-other'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM audit_events WHERE kind = 'upload_queue_cleared' AND channel_id = 'channel-a'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        drop(connection);
+        let snapshot = dashboard_snapshot_impl(&state).unwrap();
+        assert!(snapshot.items.iter().all(|item| item.id != "active"));
+        assert!(snapshot.items.iter().any(|item| item.id == "uploaded"));
         fs::remove_dir_all(root).unwrap();
     }
 

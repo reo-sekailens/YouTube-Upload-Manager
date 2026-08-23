@@ -167,8 +167,8 @@ async function measureClear(
 ): Promise<InteractionSample> {
   const input = root.querySelector<HTMLInputElement>("#upload-queue-title-search");
   const region = input?.closest<HTMLElement>("[data-queue-table]");
-  const button = Array.from(root.querySelectorAll<HTMLButtonElement>("button")).find(
-    ({ textContent }) => textContent?.trim() === "Clear search",
+  const button = root.querySelector<HTMLButtonElement>(
+    'button[aria-label="Clear search"]',
   );
   if (!input || !region || !button)
     throw new Error("The real Batch clear-search control is missing.");

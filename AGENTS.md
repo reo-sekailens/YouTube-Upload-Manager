@@ -20,3 +20,11 @@ Create or update a scoped task file in `memory-bank/tasks/` for non-trivial work
 ## Documentation expectations
 
 Update the memory bank when a decision, boundary, integration, workflow, or verified result changes. Record what was actually tested; distinguish local validation from live-provider verification.
+
+## Git commit messages
+
+Every generated commit message must follow Git's conventional subject-and-body form:
+
+- Write a concise, imperative subject line that identifies the affected area and the purpose of the commit.
+- Include a blank line followed by a contextual body describing the material changes, additions, and removals, plus any relevant migration, compatibility, or verification context.
+- Keep the message faithful to the staged diff; do not use generic subjects or omit the body for non-trivial changes.

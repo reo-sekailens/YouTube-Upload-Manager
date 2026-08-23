@@ -81,6 +81,9 @@ const workspaceTabs = [
 ] as const;
 type WorkspaceTab = (typeof workspaceTabs)[number][0];
 
+const AppActionIcon = lazy(() => import("./components/AppActionIcon"));
+const QueueToolbar = lazy(() => import("./components/QueueToolbar"));
+
 const ConnectionPanel = lazy(() =>
   import("./components/ConnectionPanel").then((module) => ({
     default: module.ConnectionPanel,
@@ -610,7 +613,7 @@ export default function App({
       const cleared = await clearUploadQueue();
       await refresh();
       setNotice(
-        `${cleared} local upload job${cleared === 1 ? " was" : "s were"} removed from the queue. Media copies were retained.`,
+        `${cleared} local upload job${cleared === 1 ? " was" : "s were"} removed from this queue. Local records, BLAKE3 hashes, and original files were retained.`,
       );
     } finally {
       setBusy(false);
@@ -1074,12 +1077,16 @@ export default function App({
         </div>
         <div className="flex flex-wrap justify-end gap-2">
           <button
-            className={secondaryButtonClass}
+            aria-label="Refresh library"
+            className={`${secondaryButtonClass} inline-flex size-9 items-center justify-center p-0`}
             disabled={!snapshot.activeChannel || busy}
             onClick={() => void refreshYouTubeLibrary()}
+            title="Refresh library"
             type="button"
           >
-            Refresh library
+            <Suspense fallback={null}>
+              <AppActionIcon name="refresh" />
+            </Suspense>
           </button>
           <button
             className={primaryButtonClass}
@@ -1240,20 +1247,9 @@ export default function App({
                     interrupted work can continue where it stopped.
                   </p>
                 </div>
-                <div className="ui-action-row items-center gap-3">
-                  <span className="ui-queue-count">
-                    {snapshot.items.length} saved item
-                    {pluralS(snapshot.items.length)}
-                  </span>
-                  <button
-                    className={secondaryButtonClass}
-                    disabled={busy}
-                    onClick={() => void clearUploads()}
-                    type="button"
-                  >
-                    Clear upload queue
-                  </button>
-                </div>
+                <Suspense fallback={<span className="ui-queue-count">{snapshot.items.length} saved item{snapshot.items.length === 1 ? "" : "s"}</span>}>
+                  <QueueToolbar busy={busy} count={snapshot.items.length} onClear={() => void clearUploads()} />
+                </Suspense>
               </div>
               <UploadProgressSummary items={snapshot.items} />
               <ManualUploadDefaultsPanel />

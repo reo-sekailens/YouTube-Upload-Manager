@@ -2,7 +2,7 @@
 
 ## Status
 
-in-progress
+completed
 
 ## Objective
 
@@ -41,3 +41,20 @@ whose meaning, risk, or workflow context requires text.
 - `npm run performance:frontend:check`
 - Browser screenshot/DOM checks for tooltip names, keyboard access, and mobile
   overflow.
+
+## Completion evidence (2026-08-23)
+
+- Added `lucide-react` and used it as the sole control-icon source. Icon-only
+  Refresh library, Clear upload queue, and Clear search buttons have matching
+  `aria-label` and `title` text. Pagination and setup controls retain clear
+  visible action text alongside their directional/progress icons.
+- The action-icon module is lazy-loaded with the compact App controls, keeping
+  the fixed initial JS budget intact: `npm run performance:frontend:check`
+  passed at 223.68 KiB raw / 69.95 KiB gzip JS and 35.24 KiB CSS.
+- Updated the 10,000-row interaction harness to locate the intentional
+  icon-only Clear search button by accessible name, not removed visible text.
+  It passed with search p95 77 ms, clear p95 74 ms, and no interaction Long
+  Tasks.
+- Passed `npm run check`, `npm test`, `npm run check:tailwind-ui`, and
+  `git diff --check`. Browser fixture inspection confirmed the Refresh library
+  button exposes its matching hover title and no horizontal overflow.

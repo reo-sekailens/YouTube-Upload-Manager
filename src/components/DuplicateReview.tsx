@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { Pause, Play, RotateCcw, RotateCw, X } from "lucide-react";
 import "./DuplicateReview.lazy.css";
 import {
   clampComparisonPosition,
@@ -44,41 +45,6 @@ function formatDuration(seconds: number) {
   const wholeSeconds = Math.max(0, Math.floor(seconds));
   return `${Math.floor(wholeSeconds / 60)}:${String(wholeSeconds % 60).padStart(2, "0")}`;
 }
-function PlayIcon() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24">
-      <path d="m8 5 11 7-11 7V5Z" fill="currentColor" />
-    </svg>
-  );
-}
-function PauseIcon() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24">
-      <path d="M7 5h4v14H7V5Zm6 0h4v14h-4V5Z" fill="currentColor" />
-    </svg>
-  );
-}
-function RewindTenIcon() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24">
-      <path
-        d="M10.8 5.4A8 8 0 1 1 4 13.3h2A6 6 0 1 0 11 7.4V11L4.8 6.2 11 1.5v3.9h-.2Zm1.6 5.1h1.3v5.2h-1.3v-3.8l-1 .8-.7-.9 1.7-1.3Z"
-        fill="currentColor"
-      />
-    </svg>
-  );
-}
-function ForwardTenIcon() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24">
-      <path
-        d="M13.2 5.4A8 8 0 1 0 20 13.3h-2A6 6 0 1 1 13 7.4v3.6l6.2-4.8L13 1.5v3.9h.2Zm-1.6 5.1h-1.3v5.2h1.3v-3.8l1 .8.7-.9-1.7-1.3Z"
-        fill="currentColor"
-      />
-    </svg>
-  );
-}
-
 type DuplicateReviewProps = {
   activeChannelId?: string;
   candidates: DuplicateCandidate[];
@@ -445,11 +411,13 @@ function EmbeddedComparison({
           </button>
           {previewLoaded && (
             <button
+              aria-label="Close comparison"
               className={secondaryButtonClass}
               onClick={unloadPreview}
+              title="Close comparison"
               type="button"
             >
-              Close comparison
+              <X aria-hidden="true" size={16} />
             </button>
           )}
         </div>
@@ -705,7 +673,7 @@ function EmbeddedComparison({
             title="Back 10 seconds"
             type="button"
           >
-            <RewindTenIcon />
+            <RotateCcw aria-hidden="true" />
           </button>
           <button
             aria-label={playing ? "Pause both videos" : "Play both videos"}
@@ -714,7 +682,7 @@ function EmbeddedComparison({
             title={playing ? "Pause both videos" : "Play both videos"}
             type="button"
           >
-            {playing ? <PauseIcon /> : <PlayIcon />}
+            {playing ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}
           </button>
           <button
             aria-label="Move both videos forward 10 seconds"
@@ -728,7 +696,7 @@ function EmbeddedComparison({
             title="Forward 10 seconds"
             type="button"
           >
-            <ForwardTenIcon />
+            <RotateCw aria-hidden="true" />
           </button>
         </div>
         <label htmlFor={`comparison-position-${candidate.id}`}>

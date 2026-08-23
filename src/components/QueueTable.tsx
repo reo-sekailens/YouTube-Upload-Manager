@@ -1,4 +1,5 @@
 import { useDeferredValue, useMemo, useState } from "react";
+import { Trash2, X } from "lucide-react";
 import type { UploadItem, UploadVisibility } from "../lib/types";
 import { windowItems } from "../lib/list-windowing";
 import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
@@ -129,7 +130,7 @@ export function QueueTable({
             type="search"
             value={titleQuery}
           />
-          {titleQuery ? <button className={secondaryButtonClass} onClick={() => setTitleQuery("")} type="button">Clear search</button> : null}
+          {titleQuery ? <button aria-label="Clear search" className={`${secondaryButtonClass} inline-flex size-8 items-center justify-center p-0`} onClick={() => setTitleQuery("")} title="Clear search" type="button"><X aria-hidden="true" size={15} strokeWidth={2.25} /></button> : null}
         </div>
       </div>
       <table className="w-full min-w-[860px] border-separate border-spacing-y-2.5 max-sm:min-w-0 max-sm:[&_tbody]:block max-sm:[&_tr]:block max-sm:[&_tr]:w-full max-sm:[&_tr]:border-b max-sm:[&_tr]:border-[#e4e8ee] max-sm:[&_tr]:py-3 max-sm:[&_thead]:hidden" >
@@ -188,7 +189,7 @@ export function QueueTable({
                   <div className="flex flex-col items-start gap-2">
                     <StatusPill status={item.status} />
                     <div className="flex flex-wrap justify-end gap-1.5 max-sm:mt-1 max-sm:justify-start">
-                      {item.status === "draft" ? <><button className={secondaryButtonClass} disabled={busy} onClick={() => onQueue(item)} type="button">Add to queue</button><button className={dangerButtonClass} disabled={busy} onClick={() => onCancel(item)} type="button">Remove</button></> : item.status === "uploaded" && !item.deleteSourceAfterUpload && !item.sourceDeleteStatus ? <button className={dangerButtonClass} disabled={busy} onClick={() => setPendingSourceDelete(item)} type="button">Delete original…</button> : ["queued", "dispatching", "uploading", "needs_reconciliation", "failed", "importing"].includes(item.status) ? <button className={dangerButtonClass} disabled={busy} onClick={() => onCancel(item)} type="button">{item.status === "uploading" ? "Cancel upload" : "Remove"}</button> : <span className="text-[0.72rem] leading-snug text-[#7b8799]">Receipt saved on this device</span>}
+                      {item.status === "draft" ? <><button className={secondaryButtonClass} disabled={busy} onClick={() => onQueue(item)} type="button">Add to queue</button><button className={dangerButtonClass} disabled={busy} onClick={() => onCancel(item)} type="button">Remove</button></> : item.status === "uploaded" && !item.deleteSourceAfterUpload && !item.sourceDeleteStatus ? <button aria-label="Delete original file" className={`${dangerButtonClass} inline-flex size-8 items-center justify-center p-0`} disabled={busy} onClick={() => setPendingSourceDelete(item)} title="Delete original file" type="button"><Trash2 aria-hidden="true" size={15} strokeWidth={2.25} /></button> : ["queued", "dispatching", "uploading", "needs_reconciliation", "failed", "importing"].includes(item.status) ? <button className={dangerButtonClass} disabled={busy} onClick={() => onCancel(item)} type="button">{item.status === "uploading" ? "Cancel upload" : "Remove"}</button> : <span className="text-[0.72rem] leading-snug text-[#7b8799]">Receipt saved on this device</span>}
                     </div>
                   </div>
                 </td>

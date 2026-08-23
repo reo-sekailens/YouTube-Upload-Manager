@@ -58,20 +58,25 @@ fixtures prove parity.
 - Startup returns connection, crash, channel-scoped dashboard, and readiness
   state in one envelope from one SQLite connection. Queue dispatch additionally
   filters by the active immutable channel ID.
-- Focused native startup tests passed 6/6. The final native performance-harness
-  suite passed 127 tests with zero failures and five intentionally ignored,
+- Focused native startup tests passed 6/6. The frozen final-v3 isolated release
+  suite passed 140 tests with zero failures and five intentionally ignored,
   including the 512 KiB stack regression.
-- Type checking, the production frontend build, all 75 frontend tests, and the
-  frontend payload budget passed. Browser-preview QA proved safe-first and
+- TypeScript, the production frontend build, 16 files/87 frontend tests, and
+  the frontend payload budget passed. Browser-preview QA proved safe-first and
   crash-first rendering, recovery unlock, one active lazy workspace, and zero
   console warnings/errors.
-- The authoritative unsigned packaged empty-profile harness recorded the actual
-  shell receipt before allowing deferred startup completion. Across 80 cold and
-  80 warm runs, safe-shell paint was 2,970/3,286 ms cold and 158/406 ms warm
-  (p50/p95); native readiness was 1,865/2,321 ms and 503/743 ms; first Batch
-  paint was 4,103/4,378 ms and 967/1,198 ms.
-- The authoritative interrupted 256 GB package recorded all 160 safe-shell
-  receipts. Cold safe-shell p50/p95 changed -2.39%/+4.96% and first-Batch
-  p50/p95 changed +6.51%/+7.97% versus empty, passing the 10% materiality gate
-  with zero media bytes. Signed production and live-provider behavior are not
-  inferred.
+- The authoritative unsigned final-v3 empty harness recorded the actual shell
+  receipt before allowing deferred startup completion. Across 80 cold and 80
+  warm runs, safe-shell paint was 3,098/3,806 ms cold and 323/613 ms warm
+  (p50/p95); native readiness was 2,588/3,155 ms and 1,060/2,419 ms; first Batch
+  paint was 4,628/5,270 ms and 1,652/2,983 ms.
+- The first current-source interrupted matrix failed honestly: first-Batch
+  p50/p95 was +14.10%/+16.79% versus the bracketing empty mean. Recovery was
+  then narrowed to one database connection for interrupted rows, no secure-
+  store lookup for deliberately unscoped rows, and a legacy-UUID media pre-scan
+  before opening SQLite.
+- The authoritative post-repair interrupted final-v3 package recorded all 160
+  safe-shell receipts and zero cardinality or idle violations. Cold safe-shell
+  p50/p95 changed -2.23%/-9.14% and first-Batch p50/p95 changed +5.12%/+4.08%
+  versus final-v3 empty, passing the 10% materiality gate with zero media bytes.
+  Signed production and live-provider behavior are not inferred.
