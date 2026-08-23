@@ -4,36 +4,45 @@
 
 - TASK102 through TASK112 are complete for the available evidence scope. The
   final integrated checks passed
-  75/75 frontend tests, 127 native tests with zero failures and five ignored
+  TypeScript, 16 frontend files/87 tests, 140 native tests with zero failures
+  and five ignored
   release-only benchmarks, 6/6 FFprobe preparation tests, and the deterministic
-  frontend/query/worker gates. Initial assets are 230,478 B JavaScript raw,
-  71,657 B JavaScript gzip, and 38,470 B CSS raw.
-- The authoritative unsigned performance package measured 80 cold and 80 warm
+  frontend/query/worker gates. Initial assets are 228,995 B JavaScript raw,
+  71,496 B JavaScript gzip, and 38,470 B CSS raw.
+- Final-v3 evidence is frozen from
+  `source-current-main-48fa-task114` at manifest commit `68a6993`, dirty-status
+  SHA-256 `35F110ADC3F3A861CCB49DB191C462C497A465135A431F88920676A448704E09`;
+  containing `main` commit `555b1fa` was recorded later. Subsequent Tailwind and
+  action-icon work in the live repository is outside this artifact.
+- The authoritative final-v3 unsigned harness measured 80 cold and 80 warm
   empty-profile launches in two reversed blocks on a healthy-headroom `I:` SATA
-  HDD. Safe-shell paint was 2,970/3,286 ms cold and 158/406 ms warm p50/p95;
-  first Batch paint was 4,103/4,378 ms and 967/1,198 ms. All six settled-idle
-  delta counters were zero in all 160 launches.
-- The real Batch browser fixture passed 40 searches at 44/87 ms p50/p95 and 40
-  clear interactions at 42/85 ms with 10,000 synthetic rows, at most 32 mounted
+  HDD. Safe-shell paint was 3,098/3,806 ms cold and 323/613 ms warm p50/p95;
+  first Batch paint was 4,628/5,270 ms and 1,652/2,983 ms. All six settled-idle
+  counter maxima were zero. One preceding attempt was correctly rejected for an
+  out-of-window idle duration and emitted no aggregate.
+- The final-v3 Batch browser fixture passed 40 searches at 33/67 ms p50/p95 and
+  40 clear interactions at 33/67 ms with 10,000 synthetic rows, at most 32 mounted
   records, zero interaction Long Tasks, and zero runtime errors.
 - Healthy-HDD copy evidence rejected the 8 MiB and 1 MiB sequential-scan copy
   candidates. The production copy path uses the fastest tested safe
   non-regressing variant, 1 MiB standard opens, while preserving final
   `sync_all`, resume reconstruction, cancellation, and bounded scheduling.
-- The authoritative interrupted 256 GB matrix passed 80 cold and 80 warm runs
-  with no missing safe-shell value, no idle violation, zero media bytes, clean
-  SQLite integrity/cardinality, and recovery into one
-  `needs_reconciliation` item. Cold first-Batch delta versus empty was only
-  +6.51%/+7.97% p50/p95, inside the 10% materiality gate.
-- The standard unsigned x64 executable, NSIS installer, and portable ZIP were
-  hash verified; the PE machine is `0x8664`, and ZIP readback matched the app,
-  FFprobe, and license. Exact-path desktop smoke rendered the active Batch
-  workspace from a real 81-item profile as `1–32 of 81`; no interaction or
-  provider action was performed.
+- The initial current-source interrupted v1 matrix failed the gate at
+  +14.10%/+16.79% first-Batch p50/p95 versus the bracketing empty mean. After
+  reusing one DB connection, skipping secure-store lookup for unscoped rows,
+  and pre-scanning legacy UUID media before DB open, final-v3 passed all 160
+  runs with zero cardinality/idle violations. Cold safe-shell delta was
+  -2.23%/-9.14% and first Batch +5.12%/+4.08%, inside the 10% gate.
+- Final-v3 ordinary unsigned executable, NSIS, and portable ZIP integrity
+  passed: `NotSigned`, PE `0x8664`, exact three-file ZIP/readback, and ordinary-
+  executable harness rejection. The final-v3 ordinary executable was not
+  launched; the exact-path 81-item smoke remains historical to an earlier
+  artifact only.
 - TASK102 and TASK112 are complete for available local/source/browser and
-  unsigned Windows evidence. Signed production, non-Windows packages, live
-  Google/YouTube, and equivalent healthy-headroom NVMe evidence remain
-  unavailable and are not inferred. The historical startup marker/storage/
+  unsigned Windows instrumented-package and production-artifact-integrity
+  evidence. Final-v3 ordinary launch, signed production, non-Windows packages,
+  live Google/YouTube, and equivalent healthy-headroom NVMe evidence remain
+  unavailable/not exercised and are not inferred. The historical marker/storage/
   WebView semantics are non-equivalent, so no 50% claim is made.
 - Consolidated evidence:
   `memory-bank/certification/performance-certification-2026-08-23.md`.

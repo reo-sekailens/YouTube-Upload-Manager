@@ -161,36 +161,39 @@ for each actually exercised platform.
   window removed observed 50-56 ms clear-result render tasks while preserving
   pagination, complete result counts, and a bounded real-data view.
 - Windows Edge 151 evidence on a 1416x1108 viewport passed: 40 searches had
-  p50/p95/max 44/87/91 ms; 40 Batch clears had 42/85/96 ms; all 80 chronological
+  p50/p95/max 33/67/74 ms; 40 Batch clears had 33/67/67 ms; all 80 chronological
   samples mounted at most 32 rows; maximum interaction long task was 0 ms; and
   runtime errors were zero. JSON SHA-256 is
-  `D108AB1207285E04C7FD046A4DE25321357D44245CCA7E1806D194A81917236F`;
+  `A9553213B8FA512262F7C9E35E20AB7EDAD00F9EB464E1C22C0742509383EAC8`;
   screenshot SHA-256 is
-  `35822003D9DC703FDCC024818BC91678E9B17C158C9AE5A4D0612C48666ED3DF`.
+  `3AA8463CE37188ECC03A6B8996C8DAEF54CF4074797F0A99F9FA47D99EAFD948`.
 - This closes the local browser interaction-response slice only. It does not
   substitute for packaged startup, WebView2, signed production, or live Google
   and YouTube evidence.
 
 ## Certification state
 
-- Local source/build: passed — 75/75 frontend tests; 127 native tests, zero
-  failed, five ignored release-only benchmarks; 6/6 FFprobe tests; frontend
-  bundle gate at 230,478 B raw / 71,657 B gzip and CSS at 38,470 B.
+- Frozen local source/build: passed — TypeScript; 16 frontend files/87 tests;
+  140 native tests, zero failed, five ignored release-only benchmarks; 6/6
+  FFprobe tests; frontend bundle gate at 228,995 B raw / 71,496 B gzip and CSS
+  at 38,470 B.
 - Local browser: passed for the 10,000-row Batch interaction slice only.
 - Unsigned instrumented Windows package: empty and interrupted-profile startup,
   recovery, integrity, and settled idle passed.
-- Standard unsigned Windows production package: passed. Executable
-  `84F39ED1F7827C43BAB5DD2481D503F321D0A1A8A0BB9D816A955BBE7C2C4AA9`
-  (19,988,480 bytes), NSIS
-  `4D40D8DDD5FD4A4A7A0213F0E81006D93FBF5CE8DA312DB4462E12071D89E5C8`
-  (26,669,567 bytes), and portable ZIP
-  `01D9C0F691844052F9D24700DCFFCD98C5F087028EB1A52400303E68D45B712E`
-  (37,565,048 bytes) were verified. PE machine was `0x8664`; ZIP readback
+- Standard unsigned Windows production artifact integrity: passed. Executable
+  `50D06CCA95824CF94974D57854E97E196E0220AC2737CD09829EDF340B983FB4`
+  (20,057,088 bytes), NSIS
+  `5137ED03E448B9F0263C4A929E490DCF8AAABB0BA51CF169D49C34DB5513293F`
+  (26,686,021 bytes), and portable ZIP
+  `DC49C1BE9BC53A3146878BA1954C8C6A88A03C90473D05A5BB171188E75A10DB`
+  (37,601,064 bytes) were verified. The 1,941-byte production manifest SHA-256
+  is `D01D32999E9F551F5C86C5088E6B7B0396672B38D64C6F3C268F9AF519FFED7F`.
+  PE machine was `0x8664`; ZIP readback
   matched the app, FFprobe, and license; the runner rejected the ordinary
   executable as non-harness.
-- Standard unsigned desktop smoke: passed at the exact retained executable/PID.
-  The active Batch workspace rendered a real 81-item profile as `1–32 of 81`.
-  No interaction or provider action was performed, and the exact process exited.
+- Standard unsigned final-v3 executable launch: not exercised. The historical
+  exact-path 81-item smoke belongs to an earlier ordinary artifact and is not
+  evidence for the final-v3 executable.
 - Signed Windows production: unavailable; no local code-signing certificate.
 - macOS, Linux, Android, and iOS packaged runtime: unavailable on this host.
 - Live Google OAuth/YouTube: not exercised; no approved non-production canary
@@ -200,5 +203,6 @@ for each actually exercised platform.
   while the only local NVMe volume failed the 10%-free-space rule. No 50%
   startup or NVMe copy-speed claim is made from those incomparable samples.
 - TASK112 is complete for the available source/browser/local-native and
-  unsigned Windows scope. The unavailable signed, platform, provider, and
-  equivalent-NVMe levels remain explicit external evidence gaps.
+  unsigned Windows instrumented-package plus production-artifact-integrity
+  scope. The final-v3 ordinary launch and unavailable signed, platform,
+  provider, and equivalent-NVMe levels remain explicit evidence gaps.

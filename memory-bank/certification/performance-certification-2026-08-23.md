@@ -231,6 +231,8 @@ Retained artifacts:
   `DC49C1BE9BC53A3146878BA1954C8C6A88A03C90473D05A5BB171188E75A10DB`.
 - Manifest:
   `I:\YouTube-Upload-Manager-Certification-20260823\artifacts\production-unsigned-frozen-v3\production-build-manifest.json`.
+  — 1,941 B — SHA-256
+  `D01D32999E9F551F5C86C5088E6B7B0396672B38D64C6F3C268F9AF519FFED7F`.
 
 The executable and installer are Authenticode `NotSigned`; the executable is
 x64 PE machine `0x8664`. ZIP readback contains
