@@ -291,3 +291,143 @@ Execute [TASK001](tasks/TASK001-cross-platform-foundation.md), beginning with th
   measured 334,910 bytes raw / 96,394 bytes gzip and the main CSS measured
   60,454 bytes raw / 10,689 bytes gzip. No application code was changed by this
   planning audit, and no packaged runtime or live-provider timing was claimed.
+
+# 2026-08-23 — Two-phase fast startup and recovery
+
+- Native setup now stops after one database bootstrap and fail-closed recovery
+  classification. Media reads, FFprobe, protected upload-session lookup, and
+  provider work cannot begin before React has rendered the safe startup shell.
+- One bounded post-shell coordinator resumes interrupted device-local work, and
+  upload dispatch remains fenced until classification, shell rendering,
+  deferred recovery, and immutable active-channel binding all pass.
+- Verified locally: 6/6 focused startup tests, 91 native tests with 5 ignored,
+  6/6 performance-harness startup tests, 50 frontend tests, type checking,
+  production build, frontend payload budgets, and browser-preview visual QA.
+  Current signed/packaged startup and large interrupted-profile timings remain
+  explicitly assigned to TASK112.
+
+# 2026-08-23 — Bounded media runtime and FFprobe preparation
+
+- FFprobe preparation now reuses an identity-bound, checksum-verified receipt
+  without network access or a full rehash, skips mobile provisioning, and
+  selects only the requested desktop target. Its fixture suite passed 6/6; the
+  cached Windows sidecar was verified as x64 PE with its license present.
+- Runtime probes are limited to two processes and copy/hash reads to one per
+  source volume. Active uploads receive same-volume priority, waits and probe
+  processes are cancellable, and watched-hash cancellation no longer opens a
+  database on every chunk.
+- Upload validation uses a 64 KiB duration-only probe; rich metadata is cached
+  and coalesced only for the same canonical path, size, and nanosecond mtime.
+  Focused probe/media/cache tests passed, including startup's zero-media-work
+  boundary and malformed/oversized output handling.
+- Windows portable release automation now includes and validates the x64
+  FFprobe sidecar and license. TASK110 remains in progress until a quiet-window
+  copy/hash distribution and fresh installer/portable extraction prove the
+  exact packaged artifacts; no packaged or live-provider result is claimed.
+- The quiet release rerun found copy-plus-BLAKE3 at p50 929.784 ms / p95
+  1,871.217 ms while standalone BLAKE3 stayed stable. An 8 MiB heap buffer plus
+  Windows sequential-scan hints improved copy to 624.299/897.986 ms without
+  changing final `sync_all`, partial resume, digest, scheduling, or cancellation
+  semantics, but it still missed the frozen 335.852/368.178 ms gate.
+- Release-only phase evidence on the C: temporary volume separated p50 74.891
+  ms stream/write/hash from p50 934.431 ms durable flush while C: had only 5.982
+  GiB free. The safe candidate is retained, but TASK110 remains open for a
+  healthy-headroom durable rerun and fresh packaged sidecar inspection; the
+  crash-safe flush is not traded away to make a benchmark pass.
+
+# 2026-08-23 — Revisioned events and zero settled-idle polling
+
+- Durable schema-v2 revisions now drive channel-scoped upload/preflight deltas
+  and safe invalidations for connection, inventory, deletion, dedupe, folder,
+  and quota state. The singleton frontend listener attaches before catch-up,
+  rejects cross-channel batches, and recovers retained-history gaps from one
+  bounded snapshot.
+- Removed all frontend intervals and the permanent native folder/quota polling
+  loops. One commit-hook dispatcher blocks when idle; folder and quota workers
+  exist only while enabled work or a saved deadline requires them. A 200-update
+  fixture retains all revisions while delivering one compact sub-2 KiB delta.
+- Verified locally: the full native suite passed 103 tests with 5 release-only
+  benchmarks ignored; post-seam event tests passed 4/4 and quota lifecycle tests
+  passed. Frontend tests passed 59/59, TypeScript and production build passed,
+  and the deterministic budget reports one resident dispatcher. Browser preview
+  rendered the lazy Folder monitor without console warnings/errors. Packaged
+  idle/wakeup and live-provider timing remain TASK112 evidence, not a current
+  production claim.
+- The complete listener-first event bridge now loads only after the safe startup
+  fence and active-channel binding; video and preflight picker code loads only
+  on explicit operator action. The frontend performance gate passes at 230,549
+  bytes raw / 71,624 bytes gzip for initial JavaScript and 38,470 bytes raw for
+  initial CSS, with all 59 frontend tests passing after the split.
+
+# 2026-08-23 — Incremental native media module boundary
+
+- Extracted the stabilized native media scheduler, active-upload guards,
+  resumable copy/hash primitives, ISO-BMFF parser, bounded FFprobe lifecycle,
+  and stable-signature cache into `media_runtime.rs`. Tauri commands, SQLite
+  cancellation, schema mapping, audits, channel checks, recovery, and provider
+  orchestration remain at their existing ownership boundaries.
+- The native library compiled after cutover; focused scheduler/probe/cache tests
+  passed before the copy-resume fixture moved beside its owner, and the frozen
+  post-TASK108/TASK109 integrated native suite then passed 122 tests with 0
+  failures and 5 ignored release-only benchmarks. Database-only startup
+  classification and 512 KiB small-stack recovery remain green. The
+  deterministic native configuration gate also passed.
+- No Cargo release-profile override was adopted. The isolated default cold-build
+  comparison ran out of drive space before link, its 1.6 GiB temporary target
+  was cleaned without touching the shared target, and no invalid timing was
+  recorded. Panic/symbol support remains intact; packaged startup/size and
+  installer proof remain TASK112 rather than a source-build claim.
+
+# 2026-08-23 — Pooled provider transport and true parallel upload scheduling
+
+- Provider HTTP clients are lazy, pooled, rustls-backed, and timeout-bounded;
+  native setup still builds zero clients. Upload/deletion access-token caches
+  are separate, expiry aware, singleflight refreshed, and process-memory only.
+- Resumable uploads reuse one pooled client for the full session and move one
+  exact bounded chunk buffer into each request, with no extra full-chunk copy.
+  Every provider `308` remains durably recorded before the next request.
+- A four-permit durable scheduler now overlaps independent upload workers,
+  enforces cached per-volume limits, and rotates volume priority between
+  handoffs. A real loopback HTTP barrier proved exact overlap at capacities two
+  and four without exceeding per-volume maxima.
+- Provider success, immutable channel identity, video ID, confirmed bytes, and
+  audit receipt commit before lower-priority playlist/session-cleanup/source
+  cleanup. Relaunch and channel-isolation fixtures preserve that receipt when a
+  playlist step fails; destructive remote deletion remains sequential.
+- The final integrated release suite passed 5/5 benchmarks. Its 64 MiB loopback
+  upload fixture measured optimized p50/p95 **204.516/239.985 ms** at
+  **312.933 MiB/s** versus pooled streaming reference **417.810/447.743 ms**,
+  a **2.0429x** throughput ratio, with one 8 MiB request buffer and zero extra
+  full-chunk copies. The frozen integrated native suite passed **122 tests**,
+  failed zero, and ignored five release-only benchmarks. These are local
+  loopback results; live YouTube and packaged-runtime certification remain
+  TASK112 scope.
+
+# 2026-08-23 — Generation-keyed inventory and batched intake
+
+- Remote inventory now stages versioned normalized, trailing-copy, and numeric
+  title keys and promotes only a complete immutable-channel generation in one
+  transaction. Channel upload/inventory generations cache a persisted duplicate
+  projection; candidate keys narrow work, while the exact evidence function
+  remains authoritative for exact, `(2)`, and numeric matches.
+- Preflight workers materialize evidence once at completion. The webview reads
+  counters, file rows, and activity through separate bounded commands and loads
+  rich metadata only after one row is expanded. Watched-folder scans bulk-load
+  channel observations rather than querying SQLite per discovered file.
+- A reviewed multi-file import now uses one `import_and_queue_batch` bridge call
+  for up to 512 paths, returns independent redacted per-item receipts, queues
+  accepted items in one transaction after one inventory/title preparation, and
+  starts dispatch once. A 100-path bridge regression asserts exactly one invoke.
+- Frontend type checking passed, and focused bridge/large-list tests passed
+  28/28, including a 10,000-record fixture that renders fewer than 100 rows.
+  Native `cargo check` passed at the TASK109 checkpoint, and the final
+  frozen-tree native suite passed 122 tests with zero failures and five
+  release-only benchmarks ignored.
+- Release fixtures passed: the 10,000-row dashboard/dedupe path measured p50
+  137.866 ms and p95 149.679 ms; a 1,000-file preflight against 10,000 inventory
+  rows measured compact status p50/p95 3.629/4.966 ms and a 48-file/48-activity
+  page 12.162/17.844 ms. Maximum serialized page size was 21,945 bytes, below
+  the 262,144-byte budget.
+- This is local TypeScript, Rust, SQLite, and fixture evidence only. No live
+  YouTube inventory, OAuth account, provider pagination, packaged timing, or
+  production throughput is claimed; TASK112 owns those certification layers.

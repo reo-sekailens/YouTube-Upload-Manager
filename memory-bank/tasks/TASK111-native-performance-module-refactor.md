@@ -2,7 +2,7 @@
 
 ## Status
 
-proposed
+completed
 
 ## Objective
 
@@ -47,3 +47,61 @@ TASK104, TASK105, TASK106, TASK107, TASK108, TASK109, TASK110.
 
 src-tauri/src/, native test/benchmark layout, Cargo release profile, and memory
 bank architecture/technical documentation.
+
+## Implemented slice
+
+- Extracted the stabilized media runtime from the native command/orchestration
+  file into `src-tauri/src/media_runtime.rs`. The module owns source-volume
+  scheduling, active-upload priority guards, resumable copy plus BLAKE3,
+  sequential hashing, bounded/cancellable FFprobe execution, ISO-BMFF duration
+  parsing, and the stable-signature in-memory probe cache.
+- Kept SQLite cancellation lookup, preflight/upload schema mapping, Tauri
+  commands, audit writes, crash recovery, watched-source final integrity, and
+  provider orchestration in `lib.rs`. This preserves the existing security,
+  channel, database, and command-contract boundaries rather than introducing a
+  cross-subsystem abstraction.
+- Moved the focused scheduler/probe/cache/cancellation/copy fixtures beside the
+  media owner. The end-to-end 512 KiB startup-recovery fixture remains in
+  `lib.rs` because it verifies the integration seam and prior stack-overflow
+  regression.
+- Made successful JSON output a type-level requirement for cache insertion.
+  Spawn, timeout, cancellation, oversized output, non-zero exit, and malformed
+  JSON failures clear their in-flight key and remain retryable for the same
+  stable file signature.
+
+## Build-profile decision
+
+- No Cargo release-profile setting was changed. Panic abort and symbol
+  stripping were rejected because they would remove the panic/crash evidence
+  required by local recovery and support diagnostics.
+- Thin LTO/codegen-unit changes were not adopted without a complete comparable
+  link, startup, throughput, size, and 512 KiB-stack result. An isolated default
+  cold-build candidate exhausted the available drive before link (`os error
+  112`), so it is recorded as invalid evidence, not as a performance result.
+  Its verified temporary target was removed with `cargo clean --target-dir`
+  (4,012 generated files, 1.6 GiB); the shared target was not cleaned.
+
+## Validation evidence
+
+- `cargo check --manifest-path src-tauri/Cargo.toml --lib` passed after the
+  extraction cutover in 7.75 seconds.
+- The frozen post-TASK108/TASK109 integrated native suite passed 122 tests with
+  0 failures and 5 intentionally ignored release-only benchmarks. This includes
+  all nine media-runtime fixtures after the copy-resume fixture moved beside its
+  owner.
+- The interrupted-copy, 512 KiB small-stack startup recovery, and database-only
+  startup classification fixtures each passed 1/1 after extraction.
+- `npm run performance:native:check -- --configuration-only` passed with four
+  uploads per volume maximum, one startup-resident worker, and one allowed
+  direct spawn boundary.
+- TASK108's quiet-window optimized local-loopback distribution passed at p50
+  177.561 ms, p95 205.575 ms, 360.439 MiB/s, and 163.47% of its pooled-streaming
+  reference. This is upload-loop evidence only; it is not packaged startup or
+  installer evidence.
+
+## Follow-up boundaries
+
+- TASK110 still owns a fresh quiet-window copy/hash distribution and portable/
+  installer FFprobe artifact inspection. TASK112 owns packaged startup,
+  recovery, installer, and portable certification. Neither boundary is claimed
+  by this source/module task.

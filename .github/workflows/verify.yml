@@ -19,7 +19,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run build
+      - name: Gate production initial bundle budgets
+        run: npm run performance:frontend:check
       - run: npm run test
 
   native:
@@ -33,7 +34,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - run: npm run test:ffprobe
       - run: npm run prepare:ffprobe
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Gate deterministic native worker configuration
+        run: npm run performance:native:check -- --configuration-only
+      - name: Gate deterministic native query and schema budgets, then run native tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features performance-harness
       - run: cargo check --manifest-path src-tauri/Cargo.toml

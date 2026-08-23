@@ -2,7 +2,7 @@
 
 ## Status
 
-proposed
+completed
 
 ## Objective
 
@@ -46,3 +46,22 @@ TASK103.
 
 src-tauri/src/lib.rs initially; extracted persistence/migrations modules as part
 of the implementation; native migration/query tests.
+
+## Evidence
+
+- `src-tauri/src/persistence.rs` owns one transactional `user_version` 0-to-1
+  migration, persistent WAL initialization, per-connection foreign keys and
+  busy timeout, and composite/partial hot-path indexes.
+- A current-schema hot open executes exactly one required `foreign_keys` pragma
+  and zero `CREATE`, `ALTER`, `table_info`, or `journal_mode` transitions.
+- The 10,000-record dashboard/dedupe release fixture improved from a frozen
+  177,330.510 ms single sample to 140.579 ms p50 / 156.155 ms p95 over seven
+  samples, about 1,135 times faster.
+- Remote-title matching now groups deterministic signatures instead of
+  comparing all pairs; local title evidence remains channel-scoped. Inventory
+  staging, preflight creation, and multi-item queue claims use prepared short
+  transactions.
+- Full native library validation passed 85 tests with 5 release-only benchmarks
+  intentionally ignored. Migration preservation/future-version rejection,
+  WAL/foreign keys/busy contention, 10,000-row EXPLAIN plans, claim atomicity,
+  title evidence, and channel isolation are covered.

@@ -1,5 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import "./DuplicateReview.lazy.css";
 import {
   clampComparisonPosition,
   moveComparisonPosition,
@@ -17,7 +24,11 @@ import {
   openYouTubeAccountBrowser,
   requestVideoDeletion,
 } from "../lib/local";
+import { windowItems } from "../lib/list-windowing";
+import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
+import { subscribeLocalStateChanges } from "../lib/state-events";
 import type { DuplicateCandidate } from "../lib/types";
+import { PaginationControls } from "./PaginationControls";
 
 function playerCommand(
   frame: HTMLIFrameElement | null,
@@ -69,6 +80,7 @@ function ForwardTenIcon() {
 }
 
 type DuplicateReviewProps = {
+  activeChannelId?: string;
   candidates: DuplicateCandidate[];
   onIgnore: (candidateId: string) => void | Promise<void>;
   onDeletionComplete?: (videoId: string, title: string) => Promise<void> | void;
@@ -83,6 +95,23 @@ type SelectedDuplicateVideo = PendingDeletion;
 type BulkDeletionLogEntry = SelectedDuplicateVideo & {
   status: "queued" | "deleting" | "deleted" | "failed";
 };
+
+type PlayerInfoSubscriber = (event: MessageEvent) => void;
+const playerInfoSubscribers = new Set<PlayerInfoSubscriber>();
+const dispatchPlayerInfo = (event: MessageEvent) => {
+  if (event.origin !== youtubeComparisonOrigin) return;
+  for (const subscriber of playerInfoSubscribers) subscriber(event);
+};
+function subscribePlayerInfo(subscriber: PlayerInfoSubscriber) {
+  if (playerInfoSubscribers.size === 0)
+    window.addEventListener("message", dispatchPlayerInfo);
+  playerInfoSubscribers.add(subscriber);
+  return () => {
+    playerInfoSubscribers.delete(subscriber);
+    if (playerInfoSubscribers.size === 0)
+      window.removeEventListener("message", dispatchPlayerInfo);
+  };
+}
 
 function DeleteProgress({
   completed,
@@ -163,11 +192,23 @@ function EmbeddedComparison({
   onDeletionComplete,
   selected,
   onSelect,
+  deletionAuthorized,
+  deletionSudoActive,
+  authorizingDeletion,
+  deletionAuthorizationError,
+  onAuthorizeDeletion,
+  onEnableDeletionMode,
 }: {
   candidate: DuplicateCandidate;
   onDeletionComplete?: DuplicateReviewProps["onDeletionComplete"];
   selected: Set<string>;
   onSelect: (video: SelectedDuplicateVideo, checked: boolean) => void;
+  deletionAuthorized: boolean;
+  deletionSudoActive: boolean;
+  authorizingDeletion: boolean;
+  deletionAuthorizationError: string;
+  onAuthorizeDeletion: () => Promise<void>;
+  onEnableDeletionMode: () => Promise<void>;
 }) {
   const leftPlayer = useRef<HTMLIFrameElement>(null);
   const rightPlayer = useRef<HTMLIFrameElement>(null);
@@ -180,9 +221,6 @@ function EmbeddedComparison({
   const [accountBrowserError, setAccountBrowserError] = useState("");
   const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion>();
   const [deletionConfirmation, setDeletionConfirmation] = useState("");
-  const [deletionAuthorized, setDeletionAuthorized] = useState(false);
-  const [deletionSudoActive, setDeletionSudoActive] = useState(false);
-  const [authorizingDeletion, setAuthorizingDeletion] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteProgress, setDeleteProgress] = useState(0);
   const [deletionError, setDeletionError] = useState("");
@@ -192,47 +230,15 @@ function EmbeddedComparison({
   );
   const playerSource = youtubeComparisonEmbedUrl;
   const openInYouTube = async (videoId: string) => {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
     await openUrl(
       `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
     );
   };
 
   useEffect(() => {
-    if (!isTauri) return;
-    void loadConnectionSettings()
-      .then((settings) => {
-        setDeletionAuthorized(settings.deletionAuthorized === true);
-        setDeletionSudoActive(settings.deletionSudoActive === true);
-      })
-      .catch(() => undefined);
-  }, []);
-  useEffect(() => {
-    if (!authorizingDeletion || !isTauri) return;
-    let active = true;
-    const checkAuthorization = async () => {
-      try {
-        const settings = await loadConnectionSettings();
-        if (active && settings.deletionAuthorized) {
-          setDeletionAuthorized(true);
-          setDeletionSudoActive(settings.deletionSudoActive === true);
-          setAuthorizingDeletion(false);
-        }
-      } catch {
-        /* Browser authorization can still be open. */
-      }
-    };
-    void checkAuthorization();
-    const timer = window.setInterval(() => {
-      void checkAuthorization();
-    }, 1_250);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [authorizingDeletion]);
-  useEffect(() => {
+    if (!previewLoaded) return;
     const receivePlayerInfo = (event: MessageEvent) => {
-      if (event.origin !== youtubeComparisonOrigin) return;
       let message: unknown;
       try {
         message =
@@ -269,9 +275,8 @@ function EmbeddedComparison({
       if (event.source === rightPlayer.current?.contentWindow && duration > 0)
         setRightDuration(duration);
     };
-    window.addEventListener("message", receivePlayerInfo);
-    return () => window.removeEventListener("message", receivePlayerInfo);
-  }, []);
+    return subscribePlayerInfo(receivePlayerInfo);
+  }, [previewLoaded]);
   useEffect(() => {
     setPosition((current) => clampComparisonPosition(current, maximumPosition));
   }, [maximumPosition]);
@@ -332,16 +337,10 @@ function EmbeddedComparison({
   };
   const authorizeDeletion = async () => {
     if (!isTauri) return;
-    setAuthorizingDeletion(true);
     setDeletionError("");
     try {
-      const { authorizationUrl } = await beginDeletionAuthorization();
-      const url = new URL(authorizationUrl);
-      if (url.protocol !== "https:")
-        throw new Error("The deletion authorization request must use HTTPS.");
-      await openUrl(url.toString());
+      await onAuthorizeDeletion();
     } catch (error) {
-      setAuthorizingDeletion(false);
       setDeletionError(
         error instanceof Error
           ? error.message
@@ -353,8 +352,7 @@ function EmbeddedComparison({
     setDeleting(true);
     setDeletionError("");
     try {
-      const settings = await enableDeletionSudoMode();
-      setDeletionSudoActive(settings.deletionSudoActive === true);
+      await onEnableDeletionMode();
     } catch (error) {
       setDeletionError(
         error instanceof Error
@@ -626,9 +624,9 @@ function EmbeddedComparison({
               total={2}
             />
           )}
-          {deletionError && (
+          {(deletionError || deletionAuthorizationError) && (
             <p className="duplicate-comparison__delete-error" role="alert">
-              {deletionError}
+              {deletionError || deletionAuthorizationError}
             </p>
           )}
           <div className="duplicate-comparison__delete-actions">
@@ -735,20 +733,34 @@ function EmbeddedComparison({
 }
 
 export function DuplicateReview({
+  activeChannelId,
   candidates,
   onIgnore,
   onDeletionComplete,
   onBulkDeletionComplete,
 }: DuplicateReviewProps) {
-  const [selectedVideos, setSelectedVideos] = useState<
-    Map<string, SelectedDuplicateVideo>
-  >(new Map());
-  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedVideos, setSelectedVideos] =
+    useRetainedWorkspaceState<Map<string, SelectedDuplicateVideo>>(
+      "dedupe.selected-videos",
+      () => new Map(),
+    );
+  const [searchQuery, setSearchQuery] = useRetainedWorkspaceState(
+    "dedupe.candidate-search",
+    "",
+  );
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+  const [page, setPage] = useRetainedWorkspaceState(
+    "dedupe.candidate-page",
+    1,
+  );
   const [bulkConfirmation, setBulkConfirmation] = useState("");
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkAuthorized, setBulkAuthorized] = useState(false);
   const [bulkSudoActive, setBulkSudoActive] = useState(false);
-  const [bulkAuthorizing, setBulkAuthorizing] = useState(false);
+  const [bulkAuthorizing, setBulkAuthorizing] = useRetainedWorkspaceState(
+    "dedupe.deletion-authorizing",
+    false,
+  );
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [bulkError, setBulkError] = useState("");
   const [bulkProgress, setBulkProgress] = useState({
@@ -782,14 +794,22 @@ export function DuplicateReview({
     [candidates],
   );
   const filteredCandidates = useMemo(() => {
-    const query = searchQuery.trim().toLocaleLowerCase();
+    const query = deferredSearchQuery.trim().toLocaleLowerCase();
     if (!query) return candidates;
     return candidates.filter(
       (candidate) =>
         candidate.leftTitle.toLocaleLowerCase().includes(query) ||
         candidate.rightTitle.toLocaleLowerCase().includes(query),
     );
-  }, [candidates, searchQuery]);
+  }, [candidates, deferredSearchQuery]);
+  const visibleCandidates = useMemo(
+    () => windowItems(filteredCandidates, page),
+    [filteredCandidates, page],
+  );
+  const selectedVideoIds = useMemo(
+    () => new Set(selectedVideos.keys()),
+    [selectedVideos],
+  );
   const bulkPhrase = `DELETE ${selectedVideos.size} VIDEO${selectedVideos.size === 1 ? "" : "S"}`;
 
   useEffect(() => {
@@ -802,37 +822,76 @@ export function DuplicateReview({
       .catch(() => undefined);
   }, []);
   useEffect(() => {
+    if (!isTauri || !activeChannelId) return;
+    let active = true;
+    let unsubscribe: (() => void) | undefined;
+    void subscribeLocalStateChanges((batch) => {
+      if (
+        !batch.changes.some(
+          (change) =>
+            change.channelId === activeChannelId &&
+            change.surface === "connection",
+        )
+      )
+        return;
+      void loadConnectionSettings()
+        .then((settings) => {
+          if (!active) return;
+          setBulkAuthorized(settings.deletionAuthorized === true);
+          setBulkSudoActive(settings.deletionSudoActive === true);
+          if (settings.deletionAuthorized) setBulkAuthorizing(false);
+        })
+        .catch(() => undefined);
+    })
+      .then((stop) => {
+        if (active) unsubscribe = stop;
+        else stop();
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [activeChannelId, setBulkAuthorizing]);
+
+  useEffect(() => {
     if (!bulkAuthorizing || !isTauri) return;
     let active = true;
-    const check = async () => {
+    let timeout: number | undefined;
+    const delays = [250, 500, 1_000, 2_000, 4_000, 8_000, 16_000];
+    const check = async (attempt: number) => {
       try {
         const settings = await loadConnectionSettings();
-        if (active && settings.deletionAuthorized) {
+        if (!active) return;
+        if (settings.deletionAuthorized) {
           setBulkAuthorized(true);
           setBulkSudoActive(settings.deletionSudoActive === true);
           setBulkAuthorizing(false);
+          return;
         }
       } catch {
-        /* Authorization can still be open. */
+        /* Event delivery remains primary; this fallback is intentionally bounded. */
       }
+      if (active && attempt + 1 < delays.length)
+        timeout = window.setTimeout(
+          () => void check(attempt + 1),
+          delays[attempt + 1],
+        );
     };
-    void check();
-    const timer = window.setInterval(() => {
-      void check();
-    }, 1_250);
+    timeout = window.setTimeout(() => void check(0), delays[0]);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      if (timeout !== undefined) window.clearTimeout(timeout);
     };
-  }, [bulkAuthorizing]);
+  }, [bulkAuthorizing, setBulkAuthorizing]);
 
-  const toggleSelection = (video: SelectedDuplicateVideo, checked: boolean) =>
+  const toggleSelection = useCallback((video: SelectedDuplicateVideo, checked: boolean) =>
     setSelectedVideos((current) => {
       const next = new Map(current);
       if (checked) next.set(video.videoId, video);
       else next.delete(video.videoId);
       return next;
-    });
+    }), [setSelectedVideos]);
   const selectSide = (label: SelectedDuplicateVideo["label"]) =>
     setSelectedVideos(
       new Map(
@@ -841,7 +900,7 @@ export function DuplicateReview({
           .map((video) => [video.videoId, video]),
       ),
     );
-  const authorizeBulk = async () => {
+  const authorizeBulk = useCallback(async () => {
     if (!isTauri) return;
     setBulkAuthorizing(true);
     setBulkError("");
@@ -850,6 +909,7 @@ export function DuplicateReview({
       const url = new URL(authorizationUrl);
       if (url.protocol !== "https:")
         throw new Error("The deletion authorization request must use HTTPS.");
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
       await openUrl(url.toString());
     } catch (error) {
       setBulkAuthorizing(false);
@@ -859,8 +919,8 @@ export function DuplicateReview({
           : "Deletion authorization could not be started.",
       );
     }
-  };
-  const enableBulkMode = async () => {
+  }, [setBulkAuthorizing]);
+  const enableBulkMode = useCallback(async () => {
     setBulkDeleting(true);
     setBulkError("");
     try {
@@ -875,7 +935,7 @@ export function DuplicateReview({
     } finally {
       setBulkDeleting(false);
     }
-  };
+  }, []);
   const deleteSelected = async () => {
     if (
       !bulkSudoActive ||
@@ -958,7 +1018,10 @@ export function DuplicateReview({
       </p>
     );
   return (
-    <div className="duplicate-review duplicate-review--rail">
+    <div
+      aria-busy={searchQuery !== deferredSearchQuery}
+      className="duplicate-review duplicate-review--rail"
+    >
       <label
         className="duplicate-review__search"
         htmlFor="duplicate-title-search"
@@ -967,7 +1030,10 @@ export function DuplicateReview({
         <input
           autoComplete="off"
           id="duplicate-title-search"
-          onChange={(event) => setSearchQuery(event.target.value)}
+          onChange={(event) => {
+            setSearchQuery(event.target.value);
+            setPage(1);
+          }}
           placeholder="Search titles"
           type="search"
           value={searchQuery}
@@ -977,8 +1043,8 @@ export function DuplicateReview({
         <div>
           <strong>{selectedVideos.size} selected for deletion</strong>
           <span>
-            Select either video in any duplicate entry, or select every A/B
-            video at once.
+            Select either video in any duplicate entry. Select-all includes
+            every result, including candidates hidden by search or pagination.
           </span>
         </div>
         <div>
@@ -988,7 +1054,7 @@ export function DuplicateReview({
             onClick={() => selectSide("Video A")}
             type="button"
           >
-            Select all Video A
+            Select all Video A results
           </button>
           <button
             className="secondary-action"
@@ -996,7 +1062,7 @@ export function DuplicateReview({
             onClick={() => selectSide("Video B")}
             type="button"
           >
-            Select all Video B
+            Select all Video B results
           </button>
           <button
             className="danger-button"
@@ -1141,7 +1207,7 @@ export function DuplicateReview({
         </p>
       ) : (
         <div role="list">
-          {filteredCandidates.map((candidate) => {
+          {visibleCandidates.items.map((candidate) => {
             const isExact = candidate.confidence === "exact_local";
             const isUploadedTitle =
               candidate.confidence === "metadata" &&
@@ -1151,6 +1217,7 @@ export function DuplicateReview({
             return (
               <section
                 className="duplicate-group duplicate-group--rail"
+                data-duplicate-record
                 key={candidate.id}
                 aria-label={`Duplicate candidate: ${candidate.evidence}`}
                 role="listitem"
@@ -1181,10 +1248,16 @@ export function DuplicateReview({
                 </header>
                 {isUploadedTitle ? (
                   <EmbeddedComparison
+                    authorizingDeletion={bulkAuthorizing}
                     candidate={candidate}
+                    deletionAuthorizationError={bulkError}
+                    deletionAuthorized={bulkAuthorized}
+                    deletionSudoActive={bulkSudoActive}
                     onDeletionComplete={onDeletionComplete}
+                    onAuthorizeDeletion={authorizeBulk}
+                    onEnableDeletionMode={enableBulkMode}
                     onSelect={toggleSelection}
-                    selected={new Set(selectedVideos.keys())}
+                    selected={selectedVideoIds}
                   />
                 ) : (
                   <div className="duplicate-group__items">
@@ -1215,6 +1288,15 @@ export function DuplicateReview({
           })}
         </div>
       )}
+      <PaginationControls
+        end={visibleCandidates.end}
+        label="Duplicate candidates"
+        onPageChange={setPage}
+        page={visibleCandidates.page}
+        pageCount={visibleCandidates.pageCount}
+        start={visibleCandidates.start}
+        total={visibleCandidates.total}
+      />
     </div>
   );
 }

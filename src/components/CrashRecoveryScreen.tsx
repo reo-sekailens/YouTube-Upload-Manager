@@ -1,9 +1,8 @@
-import { Component, type ErrorInfo, type ReactNode, useCallback, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   acknowledgeCrashRecovery,
   isTauri,
   loadDiagnosticReport,
-  recordWebviewError,
 } from "../lib/local";
 
 const githubNewIssueUrl =
@@ -152,32 +151,4 @@ export function CrashRecoveryScreen({
       </section>
     </main>
   );
-}
-
-type CrashBoundaryProps = { children: ReactNode };
-type CrashBoundaryState = { failed: boolean };
-
-export class CrashBoundary extends Component<CrashBoundaryProps, CrashBoundaryState> {
-  state: CrashBoundaryState = { failed: false };
-
-  static getDerivedStateFromError() {
-    return { failed: true };
-  }
-
-  componentDidCatch(_error: Error, _info: ErrorInfo) {
-    void recordWebviewError();
-  }
-
-  render() {
-    if (this.state.failed) {
-      return (
-        <CrashRecoveryScreen
-          failureKind="React render error"
-          liveFailure
-          onContinue={() => window.location.reload()}
-        />
-      );
-    }
-    return this.props.children;
-  }
 }

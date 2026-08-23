@@ -8,9 +8,13 @@ import type {
   FolderMonitorVisibility,
   ManualUploadDefaults,
   ManualUploadSettings,
+  BatchImportReceipt,
   PortableArchiveReceipt,
   PreIngestDuplicateScan,
+  PreIngestDuplicateScanStatus,
   RemoteVideo,
+  StateChangeBatch,
+  StartupBootstrap,
   UploadItem,
   UploadTitleDuplicate,
   UploadTitleDuplicateDecision,
@@ -101,8 +105,81 @@ export async function openGoogleSetupBrowser(
 
 export async function loadSnapshot(): Promise<DashboardSnapshot> {
   if (!isTauri)
-    return { items: [], duplicates: [], pendingTitleDuplicates: [] };
+    return { revision: 0, items: [], duplicates: [], pendingTitleDuplicates: [] };
   return invoke<DashboardSnapshot>("dashboard_snapshot");
+}
+
+/** Loads durable channel changes after a known snapshot/event cursor. */
+export async function loadStateChanges(
+  channelId: string,
+  afterRevision: number,
+): Promise<StateChangeBatch> {
+  if (!isTauri) {
+    return {
+      fromRevision: afterRevision,
+      toRevision: afterRevision,
+      resetRequired: false,
+      changes: [],
+    };
+  }
+  return invoke<StateChangeBatch>("load_state_changes", {
+    channelId,
+    afterRevision,
+  });
+}
+
+const browserPreviewStartup: StartupBootstrap = {
+  crashRecovery: { crashDetected: false },
+  connection: { connected: false },
+  snapshot: {
+    revision: 0,
+    items: [],
+    duplicates: [],
+    pendingTitleDuplicates: [],
+  },
+  readiness: {
+    classificationComplete: true,
+    safeShellRendered: false,
+    deferredRecoveryState: "pending",
+    queueActionsEnabled: false,
+    detail: "Preparing the browser preview workspace.",
+  },
+};
+
+/** Loads crash, connection, dashboard, and readiness state through one coherent native read. */
+let startupBootstrapRequest: Promise<StartupBootstrap> | undefined;
+
+export function loadStartupBootstrap(): Promise<StartupBootstrap> {
+  if (!isTauri) return Promise.resolve(browserPreviewStartup);
+  startupBootstrapRequest ??= invoke<StartupBootstrap>("startup_bootstrap").catch(
+    (error) => {
+      startupBootstrapRequest = undefined;
+      throw error;
+    },
+  );
+  return startupBootstrapRequest;
+}
+
+/** Starts the read-only bootstrap early; upload/recovery gates remain unopened. */
+export function primeStartupBootstrap(): Promise<StartupBootstrap> {
+  return loadStartupBootstrap();
+}
+
+/** Opens the native recovery fence only after React has painted the safe startup shell. */
+export async function completeStartupAfterSafeShell(): Promise<StartupBootstrap> {
+  if (!isTauri) {
+    return {
+      ...browserPreviewStartup,
+      readiness: {
+        classificationComplete: true,
+        safeShellRendered: true,
+        deferredRecoveryState: "complete",
+        queueActionsEnabled: true,
+        detail: "Browser preview workspace ready.",
+      },
+    };
+  }
+  return invoke<StartupBootstrap>("complete_startup_after_safe_shell");
 }
 
 export async function loadDiagnosticReport(): Promise<string> {
@@ -133,17 +210,6 @@ export async function loadReleaseIdentity(): Promise<ReleaseIdentity> {
   return invoke<ReleaseIdentity>("app_release_identity");
 }
 
-export type CrashRecoveryStatus = {
-  crashDetected: boolean;
-  detectedAt?: string;
-  failureKind?: string;
-};
-
-export async function loadCrashRecoveryStatus(): Promise<CrashRecoveryStatus> {
-  if (!isTauri) return { crashDetected: false };
-  return invoke<CrashRecoveryStatus>("load_crash_recovery_status");
-}
-
 export async function acknowledgeCrashRecovery(): Promise<void> {
   if (!isTauri) return;
   await invoke("acknowledge_crash_recovery");
@@ -159,6 +225,14 @@ export async function importAsset(
   settings: ManualUploadSettings,
 ): Promise<UploadItem> {
   return invoke<UploadItem>("import_asset", { path, settings });
+}
+
+/** Imports, title-checks, and queues one operator-reviewed wave through one IPC request. */
+export async function importAndQueueBatch(
+  paths: string[],
+  settings: ManualUploadSettings,
+): Promise<BatchImportReceipt> {
+  return invoke<BatchImportReceipt>("import_and_queue_batch", { paths, settings });
 }
 
 export async function listYouTubePlaylists(): Promise<YouTubePlaylist[]> {
@@ -247,10 +321,35 @@ export async function preflightDuplicateFiles(
 /** Reads the latest checkpointed results for a persistent pre-ingest job. */
 export async function loadPreflightDuplicateScan(
   jobId: string,
+  page: {
+    fileOffset?: number;
+    fileLimit?: number;
+    activityOffset?: number;
+    activityLimit?: number;
+  } = {},
 ): Promise<PreIngestDuplicateScan> {
   return invoke<PreIngestDuplicateScan>("load_preflight_duplicate_scan", {
     jobId,
+    ...page,
   });
+}
+
+/** Reads progress counters only; file results and activity remain paged separately. */
+export async function loadPreflightDuplicateScanStatus(
+  jobId: string,
+): Promise<PreIngestDuplicateScanStatus> {
+  return invoke<PreIngestDuplicateScanStatus>(
+    "load_preflight_duplicate_scan_status",
+    { jobId },
+  );
+}
+
+/** Loads retained FFprobe details only after one result is expanded. */
+export async function loadPreflightDuplicateFileMetadata(
+  jobId: string,
+  ordinal: number,
+): Promise<PreIngestDuplicateScan["files"][number]["localMetadata"]> {
+  return invoke("load_preflight_duplicate_file_metadata", { jobId, ordinal });
 }
 
 export async function cancelPreflightDuplicateScan(

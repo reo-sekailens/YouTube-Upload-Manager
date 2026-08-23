@@ -2,7 +2,7 @@
 
 ## Status
 
-proposed
+completed
 
 ## Objective
 
@@ -47,3 +47,20 @@ TASK103.
 
 src/App.tsx, src/main.tsx, src/components/, src/styles.css, src/lib/, Vite
 configuration, and component/browser performance tests.
+
+## Evidence
+
+- Only the active workspace mounts. Feature components and feature CSS are lazy
+  chunks; dialog, opener, and window APIs load only for their interactions. The
+  mixed static/dynamic opener warning is gone.
+- Queue, duplicate, deletion, preflight, and activity surfaces page at 48
+  records. SSR component fixtures prove 48 rendered records per surface (96
+  where two lists coexist) from 10,000 inputs while retaining explicit
+  all-results selection semantics.
+- Initial production assets pass the fixed TASK103 gates: 227,210 B JavaScript
+  raw, 70,741 B JavaScript gzip, and 38,470 B CSS raw.
+- Frontend validation passed 48 tests, typecheck, and warning-free production
+  build. In-app Browser QA at `http://127.0.0.1:1420/` proved one active
+  tabpanel, inactive Batch DOM removal, lazy Duplicate/Transfer rendering,
+  keyboard selection/focus movement, and zero console warnings/errors. Signed
+  packaged-Tauri validation remains part of TASK112.

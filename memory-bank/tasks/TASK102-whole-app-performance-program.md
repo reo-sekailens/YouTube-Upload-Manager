@@ -2,7 +2,7 @@
 
 ## Status
 
-ready
+in_progress
 
 ## Objective
 
@@ -57,4 +57,7 @@ performance evidence.
 ## Evidence
 
 - Planning audit: memory-bank/performance-audit-2026-08-23.md.
-- Application code was not changed while creating this program.
+- Frozen reference evidence: memory-bank/performance-baseline-2026-08-23.md.
+- Implementation began only after the audit and scoped task program were
+  recorded. TASK103 instrumentation is isolated from the production profile and
+  provider surfaces.

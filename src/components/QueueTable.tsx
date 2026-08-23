@@ -1,5 +1,8 @@
-import { useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import type { UploadItem, UploadVisibility } from "../lib/types";
+import { windowItems } from "../lib/list-windowing";
+import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
+import { PaginationControls } from "./PaginationControls";
 import { StatusPill } from "./StatusPill";
 
 interface QueueTableProps {
@@ -39,9 +42,27 @@ export function QueueTable({
   onDeleteSourceAfterUploadChange,
   onDeleteUploadedSource,
 }: QueueTableProps) {
-  const [titleQuery, setTitleQuery] = useState("");
+  const [titleQuery, setTitleQuery] = useRetainedWorkspaceState(
+    "batch.queue-title-query",
+    "",
+  );
+  const deferredTitleQuery = useDeferredValue(titleQuery);
+  const [page, setPage] = useRetainedWorkspaceState("batch.queue-page", 1);
   const [pendingSourceDelete, setPendingSourceDelete] = useState<UploadItem>();
   const [sourceDeleteConfirmation, setSourceDeleteConfirmation] = useState("");
+
+  const matchingItems = useMemo(() => {
+    const normalizedQuery = deferredTitleQuery.trim().toLocaleLowerCase();
+    return normalizedQuery
+      ? items.filter((item) =>
+          item.title.toLocaleLowerCase().includes(normalizedQuery),
+        )
+      : items;
+  }, [deferredTitleQuery, items]);
+  const visibleItems = useMemo(
+    () => windowItems(matchingItems, page),
+    [matchingItems, page],
+  );
 
   if (items.length === 0) {
     return (
@@ -51,15 +72,11 @@ export function QueueTable({
     );
   }
 
-  const normalizedQuery = titleQuery.trim().toLocaleLowerCase();
-  const matchingItems = normalizedQuery
-    ? items.filter((item) =>
-        item.title.toLocaleLowerCase().includes(normalizedQuery),
-      )
-    : items;
-
   return (
-    <div className="queue-table-wrap queue-table-rail">
+    <div
+      aria-busy={titleQuery !== deferredTitleQuery}
+      className="queue-table-wrap queue-table-rail"
+    >
       {pendingSourceDelete && (
         <div className="queue-table__cleanup-confirmation" role="dialog" aria-modal="true" aria-labelledby="source-cleanup-heading">
           <h3 id="source-cleanup-heading">Delete the original file?</h3>
@@ -92,8 +109,12 @@ export function QueueTable({
         <label htmlFor="upload-queue-title-search">Search video titles</label>
         <div className="queue-table__search-control">
           <input
+            aria-busy={titleQuery !== deferredTitleQuery}
             id="upload-queue-title-search"
-            onChange={(event) => setTitleQuery(event.target.value)}
+            onChange={(event) => {
+              setTitleQuery(event.target.value);
+              setPage(1);
+            }}
             placeholder="Search titles"
             type="search"
             value={titleQuery}
@@ -120,7 +141,7 @@ export function QueueTable({
           </tr>
         </thead>
         <tbody className="queue-table__body">
-          {matchingItems.map((item) => {
+          {visibleItems.items.map((item) => {
             const progress = item.totalBytes
               ? Math.min(
                   100,
@@ -132,7 +153,7 @@ export function QueueTable({
               : 0;
 
             return (
-              <tr className="queue-table__row" key={item.id}>
+              <tr className="queue-table__row" data-queue-record key={item.id}>
                 <td className="queue-table__video" data-label="Video">
                   <div className="queue-table__video-copy">
                     <strong>{item.title}</strong>
@@ -285,6 +306,15 @@ export function QueueTable({
           ) : null}
         </tbody>
       </table>
+      <PaginationControls
+        end={visibleItems.end}
+        label="Upload queue"
+        onPageChange={setPage}
+        page={visibleItems.page}
+        pageCount={visibleItems.pageCount}
+        start={visibleItems.start}
+        total={visibleItems.total}
+      />
     </div>
   );
 }

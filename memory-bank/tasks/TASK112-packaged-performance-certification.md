@@ -50,3 +50,50 @@ TASK103, TASK104, TASK105, TASK106, TASK107, TASK108, TASK109, TASK110, TASK111.
 
 memory-bank/certification/, TASK102, TASK112, progress.md, and release evidence
 for each actually exercised platform.
+
+## Implemented harness fixture slice
+
+- The Windows packaged runner requires an explicit `empty` or
+  `interrupted-256gb` fixture. The interrupted template contains one synthetic
+  pre-existing `uploading` row with a declared size of 256,000,000,000 bytes,
+  empty local path fields, no channel, credential, secure-store session,
+  provider identifier, or media, and a reported media footprint of zero bytes.
+- Fixture insertion exists only in a `performance-harness` build. A second
+  seed-only environment gate inserts the row transactionally and idempotently
+  into a marker-protected isolated profile, writes redacted cardinality/size
+  metadata, and exits before startup recovery. Regular builds neither read nor
+  react to either fixture environment variable.
+- The seed process is untimed. After it exits, every cold, warmup, and warm
+  launch receives a separate clone of the closed template. The measured process
+  explicitly removes both seed variables, begins with the pre-existing
+  `uploading` row, and exercises normal database-only interrupted-upload
+  classification without creating or reading a 256 GB file.
+- Clone and template cleanup requires both containment beneath the explicitly
+  empty disposable root and the performance-profile marker. The output contains
+  fixture ID, counts, declared bytes, zero media bytes, and booleans only; it
+  does not copy the synthetic SQLite profile into the report directory.
+- The settled-idle interval is fixed at two seconds. A run fails if its final
+  native snapshot omits any delta for periodic invokes, database opens, SQLite
+  statements, event messages, worker threads, or FFprobe processes.
+- The Windows harness builder invokes the installed Tauri JavaScript CLI with
+  `process.execPath` and no command shell. This avoids Node 24's Windows
+  `spawnSync` failure on `npm.cmd` while preserving feature, bundle, signing,
+  environment, and caller-supplied arguments.
+
+## Harness fixture evidence
+
+- PowerShell parser validation passed, and `-Help` exposes only the two accepted
+  fixture names.
+- A validate-only interrupted-fixture proof returned `valid: true`,
+  `declaredTotalBytes: 256000000000`, `mediaBytesWritten: 0`, cloned-template
+  and measured-environment-removal receipts, plus all six settled-idle delta
+  dimensions. The temporary fake-signature executable/profile used only for
+  argument validation was removed afterward.
+- `node --check scripts/performance/build-windows-harness.mjs` passed, and the
+  focused launcher/bundle-baseline test file passed 3/3. Its launcher regression
+  asserts the Node executable, installed Tauri CLI path, complete argument and
+  environment propagation, plus the absence of `npm.cmd` and shell execution.
+- Native feature compilation, seed-template execution with the real packaged
+  harness, and measured empty-versus-interrupted startup remain pending. This
+  validate-only result is script/safety-contract evidence, not packaged timing
+  or recovery certification.

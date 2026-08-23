@@ -2,7 +2,7 @@
 
 ## Status
 
-proposed
+completed
 
 ## Objective
 
@@ -46,3 +46,25 @@ TASK103, TASK104.
 
 Retain a feature-gated synchronous recovery path until packaged recovery
 fixtures prove parity.
+
+## Evidence
+
+- Native setup now performs only directory/bootstrap work plus one database-only
+  `IMMEDIATE` recovery-classification transaction. It does not read media, run
+  FFprobe, contact Google/YouTube, or read protected resumable sessions.
+- The first React render is a safe holding shell. After two animation frames,
+  one bounded recovery coordinator resolves interrupted imports, sessions,
+  watched hashes, and preflight work before the four-part dispatch fence opens.
+- Startup returns connection, crash, channel-scoped dashboard, and readiness
+  state in one envelope from one SQLite connection. Queue dispatch additionally
+  filters by the active immutable channel ID.
+- Focused native startup tests passed 6/6. The full native suite passed 91 tests
+  with 5 intentionally ignored, including the 512 KiB stack regression. The
+  performance-harness startup tests passed 6/6.
+- Type checking, the production frontend build, all 50 frontend tests, and the
+  frontend payload budget passed. Browser-preview QA proved safe-first and
+  crash-first rendering, recovery unlock, one active lazy workspace, and zero
+  console warnings/errors.
+- Current signed/packaged Tauri startup and a large interrupted packaged profile
+  remain certification work under TASK112; browser-preview evidence is not a
+  substitute for that boundary.

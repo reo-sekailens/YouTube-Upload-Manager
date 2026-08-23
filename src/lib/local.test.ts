@@ -75,6 +75,65 @@ describe("folder monitor commands", () => {
   });
 });
 
+describe("two-phase startup commands", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    isTauri.mockReturnValue(true);
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    isTauri.mockReturnValue(false);
+    vi.resetModules();
+  });
+
+  it("loads one coherent bootstrap envelope before completing safe-shell recovery", async () => {
+    invoke.mockResolvedValue({});
+    const {
+      completeStartupAfterSafeShell,
+      loadStartupBootstrap,
+      primeStartupBootstrap,
+    } =
+      await import("./local");
+
+    const primed = primeStartupBootstrap();
+    const loaded = loadStartupBootstrap();
+    expect(loaded).toBe(primed);
+    await loaded;
+    await completeStartupAfterSafeShell();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "startup_bootstrap");
+    expect(invoke).toHaveBeenNthCalledWith(
+      2,
+      "complete_startup_after_safe_shell",
+    );
+  });
+});
+
+describe("revisioned state catch-up command", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    isTauri.mockReturnValue(true);
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    isTauri.mockReturnValue(false);
+    vi.resetModules();
+  });
+
+  it("keeps immutable channel scope and the last applied revision at the native boundary", async () => {
+    const { loadStateChanges } = await import("./local");
+
+    await loadStateChanges("UC-immutable", 42);
+
+    expect(invoke).toHaveBeenCalledWith("load_state_changes", {
+      channelId: "UC-immutable",
+      afterRevision: 42,
+    });
+  });
+});
+
 describe("confirmed application exit", () => {
   beforeEach(() => {
     invoke.mockReset();
@@ -172,6 +231,43 @@ describe("duplicate scan command", () => {
       ordinal: 2,
     });
   });
+
+  it("loads bounded preflight pages, compact status, and one expanded metadata record independently", async () => {
+    isTauri.mockReturnValue(true);
+    vi.resetModules();
+    const {
+      loadPreflightDuplicateFileMetadata,
+      loadPreflightDuplicateScan,
+      loadPreflightDuplicateScanStatus,
+    } = await import("./local");
+
+    await loadPreflightDuplicateScan("scan-1", {
+      fileOffset: 96,
+      fileLimit: 48,
+      activityOffset: 48,
+      activityLimit: 48,
+    });
+    await loadPreflightDuplicateScanStatus("scan-1");
+    await loadPreflightDuplicateFileMetadata("scan-1", 101);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "load_preflight_duplicate_scan", {
+      jobId: "scan-1",
+      fileOffset: 96,
+      fileLimit: 48,
+      activityOffset: 48,
+      activityLimit: 48,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(
+      2,
+      "load_preflight_duplicate_scan_status",
+      { jobId: "scan-1" },
+    );
+    expect(invoke).toHaveBeenNthCalledWith(
+      3,
+      "load_preflight_duplicate_file_metadata",
+      { jobId: "scan-1", ordinal: 101 },
+    );
+  });
 });
 
 describe("portable metadata transfer commands", () => {
@@ -261,6 +357,27 @@ describe("manual upload intake settings", () => {
     await importAsset("C:\\Media\\review.mp4", settings);
 
     expect(invoke).toHaveBeenCalledWith("import_asset", { path: "C:\\Media\\review.mp4", settings });
+  });
+
+  it("submits a 100-file import and queue wave in exactly one webview/native round trip", async () => {
+    const { importAndQueueBatch } = await import("./local");
+    const paths = Array.from(
+      { length: 100 },
+      (_, index) => `C:\\Media\\clip-${index}.mp4`,
+    );
+    const settings = {
+      madeForKids: false,
+      visibility: "private" as const,
+      deleteSourceAfterUpload: false,
+    };
+
+    await importAndQueueBatch(paths, settings);
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("import_and_queue_batch", {
+      paths,
+      settings,
+    });
   });
 
   it("creates a playlist only through the native command boundary", async () => {

@@ -9,8 +9,12 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "test": "vitest run",
+    "test:ffprobe": "node --test scripts/prepare-ffprobe.tests.mjs",
     "performance:frontend": "npm run build && node scripts/performance/frontend-baseline.mjs",
     "performance:frontend:check": "npm run build && node scripts/performance/frontend-baseline.mjs --check",
+    "performance:package:windows": "node scripts/performance/build-windows-harness.mjs",
+    "performance:native": "pwsh -NoProfile -File scripts/performance/measure-native-scale.ps1",
+    "performance:native:check": "node scripts/performance/native-budget-check.mjs",
     "prepare:ffprobe": "node scripts/prepare-ffprobe.mjs",
     "tauri": "tauri"
   },

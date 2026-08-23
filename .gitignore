@@ -19,6 +19,11 @@ allure-results/
 src-tauri/gen/android/
 src-tauri/gen/apple/
 
+# Disposable optimization and performance-test artifacts
+# (The benchmark scripts and curated baseline documents remain tracked.)
+perf-runs/
+output/performance/
+
 # Environment and credentials
 .env
 .env.*
@@ -36,6 +41,15 @@ media/
 *.mov
 *.mkv
 *.webm
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.yumx
+*.yumx.gz
+last-panic-marker
+last-webview-error-marker
+native-performance-*.json
 
 # Editor and OS
 .vscode/

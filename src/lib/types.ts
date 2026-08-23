@@ -110,6 +110,10 @@ export type PreIngestDuplicateFile = {
     /** Timestamp when this inventory record was last synchronized locally. */
     updatedAt: string;
   }>;
+  /** Total evidence counts can exceed the bounded preview arrays above. */
+  localMatchCount?: number;
+  droppedDuplicateCount?: number;
+  uploadedTitleMatchCount?: number;
   error?: string;
 };
 
@@ -124,6 +128,13 @@ export type PreIngestDuplicateScan = {
   currentFileName?: string;
   /** FFprobe metadata still being collected independently of duplicate matching. */
   pendingMetadataFiles: number;
+  matchedFiles?: number;
+  /** Native paging cursor; files and activity are capped to one page. */
+  fileOffset?: number;
+  fileLimit?: number;
+  activityOffset?: number;
+  activityLimit?: number;
+  activityTotal?: number;
   files: PreIngestDuplicateFile[];
   /** Safe, persisted operation events. They contain filenames but never source paths. */
   activityLog: Array<{ fileName?: string; message: string; createdAt: string }>;
@@ -131,12 +142,56 @@ export type PreIngestDuplicateScan = {
   youtubeCheckDetail?: string;
 };
 
+export type PreIngestDuplicateScanStatus = Omit<
+  PreIngestDuplicateScan,
+  "files" | "activityLog" | "fileOffset" | "fileLimit" | "activityOffset" | "activityLimit"
+>;
+
+export type BatchImportItemReceipt = {
+  ordinal: number;
+  fileName: string;
+  status: "imported" | "queued" | "duplicate_review" | "failed" | string;
+  item?: UploadItem;
+  detail?: string;
+};
+
+/** One native request owns a complete intake wave and returns safe per-file receipts. */
+export type BatchImportReceipt = {
+  requestedCount: number;
+  importedCount: number;
+  queuedCount: number;
+  duplicateCount: number;
+  failedCount: number;
+  items: BatchImportItemReceipt[];
+  detail?: string;
+};
+
 export type DashboardSnapshot = {
   activeChannel?: string;
+  /** Immutable provider channel ID used for isolation; never use the display name as a key. */
+  activeChannelId?: string;
+  /** Durable channel-scoped state cursor represented by this snapshot. */
+  revision: number;
   items: UploadItem[];
   duplicates: DuplicateCandidate[];
   /** Title matches held for an explicit operator decision before they can upload. */
   pendingTitleDuplicates: UploadTitleDuplicate[];
+};
+
+/** Safe crash-marker metadata included in the single native startup envelope. */
+export type CrashRecoveryStatus = {
+  crashDetected: boolean;
+  detectedAt?: string;
+  failureKind?: string;
+};
+
+/** Native startup fence state. Queue actions remain unavailable until explicitly enabled. */
+export type StartupReadiness = {
+  classificationComplete: boolean;
+  safeShellRendered: boolean;
+  deferredRecoveryState: "pending" | "running" | "complete" | "failed";
+  queueActionsEnabled: boolean;
+  detail: string;
 };
 
 /** Safe, device-local status for the operator-approved watched folder. */
@@ -186,6 +241,8 @@ export type ConnectionSettings = {
   /** The native layer has an operator-imported Desktop OAuth client; its ID is not exposed to the webview. */
   oauthConfigured?: boolean;
   activeChannel?: string;
+  /** Immutable provider channel ID used for event and cache isolation. */
+  activeChannelId?: string;
   connected: boolean;
   detail?: string;
   secureStoreAvailable?: boolean;
@@ -194,6 +251,32 @@ export type ConnectionSettings = {
   /** A temporary, local deletion session is active; every video still requires confirmation. */
   deletionSudoActive?: boolean;
   deletionSudoExpiresAt?: string;
+};
+
+/** One durable, channel-scoped state mutation emitted by the native layer. */
+export type StateChange = {
+  revision: number;
+  channelId: string;
+  surface: string;
+  entityId: string;
+  eventKind: string;
+  payload?: unknown;
+};
+
+/** Recoverable event/catch-up envelope. `fromRevision` is the cursor before `changes`. */
+export type StateChangeBatch = {
+  fromRevision: number;
+  toRevision: number;
+  resetRequired: boolean;
+  changes: StateChange[];
+};
+
+/** One coherent, safe-to-render view of native startup state. */
+export type StartupBootstrap = {
+  crashRecovery: CrashRecoveryStatus;
+  connection: ConnectionSettings;
+  snapshot: DashboardSnapshot;
+  readiness: StartupReadiness;
 };
 
 export type YouTubeConnectionStart = {

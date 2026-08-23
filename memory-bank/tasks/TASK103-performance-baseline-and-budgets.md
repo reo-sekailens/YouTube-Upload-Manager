@@ -2,7 +2,7 @@
 
 ## Status
 
-ready
+in_progress
 
 ## Objective
 
@@ -45,3 +45,22 @@ None.
 - Run benchmark fixtures repeatedly in release mode.
 - Run current frontend/native tests and git diff --check.
 - Record packaged Windows evidence separately from browser and mock evidence.
+
+## Evidence
+
+- `memory-bank/performance-baseline-2026-08-23.md` records the redacted
+  reference workstation, packaged cold/warm p50/p95, bundle sizes, and native
+  0/100/1,000/10,000 scale results.
+- The frozen 10,000-record dashboard/dedupe baseline took 177,330.510 ms for a
+  single release sample; final optimized certification must restore the normal
+  seven-sample distribution.
+- `scripts/performance/frontend-baseline.mjs` and
+  `tests/performance-baseline.test.ts` produce deterministic local bundle
+  reports and explicit budgets.
+- The packaged runner, native counters, React commit/long-task markers, local
+  mock upload benchmark, deterministic CI gates, and cached FFprobe comparison
+  must all pass before this task moves to completed.
+- `src-tauri/src/upload_performance_benchmarks.rs` passed a seven-session
+  loopback `308 Range` benchmark for file-read, current-shaped, and pooled
+  streaming modes. The tracked baseline records its redacted p50/p95 and copy/
+  memory characteristics; TASK108 owns the final throughput gate.

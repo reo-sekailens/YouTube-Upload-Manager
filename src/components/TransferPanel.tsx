@@ -1,4 +1,3 @@
-import { open, save } from "@tauri-apps/plugin-dialog";
 import { useState } from "react";
 import { exportPortableArchive, importDesktopOAuthClient, importPortableArchive, isTauri } from "../lib/local";
 import type { ConnectionSettings, PortableArchiveReceipt } from "../lib/types";
@@ -19,16 +18,19 @@ export function TransferPanel({ onConnectionChange, onNotice }: TransferPanelPro
   };
   const exportArchive = async () => {
     if (!isTauri) return onNotice("Run the signed Tauri app to export a portable archive.");
+    const { save } = await import("@tauri-apps/plugin-dialog");
     const path = await save({ defaultPath: "youtube-upload-manager-dedupe.yumx.gz", filters: [{ name: "YouTube Upload Manager archive", extensions: ["yumx", "gz"] }] });
     if (path) await run(() => exportPortableArchive(path));
   };
   const importArchive = async () => {
     if (!isTauri) return onNotice("Run the signed Tauri app to import a portable archive.");
+    const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({ directory: false, multiple: false, pickerMode: "document", fileAccessMode: "scoped", filters: [{ name: "YouTube Upload Manager archive", extensions: ["yumx", "gz"] }] });
     if (typeof selected === "string") await run(() => importPortableArchive(selected));
   };
   const importOAuthJson = async () => {
     if (!isTauri) return onNotice("Run the signed Tauri app to import a Desktop OAuth JSON file.");
+    const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({ directory: false, multiple: false, pickerMode: "document", fileAccessMode: "scoped", filters: [{ name: "Desktop OAuth JSON", extensions: ["json"] }] });
     if (typeof selected !== "string") return;
     setBusy(true); setError("");

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { beginYoutubeConnection, cancelYoutubeConnection, disconnectYoutube, importDesktopOAuthClient, isTauri, loadConnectionSettings } from "../lib/local";
+import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
+import { subscribeLocalStateChanges } from "../lib/state-events";
 import type { ConnectionSettings } from "../lib/types";
 
 const disconnected: ConnectionSettings = { connected: false };
@@ -12,9 +12,16 @@ type ConnectionPanelProps = {
 
 export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
   const [settings, setSettings] = useState<ConnectionSettings>(disconnected);
-  const [notice, setNotice] = useState("");
-  const [connecting, setConnecting] = useState(false);
-  const [connectionAttemptId, setConnectionAttemptId] = useState<string>();
+  const [notice, setNotice] = useRetainedWorkspaceState("account.notice", "");
+  const [connecting, setConnecting] = useRetainedWorkspaceState(
+    "account.connecting",
+    false,
+  );
+  const [connectionAttemptId, setConnectionAttemptId] =
+    useRetainedWorkspaceState<string | undefined>(
+      "account.connection-attempt",
+      undefined,
+    );
   const [disconnecting, setDisconnecting] = useState(false);
 
   useEffect(() => {
@@ -32,28 +39,74 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
   }, [onConnectionChange]);
 
   useEffect(() => {
-    if (!connecting) return;
     let active = true;
-    const refreshConnection = async () => {
-      try {
-        const loaded = await loadConnectionSettings();
-        if (!active || loaded.detail === "Waiting for Google authorization in your browser.") return;
-        setSettings(loaded);
-        onConnectionChange?.(loaded);
-        setNotice(loaded.detail ?? "Google authorization finished.");
-        setConnecting(false);
-        setConnectionAttemptId(undefined);
-      } catch {
-        // The initial connection action remains the operator-visible status if a poll fails.
-      }
-    };
-    void refreshConnection();
-    const interval = window.setInterval(() => void refreshConnection(), 1000);
+    let unsubscribe: (() => void) | undefined;
+    if (!isTauri) return;
+    void subscribeLocalStateChanges((batch) => {
+      if (!batch.changes.some((change) => change.surface === "connection"))
+        return;
+      void loadConnectionSettings()
+        .then((loaded) => {
+          if (!active) return;
+          setSettings(loaded);
+          onConnectionChange?.(loaded);
+          if (loaded.detail !== "Waiting for Google authorization in your browser.") {
+            setNotice(loaded.detail ?? "Google authorization finished.");
+            setConnecting(false);
+            setConnectionAttemptId(undefined);
+          }
+        })
+        .catch(() => undefined);
+    })
+      .then((stop) => {
+        if (active) unsubscribe = stop;
+        else stop();
+      })
+      .catch(() => undefined);
     return () => {
       active = false;
-      window.clearInterval(interval);
+      unsubscribe?.();
     };
-  }, [connecting, onConnectionChange]);
+  }, [onConnectionChange, setConnecting, setConnectionAttemptId, setNotice]);
+
+  useEffect(() => {
+    if (!connecting || !isTauri) return;
+    let active = true;
+    let timeout: number | undefined;
+    const delays = [250, 500, 1_000, 2_000, 4_000, 8_000, 16_000];
+    const check = async (attempt: number) => {
+      try {
+        const loaded = await loadConnectionSettings();
+        if (!active) return;
+        if (loaded.detail !== "Waiting for Google authorization in your browser.") {
+          setSettings(loaded);
+          onConnectionChange?.(loaded);
+          setNotice(loaded.detail ?? "Google authorization finished.");
+          setConnecting(false);
+          setConnectionAttemptId(undefined);
+          return;
+        }
+      } catch {
+        // Event delivery remains primary; this fallback is intentionally bounded.
+      }
+      if (active && attempt + 1 < delays.length)
+        timeout = window.setTimeout(
+          () => void check(attempt + 1),
+          delays[attempt + 1],
+        );
+    };
+    timeout = window.setTimeout(() => void check(0), delays[0]);
+    return () => {
+      active = false;
+      if (timeout !== undefined) window.clearTimeout(timeout);
+    };
+  }, [
+    connecting,
+    onConnectionChange,
+    setConnecting,
+    setConnectionAttemptId,
+    setNotice,
+  ]);
 
   const connect = async () => {
     if (!isTauri || !settings.oauthConfigured) return;
@@ -63,6 +116,7 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
       setConnectionAttemptId(attemptId);
       const url = new URL(authorizationUrl);
       if (url.protocol !== "https:") throw new Error("The authorization request must use HTTPS.");
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
       void openUrl(url.toString()).catch((error: unknown) => {
         void cancelYoutubeConnection(attemptId).catch(() => undefined);
         setConnecting(false);
@@ -94,6 +148,7 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
 
   const importDesktopClient = async () => {
     if (!isTauri) return;
+    const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: false,
       directory: false,

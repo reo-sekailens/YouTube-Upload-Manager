@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import "./FolderMonitorPanel.lazy.css";
 import {
   createYouTubePlaylist,
   disableFolderMonitor,
@@ -16,6 +16,8 @@ import type {
   FolderMonitorVisibility,
   YouTubePlaylist,
 } from "../lib/types";
+import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
+import { subscribeLocalStateChanges } from "../lib/state-events";
 
 const unavailable: FolderMonitorSettings = {
   enabled: false,
@@ -28,6 +30,7 @@ const unavailable: FolderMonitorSettings = {
 
 type FolderMonitorPanelProps = {
   activeChannel?: string;
+  activeChannelId?: string;
   onNotice: (message: string) => void;
   onQueueRefresh: () => Promise<void>;
 };
@@ -63,6 +66,7 @@ function fileProgress(file: FolderMonitorFileActivity) {
 
 export function FolderMonitorPanel({
   activeChannel,
+  activeChannelId,
   onNotice,
   onQueueRefresh,
 }: FolderMonitorPanelProps) {
@@ -72,18 +76,32 @@ export function FolderMonitorPanel({
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [visibility, setVisibility] =
-    useState<FolderMonitorVisibility>("private");
-  const [madeForKids, setMadeForKids] = useState(false);
-  const [deleteSourceAfterUpload, setDeleteSourceAfterUpload] = useState(false);
+    useRetainedWorkspaceState<FolderMonitorVisibility>(
+      "monitor.visibility",
+      "private",
+    );
+  const [madeForKids, setMadeForKids] = useRetainedWorkspaceState(
+    "monitor.made-for-kids",
+    false,
+  );
+  const [deleteSourceAfterUpload, setDeleteSourceAfterUpload] =
+    useRetainedWorkspaceState("monitor.delete-source-after-upload", false);
   const [playlists, setPlaylists] = useState<YouTubePlaylist[]>([]);
-  const [playlistId, setPlaylistId] = useState("");
-  const [newPlaylistTitle, setNewPlaylistTitle] = useState("");
+  const [playlistId, setPlaylistId] = useRetainedWorkspaceState(
+    "monitor.playlist-id",
+    "",
+  );
+  const [newPlaylistTitle, setNewPlaylistTitle] = useRetainedWorkspaceState(
+    "monitor.new-playlist-title",
+    "",
+  );
   const [creatingPlaylist, setCreatingPlaylist] = useState(false);
-  const lastQueueRefreshAt = useRef<string | undefined>(undefined);
+  const invalidationTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     let active = true;
     let loading = false;
+    let unsubscribe: (() => void) | undefined;
     const load = async () => {
       if (loading) return;
       loading = true;
@@ -94,18 +112,6 @@ export function FolderMonitorPanel({
         setFiles(loaded.files);
         setLogs(loaded.logs);
         setLoadError("");
-        if (
-          loaded.settings.lastScanAt &&
-          loaded.settings.lastScanAt !== lastQueueRefreshAt.current
-        ) {
-          lastQueueRefreshAt.current = loaded.settings.lastScanAt;
-          void onQueueRefresh().catch(() => {
-            if (active)
-              setLoadError(
-                "The upload queue could not be refreshed after the folder scan.",
-              );
-          });
-        }
       } catch {
         if (active)
           setLoadError(
@@ -117,14 +123,37 @@ export function FolderMonitorPanel({
     };
 
     void load();
-    const timer = isTauri
-      ? window.setInterval(() => void load(), 5000)
-      : undefined;
+    if (isTauri && activeChannelId) {
+      void subscribeLocalStateChanges((batch) => {
+        if (
+          !batch.changes.some(
+            (change) =>
+              change.channelId === activeChannelId &&
+              ["folder_monitor", "monitor", "upload"].includes(change.surface),
+          ) ||
+          invalidationTimer.current !== undefined
+        )
+          return;
+        invalidationTimer.current = window.setTimeout(() => {
+          invalidationTimer.current = undefined;
+          void load();
+        }, 75);
+      })
+        .then((stop) => {
+          if (active) unsubscribe = stop;
+          else stop();
+        })
+        .catch(() => undefined);
+    }
     return () => {
       active = false;
-      if (timer !== undefined) window.clearInterval(timer);
+      unsubscribe?.();
+      if (invalidationTimer.current !== undefined) {
+        window.clearTimeout(invalidationTimer.current);
+        invalidationTimer.current = undefined;
+      }
     };
-  }, [activeChannel, onQueueRefresh]);
+  }, [activeChannel, activeChannelId]);
 
   useEffect(() => {
     if (!isTauri || !activeChannel) {
@@ -140,6 +169,7 @@ export function FolderMonitorPanel({
     if (!isTauri || !activeChannel) return;
     setBusy(true);
     try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({ directory: true, multiple: false });
       if (typeof selected !== "string") return;
       const playlist = playlists.find(
@@ -197,7 +227,6 @@ export function FolderMonitorPanel({
     try {
       const updated = await scanFolderMonitorNow();
       setSettings(updated);
-      lastQueueRefreshAt.current = updated.lastScanAt;
       void onQueueRefresh().catch(() =>
         setLoadError("The upload queue could not be refreshed after the folder scan."),
       );
@@ -332,7 +361,7 @@ export function FolderMonitorPanel({
             {settings.detail}
           </p>
           <p className="folder-monitor__automatic">
-            Automatic scanning is active every 5 seconds while this app is running.
+            Automatic scanning wakes only when saved monitor work is due while this app is running.
           </p>
           <section className="folder-monitor__live" aria-labelledby="folder-monitor-live-heading">
             <div className="folder-monitor__live-heading">

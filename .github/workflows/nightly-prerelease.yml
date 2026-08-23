@@ -104,9 +104,30 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ffprobe = 'src-tauri/binaries/ffprobe-x86_64-pc-windows-msvc.exe'
+          $license = 'src-tauri/binaries/ffprobe-license.txt'
+          if (-not (Test-Path -LiteralPath $ffprobe -PathType Leaf)) { throw 'Verified Windows x64 FFprobe sidecar is missing.' }
+          if (-not (Test-Path -LiteralPath $license -PathType Leaf)) { throw 'FFprobe license is missing.' }
+          $binary = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $ffprobe))
+          if ($binary.Length -lt 64 -or $binary[0] -ne 0x4D -or $binary[1] -ne 0x5A) { throw 'FFprobe is not a Windows PE binary.' }
+          $peOffset = [BitConverter]::ToInt32($binary, 0x3C)
+          if ($peOffset -lt 0 -or $peOffset + 6 -gt $binary.Length) { throw 'FFprobe has an invalid PE header offset.' }
+          $machine = [BitConverter]::ToUInt16($binary, $peOffset + 4)
+          if ($machine -ne 0x8664) { throw "FFprobe has machine 0x$($machine.ToString('X4')); expected Windows x64 (0x8664)." }
           New-Item -ItemType Directory -Force portable | Out-Null
           Copy-Item src-tauri/target/release/youtube-upload-manager.exe portable/YouTube-Upload-Manager.exe
-          Compress-Archive -Path portable/YouTube-Upload-Manager.exe -DestinationPath portable/YouTube-Upload-Manager-windows-x64-portable.zip
+          Copy-Item -LiteralPath $ffprobe portable/ffprobe.exe
+          Copy-Item -LiteralPath $license portable/ffprobe-license.txt
+          Compress-Archive -Path portable/YouTube-Upload-Manager.exe,portable/ffprobe.exe,portable/ffprobe-license.txt -DestinationPath portable/YouTube-Upload-Manager-windows-x64-portable.zip
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path 'portable/YouTube-Upload-Manager-windows-x64-portable.zip'))
+          try {
+            $entries = @($zip.Entries | ForEach-Object FullName)
+            foreach ($required in @('YouTube-Upload-Manager.exe', 'ffprobe.exe', 'ffprobe-license.txt')) {
+              if ($entries -notcontains $required) { throw "Portable archive is missing $required." }
+            }
+          } finally {
+            $zip.Dispose()
+          }
       - name: Package Linux portable AppImage
         if: runner.os == 'Linux'
         shell: bash

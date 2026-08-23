@@ -1,5 +1,9 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import "./PreIngestDuplicatePanel.lazy.css";
+import { windowItems } from "../lib/list-windowing";
+import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
 import type { PreIngestDuplicateScan } from "../lib/types";
+import { PaginationControls } from "./PaginationControls";
 
 type PreIngestDuplicatePanelProps = {
   busy: boolean;
@@ -17,6 +21,11 @@ type PreIngestDuplicatePanelProps = {
     confirmation: string,
     ordinal: number,
   ) => Promise<void>;
+  onLoadPage?: (kind: "files" | "activity", page: number) => Promise<void>;
+  onLoadMetadata?: (
+    jobId: string,
+    ordinal: number,
+  ) => Promise<PreIngestDuplicateScan["files"][number]["localMetadata"]>;
 };
 
 type LocalDeleteTarget = {
@@ -68,6 +77,66 @@ function formatBytes(bytes?: number) {
   return `${(bytes / 1024 ** index).toFixed(index === 1 ? 0 : 1)} ${units[index - 1]}`;
 }
 
+function FullMetadataDetails({
+  metadata,
+  onLoad,
+}: {
+  metadata: PreIngestDuplicateScan["files"][number]["localMetadata"];
+  onLoad: () => Promise<
+    PreIngestDuplicateScan["files"][number]["localMetadata"]
+  >;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [loadedMetadata, setLoadedMetadata] = useState(metadata);
+  const [loading, setLoading] = useState(false);
+  const [requested, setRequested] = useState(false);
+  const visibleMetadata = loadedMetadata;
+  return (
+    <details
+      className="pre-ingest-duplicate__full-metadata"
+      onToggle={(event) => {
+        const open = event.currentTarget.open;
+        setExpanded(open);
+        if (open && !loading && !requested) {
+          setRequested(true);
+          setLoading(true);
+          void onLoad()
+            .then(setLoadedMetadata)
+            .finally(() => setLoading(false));
+        }
+      }}
+    >
+      <summary>Full container metadata</summary>
+      {expanded && (
+        <>
+          {loading && <p role="status">Loading retained metadata…</p>}
+          <dl>
+            {visibleMetadata.metadataFields.map((field) => (
+              <div key={`container-${field.label}`}>
+                <dt>{field.label}</dt>
+                <dd>{field.value}</dd>
+              </div>
+            ))}
+          </dl>
+          {visibleMetadata.streams.map((stream) => (
+            <section key={stream.label}>
+              <strong>{stream.label}</strong>
+              <dl>
+                {stream.fields.map((field) => (
+                  <div key={`${stream.label}-${field.label}`}>
+                    <dt>{field.label}</dt>
+                    <dd>{field.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          ))}
+        </>
+      )}
+    </details>
+  );
+}
+
 export function PreIngestDuplicatePanel({
   busy,
   fileCount,
@@ -77,10 +146,22 @@ export function PreIngestDuplicatePanel({
   onChoose,
   onPrepareLocalDuplicateDelete,
   onDeleteLocalDuplicate,
+  onLoadPage,
+  onLoadMetadata,
 }: PreIngestDuplicatePanelProps) {
   const [deleteTarget, setDeleteTarget] = useState<LocalDeleteTarget>();
-  const [selectedOrdinals, setSelectedOrdinals] = useState<Set<number>>(
-    new Set(),
+  const [selectedOrdinals, setSelectedOrdinals] =
+    useRetainedWorkspaceState<Set<number>>(
+      "dedupe.preflight-selected-ordinals",
+      () => new Set(),
+    );
+  const [resultsPage, setResultsPage] = useRetainedWorkspaceState(
+    "dedupe.preflight-results-page",
+    1,
+  );
+  const [activityPage, setActivityPage] = useRetainedWorkspaceState(
+    "dedupe.preflight-activity-page",
+    1,
   );
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -94,6 +175,7 @@ export function PreIngestDuplicatePanel({
   const [bulkError, setBulkError] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
+  const activeScanId = useRef(scan?.id);
   const eligibleOrdinals =
     scan?.files.flatMap((file) =>
       isLocalDeleteEligible(file) ? [file.ordinal] : [],
@@ -114,6 +196,40 @@ export function PreIngestDuplicatePanel({
   const progressLog = scan?.activityLog
     .map((entry) => `${new Date(entry.createdAt).toLocaleTimeString()}${entry.fileName ? ` — ${entry.fileName}` : ""} — ${entry.message}`)
     .join("\n") ?? "";
+  const visibleFiles = useMemo(() => {
+    if (scan?.fileOffset === undefined) return windowItems(scan?.files ?? [], resultsPage);
+    const limit = scan.fileLimit ?? 48;
+    return {
+      items: scan.files,
+      page: Math.floor(scan.fileOffset / limit) + 1,
+      pageCount: Math.max(1, Math.ceil(scan.totalFiles / limit)),
+      start: scan.files.length === 0 ? 0 : scan.fileOffset + 1,
+      end: scan.fileOffset + scan.files.length,
+      total: scan.totalFiles,
+    };
+  }, [resultsPage, scan]);
+  const visibleActivity = useMemo(() => {
+    if (scan?.activityOffset === undefined)
+      return windowItems(scan?.activityLog ?? [], activityPage);
+    const limit = scan.activityLimit ?? 48;
+    const total = scan.activityTotal ?? scan.activityLog.length;
+    return {
+      items: scan.activityLog,
+      page: Math.floor(scan.activityOffset / limit) + 1,
+      pageCount: Math.max(1, Math.ceil(total / limit)),
+      start: scan.activityLog.length === 0 ? 0 : scan.activityOffset + 1,
+      end: scan.activityOffset + scan.activityLog.length,
+      total,
+    };
+  }, [activityPage, scan]);
+
+  useEffect(() => {
+    if (activeScanId.current === scan?.id) return;
+    activeScanId.current = scan?.id;
+    setSelectedOrdinals(new Set());
+    setResultsPage(1);
+    setActivityPage(1);
+  }, [scan?.id, setActivityPage, setResultsPage, setSelectedOrdinals]);
 
   const copyProgressLog = async () => {
     if (!progressLog) return;
@@ -315,20 +431,35 @@ export function PreIngestDuplicatePanel({
           <progress max={scan.totalFiles} value={scan.completedFiles} aria-label={`${scan.completedFiles} of ${scan.totalFiles} files checked`} />
           <p>{scan.currentFileName ? `Checking ${scan.currentFileName}` : scan.status === "complete" && scan.pendingMetadataFiles > 0 ? `Duplicate check complete. Reading media metadata for ${scan.pendingMetadataFiles} file${scan.pendingMetadataFiles === 1 ? "" : "s"} in the background.` : scan.status === "complete" ? "Duplicate check complete." : "Preparing the next selected file…"}</p>
           <details className="pre-ingest-duplicate__activity-log">
-            <summary>Activity log ({scan.activityLog.length})</summary>
+            <summary>Activity log ({scan.activityTotal ?? scan.activityLog.length})</summary>
             <div>
               <button className="text-button" disabled={!progressLog} onClick={() => void copyProgressLog()} type="button">Copy log</button>
               {copyStatus && <span role="status">{copyStatus}</span>}
             </div>
             <ol>
-              {scan.activityLog.map((entry, index) => (
-                <li key={`${entry.createdAt}-${entry.fileName ?? "job"}-${index}`}>
+              {visibleActivity.items.map((entry, index) => (
+                <li
+                  data-preflight-activity-record
+                  key={`${entry.createdAt}-${entry.fileName ?? "job"}-${index}`}
+                >
                   <time dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleTimeString()}</time>
                   {entry.fileName && <strong>{entry.fileName}</strong>}
                   <span>{entry.message}</span>
                 </li>
               ))}
             </ol>
+            <PaginationControls
+              end={visibleActivity.end}
+              label="Pre-ingest activity"
+              onPageChange={(page) => {
+                setActivityPage(page);
+                if (onLoadPage) void onLoadPage("activity", page);
+              }}
+              page={visibleActivity.page}
+              pageCount={visibleActivity.pageCount}
+              start={visibleActivity.start}
+              total={visibleActivity.total}
+            />
           </details>
         </section>
       )}
@@ -340,8 +471,6 @@ export function PreIngestDuplicatePanel({
       {scan && scan.files.length > 0 && (
         <div
           className="pre-ingest-duplicate__results"
-          role="list"
-          aria-label="Pre-ingest duplicate results"
         >
           {eligibleOrdinals.length > 0 && (
             <div className="pre-ingest-duplicate__bulk-toolbar">
@@ -352,7 +481,7 @@ export function PreIngestDuplicatePanel({
                   onChange={toggleSelectAll}
                   type="checkbox"
                 />{" "}
-                Select all matched local files
+                Select all matched local files (all pages)
               </label>
               <span>{selectedFiles.length} selected</span>
               <button
@@ -374,9 +503,11 @@ export function PreIngestDuplicatePanel({
               </button>
             </div>
           )}
-          {scan.files.map((file) => (
+          <div aria-label="Pre-ingest duplicate results" role="list">
+          {visibleFiles.items.map((file) => (
             <article
               className="pre-ingest-duplicate__result"
+              data-preflight-record
               key={file.ordinal}
               role="listitem"
             >
@@ -436,12 +567,21 @@ export function PreIngestDuplicatePanel({
                       </div>
                     ))}
                   </section>
+                  {(file.localMatchCount ?? file.localMatches.length) >
+                    file.localMatches.length && (
+                    <p>
+                      Showing {file.localMatches.length} of {file.localMatchCount} saved local matches.
+                    </p>
+                  )}
                 </div>
               )}
               {file.droppedDuplicateFileNames.length > 0 && (
                 <p>
                   Matches another dropped file:{" "}
                   {file.droppedDuplicateFileNames.join(", ")}.
+                  {(file.droppedDuplicateCount ?? file.droppedDuplicateFileNames.length) >
+                    file.droppedDuplicateFileNames.length &&
+                    ` Showing ${file.droppedDuplicateFileNames.length} of ${file.droppedDuplicateCount}.`}
                 </p>
               )}
               {file.uploadedTitleMatches.length > 0 && (
@@ -461,7 +601,16 @@ export function PreIngestDuplicatePanel({
                       {file.localMetadata.containerFormat && <div><dt>Container</dt><dd>{file.localMetadata.containerFormat}</dd></div>}
                       {file.localMetadata.bitRate && <div><dt>Bit rate</dt><dd>{Number(file.localMetadata.bitRate).toLocaleString()} b/s</dd></div>}
                     </dl>
-                    {(file.localMetadata.metadataFields.length > 0 || file.localMetadata.streams.length > 0) && <details className="pre-ingest-duplicate__full-metadata"><summary>Full container metadata</summary><dl>{file.localMetadata.metadataFields.map((field) => <div key={`container-${field.label}`}><dt>{field.label}</dt><dd>{field.value}</dd></div>)}</dl>{file.localMetadata.streams.map((stream) => <section key={stream.label}><strong>{stream.label}</strong><dl>{stream.fields.map((field) => <div key={`${stream.label}-${field.label}`}><dt>{field.label}</dt><dd>{field.value}</dd></div>)}</dl></section>)}</details>}
+                    {!file.error && (
+                      <FullMetadataDetails
+                        metadata={file.localMetadata}
+                        onLoad={() =>
+                          onLoadMetadata
+                            ? onLoadMetadata(scan.id, file.ordinal)
+                            : Promise.resolve(file.localMetadata)
+                        }
+                      />
+                    )}
                   </section>
                   <section>
                     <span>YouTube video</span>
@@ -486,6 +635,13 @@ export function PreIngestDuplicatePanel({
                         </details>
                       </div>
                     ))}
+                    {(file.uploadedTitleMatchCount ?? file.uploadedTitleMatches.length) >
+                      file.uploadedTitleMatches.length && (
+                      <p>
+                        Showing {file.uploadedTitleMatches.length} of{" "}
+                        {file.uploadedTitleMatchCount} uploaded-title matches.
+                      </p>
+                    )}
                   </section>
                 </div>
               )}
@@ -518,6 +674,19 @@ export function PreIngestDuplicatePanel({
                 )}
             </article>
           ))}
+          </div>
+          <PaginationControls
+            end={visibleFiles.end}
+            label="Pre-ingest duplicate results"
+            onPageChange={(page) => {
+              setResultsPage(page);
+              if (onLoadPage) void onLoadPage("files", page);
+            }}
+            page={visibleFiles.page}
+            pageCount={visibleFiles.pageCount}
+            start={visibleFiles.start}
+            total={visibleFiles.total}
+          />
         </div>
       )}
       {deleteTarget && (

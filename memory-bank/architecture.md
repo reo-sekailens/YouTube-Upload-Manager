@@ -20,6 +20,18 @@ Google LLC; other marks belong to their respective owners.
 | Managed local media workspace | Device-local immutable copies, source locators, digests, and resume-safe access | Automatic copying to an app-controlled cloud store |
 | YouTube APIs | Account authorization and video upload/publish outcomes | Local operational state |
 
+The native runtime now uses incremental, ownership-based modules rather than a
+wholesale command-layer rewrite. `persistence` owns SQLite lifecycle and query
+primitives; `state_events` owns revision delivery; `provider_transport` and
+`upload_scheduler` own bounded provider transport and upload admission; and
+`media_runtime` owns device-volume read/probe admission, active-upload priority,
+copy/hash primitives, FFprobe lifecycle, ISO-BMFF duration parsing, and the
+stable-signature probe cache. `lib.rs` remains the composition boundary for
+Tauri commands, product schemas, channel/account checks, audit writes, startup
+recovery, and database cancellation adapters. In particular, the media module
+cannot open SQLite or translate provider/product state, while the command layer
+cannot bypass its bounded read/process guards.
+
 ## Canonical entities
 
 - **Account connection:** the authorized YouTube identity and its credential reference; scoped to an operator or tenant when multi-user support exists.
@@ -40,12 +52,52 @@ Google LLC; other marks belong to their respective owners.
 
 On launch, any `uploading` item is reconciled before it can send another byte: verify the managed local asset, refresh authorization if necessary, query the persisted provider session, then continue only from the provider-confirmed range. A completed response records its returned video ID; an expired session or ambiguous completion is marked **needs reconciliation**, never silently retried as a new upload.
 
-Queue recovery is a native startup responsibility and completes before the
-webview session is created. Interrupted local imports resume or become a
-repairable failed record, pre-network dispatch claims return to `queued`, and
-interrupted uploads enter `needs_reconciliation` with their secure resumable
-checkpoint preserved. The dashboard therefore exposes no manual recovery
-control.
+Queue recovery has an explicit two-phase native boundary. Before the webview
+can dispatch work, one database-only transaction returns pre-network claims to
+`queued`, classifies interrupted uploads/deletions fail-closed, and resets
+local worker markers. That transaction reads no media or protected session,
+runs no FFprobe process, and makes no provider request. React first renders a
+safe holding shell; only then can one bounded recovery coordinator resume
+managed imports, protected resumable-session lookup, watched hashes, and
+preflight work. Queue actions remain disabled until classification, safe-shell
+rendering, deferred recovery, and immutable active-channel binding all pass.
+The dashboard therefore exposes no manual recovery control.
+
+SQLite also owns the durable webview synchronization cursor. Every relevant
+channel-scoped mutation appends a monotonic `state_changes` revision inside the
+same transaction. One commit-hook-driven native dispatcher blocks while idle,
+coalesces progress for a fixed 100 ms window, and publishes safe deltas or
+projection invalidations. React attaches one shared listener before requesting
+catch-up, rejects data from another immutable channel, and reloads a bounded
+snapshot only when retained revisions cannot cover its cursor. Global revisions
+may be absent from a channel batch because other-channel rows are filtered and
+same-entity rows are coalesced; the envelope cursor, not contiguous entity
+revision numbers, defines coverage.
+
+YouTube transport is native-owned and lazy. Native state construction creates
+no HTTP client; the first provider operation initializes one pooled control or
+upload client with an explicit timeout policy. Access tokens are cached only in
+Rust memory with expiry skew and refresh singleflight, while refresh tokens and
+resumable-session URIs stay in OS protected storage. A resumable transfer keeps
+one pooled client handle and one request-owned bounded chunk buffer per worker,
+and persists every provider-confirmed range before sending the next one.
+
+Upload execution uses durable SQLite claims plus a four-permit native scheduler.
+Eligible source volumes are selected round-robin subject to their cached local
+limits, and each claim runs independently so a slow transfer cannot serialize
+the rest of the batch. A successful provider response commits the video ID,
+confirmed byte count, immutable channel binding, and audit receipt atomically.
+Playlist insertion, protected session removal, and guarded source cleanup run
+after that receipt in one channel-scoped lower-priority worker without holding
+an upload permit. Remote deletion is excluded from this scheduler and remains
+sequential and operator confirmed.
+
+This boundary is certified locally by the frozen integrated native suite (122
+passed, zero failed, five release-only benchmarks ignored) and the integrated
+release suite (5/5 passed). The canonical loopback upload result is optimized
+p50/p95 204.516/239.985 ms at 312.933 MiB/s versus pooled streaming
+417.810/447.743 ms, a 2.0429x ratio with one 8 MiB request buffer and zero extra
+full-chunk copies. It is not evidence of live Google/YouTube performance.
 
 Publishing visibility (private, unlisted, public, scheduled) should be explicit metadata, independently validated before execution, and included in the audit trail.
 
@@ -64,13 +116,39 @@ changes, the item fails safely rather than uploading a replacement.
 Completed manual intake batches are queued and dispatch automatically whenever
 their approved channel is connected. If YouTube reports its daily upload limit,
 the local job engine records a conservative device-local 24-hour dispatch pause,
-keeps affected work queued, and resumes it after that pause while the app runs
-or on the next launch. The pause stores no provider response body or credential.
+keeps affected work queued, and resumes it from a conditional worker at the
+saved deadline or on the next launch. The worker exits when no pause remains;
+the per-channel pause stores no provider response body or credential.
 
 Duplicate detection remains an explicit operator action. **Run dedupe** first
 synchronizes the active channel's owner-authorized upload inventory, then
 rebuilds local BLAKE3 and uploaded-title candidates for review. It never
 creates or executes a deletion request.
+
+Inventory and title-dedupe work is generation based. Each staged remote page
+persists the versioned normalized, canonical-copy, and numeric-sequence keys
+used only to narrow candidates. The final page atomically promotes the complete
+generation for one immutable channel; a partial generation never replaces the
+last complete view. Local-upload and inventory mutations advance separate
+channel generations. Their pair identifies the materialized duplicate
+projection, so unchanged dashboard reads are bounded projection reads while a
+changed channel rebuilds only its own explainable candidates. Every candidate
+is confirmed by the exact evidence function before it becomes reviewable.
+
+Large preflight jobs separate progress from evidence transport. Workers persist
+compact counters during execution and materialize full per-file match evidence
+once at completion. The webview reads status without file rows, requests
+independently bounded file and activity pages, and requests one rich metadata
+record only when the operator expands it. The native layer never returns source
+locators in list or batch receipt payloads.
+
+Manual multi-file intake is one native batch boundary rather than one bridge
+round trip per file. Native code independently validates and imports each
+source, performs one channel inventory/title preparation, commits accepted
+queue rows together, returns redacted per-item receipts, and wakes dispatch
+once. A failed item does not conceal or roll back the receipts of independent
+items, and every import, receipt, lookup, and queue row remains bound to the
+reviewed immutable channel.
 
 The product display name is **YouTube Upload Manager**. Its Tauri identifier
 and OS credential-store service name use the `com.sekailens` namespace:

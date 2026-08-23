@@ -1,21 +1,29 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import type { KeyboardEvent } from "react";
 import {
   cancelPreflightDuplicateScan,
   cancelUploadItem,
   checkUploadTitleDuplicates,
   clearUploadQueue,
+  completeStartupAfterSafeShell,
   deleteUploadedSource,
   exitApplication,
   deletePreflightDuplicateFile,
   ignoreDuplicateCandidate,
-  importAsset,
+  importAndQueueBatch,
   isTauri,
   loadConnectionSettings,
-  loadCrashRecoveryStatus,
+  loadPreflightDuplicateFileMetadata,
   loadPreflightDuplicateScan,
   loadSnapshot,
+  loadStartupBootstrap,
   preflightDuplicateFiles,
   preparePreflightLocalDeleteFile,
   queueItem,
@@ -31,56 +39,24 @@ import type {
   DashboardSnapshot,
   ManualUploadSettings,
   PreIngestDuplicateScan,
+  StartupBootstrap,
+  StartupReadiness,
   UploadItem,
   UploadVisibility,
 } from "./lib/types";
 import type { ConnectionSettings } from "./lib/types";
-import { ConnectionPanel } from "./components/ConnectionPanel";
-import { GoogleSetupWizard } from "./components/GoogleSetupWizard";
-import { DeletionReview } from "./components/DeletionReview";
-import { DuplicateReview } from "./components/DuplicateReview";
-import { FolderMonitorPanel } from "./components/FolderMonitorPanel";
-import { QueueTable } from "./components/QueueTable";
-import { UploadProgressSummary } from "./components/UploadProgressSummary";
-import { UploadIntakeReview } from "./components/UploadIntakeReview";
-import { ManualUploadDefaultsPanel } from "./components/ManualUploadDefaultsPanel";
-import { UploadTitleDuplicateReview } from "./components/UploadTitleDuplicateReview";
-import { PreIngestDuplicatePanel } from "./components/PreIngestDuplicatePanel";
-import { TransferPanel } from "./components/TransferPanel";
-import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
-import { CrashRecoveryScreen } from "./components/CrashRecoveryScreen";
-import {
-  dedupeProgressLabel,
-  dedupeProgressStep,
-  dedupeProgressStepCount,
-  recordDedupeActivity,
-} from "./lib/dedupe-activity";
 import type {
   DedupeActivityState,
   DedupeActivityEntry,
   DedupeProgressPhase,
 } from "./lib/dedupe-activity";
-import { selectedFilePaths } from "./lib/file-picker";
 
 const emptySnapshot: DashboardSnapshot = {
+  revision: 0,
   items: [],
   duplicates: [],
   pendingTitleDuplicates: [],
 };
-const supportedVideoExtensions = new Set([
-  "3g2",
-  "3gp",
-  "avi",
-  "flv",
-  "m4v",
-  "mkv",
-  "mov",
-  "mp4",
-  "mpeg",
-  "mpg",
-  "webm",
-  "wmv",
-]);
 const workspaceTabs = [
   ["batch", "Batch uploads"],
   ["monitor", "Folder monitor"],
@@ -92,19 +68,166 @@ const workspaceTabs = [
 ] as const;
 type WorkspaceTab = (typeof workspaceTabs)[number][0];
 
-function isSupportedVideoPath(path: string) {
-  const extension = path.split(".").pop()?.toLowerCase();
-  return extension !== undefined && supportedVideoExtensions.has(extension);
+const ConnectionPanel = lazy(() =>
+  import("./components/ConnectionPanel").then((module) => ({
+    default: module.ConnectionPanel,
+  })),
+);
+const CrashRecoveryScreen = lazy(() =>
+  import("./components/CrashRecoveryScreen").then((module) => ({
+    default: module.CrashRecoveryScreen,
+  })),
+);
+const GoogleSetupWizard = lazy(() =>
+  import("./components/GoogleSetupWizard").then((module) => ({
+    default: module.GoogleSetupWizard,
+  })),
+);
+const loadQueueTable = () =>
+  import("./components/QueueTable").then((module) => ({
+    default: module.QueueTable,
+  }));
+const QueueTable = lazy(loadQueueTable);
+const loadManualUploadDefaultsPanel = () =>
+  import("./components/ManualUploadDefaultsPanel").then((module) => ({
+    default: module.ManualUploadDefaultsPanel,
+  }));
+const ManualUploadDefaultsPanel = lazy(loadManualUploadDefaultsPanel);
+const loadUploadProgressSummary = () =>
+  import("./components/UploadProgressSummary").then((module) => ({
+    default: module.UploadProgressSummary,
+  }));
+const UploadProgressSummary = lazy(loadUploadProgressSummary);
+const loadUploadTitleDuplicateReview = () =>
+  import("./components/UploadTitleDuplicateReview").then((module) => ({
+    default: module.UploadTitleDuplicateReview,
+  }));
+const UploadTitleDuplicateReview = lazy(loadUploadTitleDuplicateReview);
+
+export function prefetchBatchWorkspace() {
+  return Promise.all([
+    loadQueueTable(),
+    loadManualUploadDefaultsPanel(),
+    loadUploadProgressSummary(),
+    loadUploadTitleDuplicateReview(),
+  ]);
+}
+const DeletionReview = lazy(() =>
+  import("./components/DeletionReview").then((module) => ({
+    default: module.DeletionReview,
+  })),
+);
+const DedupeActivityPanel = lazy(() =>
+  import("./components/DedupeActivityPanel").then((module) => ({
+    default: module.DedupeActivityPanel,
+  })),
+);
+const DiagnosticsPanel = lazy(() =>
+  import("./components/DiagnosticsPanel").then((module) => ({
+    default: module.DiagnosticsPanel,
+  })),
+);
+const DuplicateReview = lazy(() =>
+  import("./components/DuplicateReview").then((module) => ({
+    default: module.DuplicateReview,
+  })),
+);
+const FolderMonitorPanel = lazy(() =>
+  import("./components/FolderMonitorPanel").then((module) => ({
+    default: module.FolderMonitorPanel,
+  })),
+);
+const PreIngestDuplicatePanel = lazy(() =>
+  import("./components/PreIngestDuplicatePanel").then((module) => ({
+    default: module.PreIngestDuplicatePanel,
+  })),
+);
+const TransferPanel = lazy(() =>
+  import("./components/TransferPanel").then((module) => ({
+    default: module.TransferPanel,
+  })),
+);
+const UploadIntakeReview = lazy(() =>
+  import("./components/UploadIntakeReview").then((module) => ({
+    default: module.UploadIntakeReview,
+  })),
+);
+const RevisionedStateBridge = lazy(
+  () => import("./lib/revisioned-state-bridge"),
+);
+
+function WorkspacePending() {
+  return (
+    <p className="workspace-loading" role="status">
+      Loading workspace…
+    </p>
+  );
+}
+
+function SafeStartupShell({
+  failure,
+  readiness,
+}: {
+  failure?: string;
+  readiness?: StartupReadiness;
+}) {
+  const detail =
+    failure ??
+    readiness?.detail ??
+    "Checking saved device-local work before upload controls are enabled.";
+  return (
+    <main className="app-shell" data-performance-shell="holding">
+      <header className="topbar">
+        <div className="brand-lockup">
+          <img className="brand-mark" src="/favicon.svg" alt="" />
+          <div>
+            <p className="eyebrow">SAFE STARTUP</p>
+            <h1>YouTube Upload Manager</h1>
+            <p className="subtle">Your saved work remains on this device.</p>
+          </div>
+        </div>
+      </header>
+      <section
+        aria-busy={!failure}
+        aria-live="polite"
+        className="panel"
+        role="status"
+      >
+        <p className="eyebrow">
+          {failure ? "STARTUP NEEDS ATTENTION" : "RECOVERING LOCAL WORK"}
+        </p>
+        <h2>{failure ? "The workspace is still locked" : "Preparing your workspace…"}</h2>
+        <p>{detail}</p>
+        <p className="subtle">
+          Upload and queue actions stay unavailable until interrupted work has
+          been safely classified.
+        </p>
+      </section>
+    </main>
+  );
 }
 
 function operatorErrorMessage(error: unknown, fallback: string) {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string" && error.trim()) return error;
-  return fallback;
+  return error instanceof Error
+    ? error.message
+    : typeof error === "string" && error.trim()
+      ? error
+      : fallback;
 }
 
-export default function App() {
-  const [snapshot, setSnapshot] = useState<DashboardSnapshot>(emptySnapshot);
+export default function App({
+  initialStartup,
+}: {
+  /** Test/preview seam; production startup always begins with the safe shell. */
+  initialStartup?: StartupBootstrap;
+} = {}) {
+  const [startup, setStartup] = useState<StartupBootstrap | undefined>(
+    initialStartup,
+  );
+  const [startupFailure, setStartupFailure] = useState<string>();
+  const [snapshot, setSnapshot] = useState<DashboardSnapshot>(
+    initialStartup?.snapshot ?? emptySnapshot,
+  );
   const [notice, setNotice] = useState(
     "Local queue is ready. No media leaves this device except during a YouTube upload.",
   );
@@ -123,64 +246,192 @@ export default function App() {
   const [pendingImportPaths, setPendingImportPaths] = useState<string[]>();
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("batch");
   const [connectionSettings, setConnectionSettings] =
-    useState<ConnectionSettings>();
+    useState<ConnectionSettings | undefined>(initialStartup?.connection);
   const [setupDismissed, setSetupDismissed] = useState(false);
-  const [crashRecovery, setCrashRecovery] = useState<{
-    crashDetected: boolean;
-    detectedAt?: string;
-    failureKind?: string;
-  }>();
+  const [crashRecovery, setCrashRecovery] = useState(
+    initialStartup?.crashRecovery,
+  );
   const [exitConfirmationOpen, setExitConfirmationOpen] = useState(false);
   const dedupeActivityId = useRef(0);
   const preflightRunId = useRef(0);
+  const stateRevisionRef = useRef(initialStartup?.snapshot.revision ?? 0);
+  const stateChannelIdRef = useRef(initialStartup?.snapshot.activeChannelId);
+  const finalizedPreflightJobs = useRef(new Set<string>());
+  const startupCompletionRequest = useRef<
+    Promise<StartupBootstrap> | undefined
+  >(undefined);
+  const startupReady = Boolean(
+    startup?.readiness.classificationComplete &&
+      startup.readiness.safeShellRendered &&
+      startup.readiness.queueActionsEnabled,
+  );
   const recoveryModeRef = useRef(false);
-  recoveryModeRef.current = Boolean(crashRecovery?.crashDetected);
+  recoveryModeRef.current = Boolean(crashRecovery?.crashDetected || !startupReady);
 
   const updateConnection = useCallback((settings: ConnectionSettings) => {
     setConnectionSettings(settings);
-    setSnapshot((current) => ({
-      ...current,
-      activeChannel: settings.activeChannel,
-    }));
+    setSnapshot((current) => {
+      if (current.activeChannelId === settings.activeChannelId) {
+        return {
+          ...current,
+          activeChannel: settings.activeChannel,
+        };
+      }
+      stateChannelIdRef.current = settings.activeChannelId;
+      stateRevisionRef.current = 0;
+      return {
+        ...emptySnapshot,
+        activeChannel: settings.activeChannel,
+        activeChannelId: settings.activeChannelId,
+      };
+    });
+    if (isTauri) {
+      void loadSnapshot()
+        .then((next) => {
+          if (next.activeChannelId !== settings.activeChannelId) return;
+          if (
+            stateChannelIdRef.current === next.activeChannelId &&
+            next.revision < stateRevisionRef.current
+          )
+            return;
+          stateChannelIdRef.current = next.activeChannelId;
+          stateRevisionRef.current = next.revision;
+          setSnapshot(next);
+        })
+        .catch(() => undefined);
+    }
   }, []);
 
   const refresh = useCallback(async () => {
     const next = await loadSnapshot();
+    if (
+      stateChannelIdRef.current === next.activeChannelId &&
+      next.revision < stateRevisionRef.current
+    )
+      return next;
+    stateChannelIdRef.current = next.activeChannelId;
+    stateRevisionRef.current = next.revision;
     setSnapshot(next);
     return next;
   }, []);
+
+  const refreshQueue = useCallback(async () => {
+    await refresh();
+  }, [refresh]);
+
+  const applyStartup = useCallback((next: StartupBootstrap) => {
+    setStartup(next);
+    stateChannelIdRef.current = next.snapshot.activeChannelId;
+    stateRevisionRef.current = next.snapshot.revision;
+    setSnapshot(next.snapshot);
+    setConnectionSettings(next.connection);
+    setCrashRecovery(next.crashRecovery);
+  }, []);
+
+  const handleWorkspaceKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLButtonElement>) => {
+      const currentIndex = workspaceTabs.findIndex(([id]) => id === activeTab);
+      let nextIndex: number | undefined;
+      if (event.key === "ArrowDown" || event.key === "ArrowRight")
+        nextIndex = (currentIndex + 1) % workspaceTabs.length;
+      else if (event.key === "ArrowUp" || event.key === "ArrowLeft")
+        nextIndex =
+          (currentIndex - 1 + workspaceTabs.length) % workspaceTabs.length;
+      else if (event.key === "Home") nextIndex = 0;
+      else if (event.key === "End") nextIndex = workspaceTabs.length - 1;
+      if (nextIndex === undefined) return;
+
+      event.preventDefault();
+      const nextTab = workspaceTabs[nextIndex][0];
+      setActiveTab(nextTab);
+      window.requestAnimationFrame(() => {
+        document.getElementById(`workspace-tab-button-${nextTab}`)?.focus();
+      });
+    },
+    [activeTab, setActiveTab],
+  );
 
   const logDedupeActivity = useCallback(
     (state: DedupeActivityState, message: string) => {
       dedupeActivityId.current += 1;
       setDedupeActivity((entries) =>
-        recordDedupeActivity(entries, {
+        [...entries, {
           id: dedupeActivityId.current,
           state,
           message,
-        }),
+        }].slice(-8),
       );
     },
     [],
   );
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  useEffect(() => {
+    if (startup) return;
     let active = true;
-    void loadCrashRecoveryStatus()
-      .then((status) => {
-        if (active) setCrashRecovery(status);
+    void loadStartupBootstrap()
+      .then((next) => {
+        if (!active) return;
+        applyStartup(next);
       })
-      .catch(() => {
-        if (active) setCrashRecovery({ crashDetected: false });
+      .catch((error) => {
+        if (!active) return;
+        setStartupFailure(
+          operatorErrorMessage(
+            error,
+            "Startup state could not be read. No upload controls were enabled.",
+          ),
+        );
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [applyStartup, startup]);
+
+  useEffect(() => {
+    if (!startup || startupReady) return;
+    let active = true;
+    let innerFrame = 0;
+    const outerFrame = window.requestAnimationFrame(() => {
+      // Fetch and parse only the active Batch code after the safe shell has had
+      // a frame. Components remain unmounted and cannot run effects or invokes.
+      void prefetchBatchWorkspace().catch(() => undefined);
+      innerFrame = window.requestAnimationFrame(() => {
+        if (document.querySelector("[data-performance-shell]"))
+          performance.mark("[data-performance-shell]");
+        const request =
+          startupCompletionRequest.current ??
+          (import.meta.env.TAURI_ENV_PERFORMANCE_HARNESS === "1"
+            ? import("./performance-harness").then(
+                ({ completeStartupAfterSafeShellPaint }) =>
+                  completeStartupAfterSafeShellPaint(
+                    completeStartupAfterSafeShell,
+                  ),
+              )
+            : completeStartupAfterSafeShell());
+        startupCompletionRequest.current = request;
+        void request
+          .then((next) => {
+            if (!active) return;
+            applyStartup(next);
+            setStartupFailure(undefined);
+          })
+          .catch((error) => {
+            if (!active) return;
+            setStartupFailure(
+              operatorErrorMessage(
+                error,
+                "Saved work could not be recovered. Upload controls remain locked.",
+              ),
+            );
+          });
+      });
+    });
+    return () => {
+      active = false;
+      window.cancelAnimationFrame(outerFrame);
+      if (innerFrame) window.cancelAnimationFrame(innerFrame);
+    };
+  }, [applyStartup, startup, startupReady]);
 
   useEffect(() => {
     const enterRecovery = (failureKind: string) => {
@@ -197,22 +448,10 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    void loadConnectionSettings()
-      .then((settings) => {
-        if (active) updateConnection(settings);
-      })
-      .catch(() => {
-        // The account panel retains the actionable local error if settings cannot load.
-      });
-    return () => {
-      active = false;
-    };
-  }, [updateConnection]);
-
   const reviewImport = useCallback((paths: string[]) => {
-    const videos = paths.filter(isSupportedVideoPath);
+    const videos = paths.filter((path) =>
+      /\.(?:3g[2p]|avi|flv|m(?:4v|kv|ov|p(?:4|e?g))|webm|wmv)$/i.test(path),
+    );
     if (videos.length === 0) {
       setNotice(
         "Drop a supported video file: MP4, MOV, MKV, WebM, AVI, or another supported video format.",
@@ -253,40 +492,47 @@ export default function App() {
     [],
   );
 
-  useEffect(() => {
-    if (
-      !preflightScan ||
-      ( ["complete", "cancelled"].includes(preflightScan.status) &&
-        preflightScan.pendingMetadataFiles === 0) ||
-      !isTauri
-    )
-      return;
-    const jobId = preflightScan.id;
-    const interval = window.setInterval(() => {
-      void loadPreflightDuplicateScan(jobId)
-        .then((scan) => {
-          if (scan.id !== jobId) return;
-          setPreflightScan(scan);
-          setPreflightFileCount(
-            Math.max(0, scan.totalFiles - scan.completedFiles),
-          );
-          if (scan.status === "complete") {
-            const matches = scan.files.filter(
-              (file) =>
-                file.localMatches.length > 0 ||
-                file.droppedDuplicateFileNames.length > 0 ||
-                file.uploadedTitleMatches.length > 0,
-            ).length;
-            setNotice(
-              `${scan.completedFiles} file${scan.completedFiles === 1 ? "" : "s"} checked before ingest. ${matches} need${matches === 1 ? "s" : ""} duplicate review.`,
-            );
-          }
-        })
-        .catch(() => {
-          /* A later poll resumes if the app database is briefly busy. */
-        });
-    }, 450);
-    return () => window.clearInterval(interval);
+  const loadFinalPreflightResult = useCallback(async (jobId: string) => {
+    if (finalizedPreflightJobs.current.has(jobId)) return;
+    finalizedPreflightJobs.current.add(jobId);
+    try {
+      const scan = await loadPreflightDuplicateScan(jobId);
+      if (scan.id !== jobId) return;
+      setPreflightScan(scan);
+      setPreflightFileCount(
+        Math.max(0, scan.totalFiles - scan.completedFiles),
+      );
+      if (scan.status === "complete") {
+        const matches = scan.matchedFiles ?? scan.files.filter(
+          (file) =>
+            file.localMatches.length > 0 ||
+            file.droppedDuplicateFileNames.length > 0 ||
+            file.uploadedTitleMatches.length > 0,
+        ).length;
+        setNotice(
+          `${scan.completedFiles} file${scan.completedFiles === 1 ? "" : "s"} checked before ingest. ${matches} need${matches === 1 ? "s" : ""} duplicate review.`,
+        );
+      }
+    } catch {
+      finalizedPreflightJobs.current.delete(jobId);
+    }
+  }, []);
+
+  const loadPreflightPage = useCallback(async (
+    kind: "files" | "activity",
+    page: number,
+  ) => {
+    const current = preflightScan;
+    if (!current) return;
+    const size = 48;
+    const scan = await loadPreflightDuplicateScan(current.id, {
+      fileOffset: kind === "files" ? (page - 1) * size : current.fileOffset ?? 0,
+      fileLimit: size,
+      activityOffset:
+        kind === "activity" ? (page - 1) * size : current.activityOffset ?? 0,
+      activityLimit: size,
+    });
+    setPreflightScan(scan);
   }, [preflightScan]);
 
   const deleteLocalDuplicate = useCallback(
@@ -361,88 +607,52 @@ export default function App() {
   const importVideos = useCallback(
     async (paths: string[], settings: ManualUploadSettings) => {
       setBusy(true);
-      const failures: string[] = [];
-      const importedItems: UploadItem[] = [];
       try {
-        for (const path of paths) {
-          try {
-            importedItems.push(await importAsset(path, settings));
-          } catch (error) {
-            failures.push(
-              error instanceof Error
-                ? error.message
-                : "A video could not be imported.",
-            );
-          }
-        }
-        if (importedItems.length === 0) {
-          setNotice(
-            `${failures.length} video${failures.length === 1 ? "" : "s"} could not be imported. ${failures[0] ?? ""}`.trim(),
-          );
-          return;
-        }
-        if (!snapshot.activeChannel) {
-          await refresh();
-          setNotice(
-            `${importedItems.length} video${importedItems.length === 1 ? "" : "s"} safely imported to this device. Connect YouTube to start uploading them.`,
-          );
-          return;
-        }
-        let duplicateIds = new Set<string>();
-        try {
-          duplicateIds = new Set(
-            (
-              await checkUploadTitleDuplicates(
-                importedItems.map((item) => item.id),
-              )
-            ).map((candidate) => candidate.itemId),
-          );
-        } catch (error) {
-          await refresh();
-          setNotice(
-            `Videos were imported safely, but the online YouTube title check could not complete. ${error instanceof Error ? error.message : "Try again before queueing."}`,
-          );
-          return;
-        }
-        const queueFailures: string[] = [];
-        for (const item of importedItems.filter(
-          (candidate) => !duplicateIds.has(candidate.id),
-        )) {
-          try {
-            await queueItem(item.id);
-          } catch (error) {
-            queueFailures.push(
-              error instanceof Error
-                ? error.message
-                : "A video could not be queued.",
-            );
-          }
-        }
+        const receipt = await importAndQueueBatch(paths, settings);
         await refresh();
-        const importNotice =
-          duplicateIds.size > 0
-            ? `${importedItems.length} video${importedItems.length === 1 ? "" : "s"} imported locally. ${duplicateIds.size} light duplicate match${duplicateIds.size === 1 ? " needs" : "es need"} your decision.`
-            : `${importedItems.length} video${importedItems.length === 1 ? "" : "s"} imported and queued locally.`;
-        const failuresNotice =
-          failures.length > 0 || queueFailures.length > 0
-            ? ` ${failures.length + queueFailures.length} item${failures.length + queueFailures.length === 1 ? "" : "s"} need attention.${failures[0] ? ` ${failures[0]}` : ""}`
-            : "";
+        if (receipt.importedCount === 0) {
+          const firstFailure = receipt.items.find(
+            (item) => item.status === "failed",
+          )?.detail;
+          setNotice(
+            `${receipt.failedCount} video${receipt.failedCount === 1 ? "" : "s"} could not be imported. ${firstFailure ?? ""}`.trim(),
+          );
+          return;
+        }
+        if (receipt.detail) {
+          setNotice(
+            `${receipt.importedCount} video${receipt.importedCount === 1 ? "" : "s"} safely imported to this device. ${receipt.detail}`,
+          );
+          return;
+        }
+        const importNotice = receipt.duplicateCount > 0
+          ? `${receipt.importedCount} video${receipt.importedCount === 1 ? "" : "s"} imported locally. ${receipt.duplicateCount} light duplicate match${receipt.duplicateCount === 1 ? " needs" : "es need"} your decision.`
+          : receipt.queuedCount > 0
+            ? `${receipt.importedCount} video${receipt.importedCount === 1 ? "" : "s"} imported and ${receipt.queuedCount} queued locally.`
+            : `${receipt.importedCount} video${receipt.importedCount === 1 ? "" : "s"} safely imported to this device. Connect YouTube to start uploading them.`;
+        const firstFailure = receipt.items.find(
+          (item) => item.status === "failed",
+        )?.detail;
+        const failuresNotice = receipt.failedCount > 0
+          ? ` ${receipt.failedCount} item${receipt.failedCount === 1 ? "" : "s"} need attention.${firstFailure ? ` ${firstFailure}` : ""}`
+          : "";
         setNotice(
-          `${importNotice} Uploads start automatically when capacity is available.${failuresNotice}`.trim(),
+          `${importNotice}${receipt.queuedCount > 0 ? " Uploads start automatically when capacity is available." : ""}${failuresNotice}`.trim(),
         );
       } finally {
         setBusy(false);
       }
     },
-    [refresh, snapshot.activeChannel],
+    [refresh],
   );
 
   useEffect(() => {
     if (!isTauri) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void getCurrentWindow()
-      .onDragDropEvent((event) => {
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) =>
+        getCurrentWindow().onDragDropEvent((event) => {
         if (event.payload.type === "enter" || event.payload.type === "over") {
           if (activeTab === "dedupe") setPreflightDropActive(true);
           else setDropActive(true);
@@ -456,7 +666,8 @@ export default function App() {
             void runPreflightDuplicateCheck(event.payload.paths);
           else reviewImport(event.payload.paths);
         }
-      })
+        }),
+      )
       .then((stop) => {
         if (disposed) stop();
         else unlisten = stop;
@@ -474,15 +685,17 @@ export default function App() {
     if (!isTauri) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    void getCurrentWindow()
-      .onCloseRequested((event) => {
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) =>
+        getCurrentWindow().onCloseRequested((event) => {
         // Recovery is a safe holding screen. Do not trap the operator in it:
         // closing leaves the persisted crash marker and all resumable work
         // untouched for the next launch.
         if (recoveryModeRef.current) return;
         event.preventDefault();
         setExitConfirmationOpen(true);
-      })
+        }),
+      )
       .then((stop) => {
         if (disposed) stop();
         else unlisten = stop;
@@ -505,35 +718,18 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    if (
-      !snapshot.items.some(
-        (item) => item.status === "uploading" || item.status === "dispatching",
-      )
-    )
-      return;
-    const interval = window.setInterval(() => {
-      void refresh();
-    }, 1000);
-    return () => window.clearInterval(interval);
-  }, [refresh, snapshot.items]);
-
-  const addVideo = async () => {
+  const addVideo = useCallback(async () => {
     if (!isTauri) {
       setNotice(
         "Run this screen through Tauri to import a file into the managed local workspace.",
       );
       return;
     }
-    const selected = await open({
-      multiple: true,
-      directory: false,
-      filters: [{ name: "Video", extensions: [...supportedVideoExtensions] }],
-    });
-    reviewImport(selectedFilePaths(selected));
-  };
+    const { selectVideoFiles } = await import("./lib/video-picker");
+    reviewImport(await selectVideoFiles());
+  }, [reviewImport]);
 
-  const queue = async (item: UploadItem) => {
+  const queue = useCallback(async (item: UploadItem) => {
     setBusy(true);
     try {
       const duplicates = await checkUploadTitleDuplicates([item.id]);
@@ -557,23 +753,18 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  };
+  }, [refresh]);
 
-  const chooseFilesForPreflight = async (mode: "light" | "deep") => {
+  const chooseFilesForPreflight = useCallback(async (mode: "light" | "deep") => {
     if (!isTauri) {
       setNotice("Run this screen through Tauri to check files before ingest.");
       return;
     }
-    const selected = await open({
-      multiple: true,
-      directory: false,
-      pickerMode: "document",
-      fileAccessMode: "scoped",
-    });
-    void runPreflightDuplicateCheck(selectedFilePaths(selected), mode);
-  };
+    const { selectPreflightFiles } = await import("./lib/video-picker");
+    void runPreflightDuplicateCheck(await selectPreflightFiles(), mode);
+  }, [runPreflightDuplicateCheck]);
 
-  const resolveTitleDuplicates = async (
+  const resolveTitleDuplicates = useCallback(async (
     itemIds: string[],
     action: "ignore" | "skip",
   ) => {
@@ -598,9 +789,9 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  };
+  }, [refresh]);
 
-  const changeVisibility = async (
+  const changeVisibility = useCallback(async (
     item: UploadItem,
     visibility: UploadVisibility,
   ) => {
@@ -623,9 +814,9 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  };
+  }, []);
 
-  const changeSourceCleanup = async (
+  const changeSourceCleanup = useCallback(async (
     item: UploadItem,
     deleteSourceAfterUpload: boolean,
   ) => {
@@ -655,9 +846,9 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  };
+  }, []);
 
-  const deleteOriginalAfterUpload = async (
+  const deleteOriginalAfterUpload = useCallback(async (
     item: UploadItem,
     confirmation: string,
   ) => {
@@ -677,7 +868,7 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  };
+  }, [refresh]);
 
   const refreshYouTubeLibrary = async () => {
     const channel = snapshot.activeChannel;
@@ -761,7 +952,7 @@ export default function App() {
     }
   };
 
-  const ignoreDuplicate = async (candidateId: string) => {
+  const ignoreDuplicate = useCallback(async (candidateId: string) => {
     setBusy(true);
     try {
       await ignoreDuplicateCandidate(candidateId);
@@ -778,7 +969,7 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  };
+  }, [refresh]);
 
   const reAuditIgnoredMatches = async () => {
     setBusy(true);
@@ -807,18 +998,67 @@ export default function App() {
     }
   };
 
+  const handleDuplicateDeletionComplete = useCallback(
+    async (videoId: string, title: string) => {
+      await refresh();
+      setNotice(
+        `YouTube confirmed permanent deletion of ${videoId} (“${title}”). The local execution receipt was saved.`,
+      );
+    },
+    [refresh],
+  );
+  const handleBulkDuplicateDeletionComplete = useCallback(
+    async (count: number) => {
+      await refresh();
+      setNotice(
+        `YouTube confirmed permanent deletion of ${count} selected video${count === 1 ? "" : "s"}. Local execution receipts were saved.`,
+      );
+    },
+    [refresh],
+  );
+
   if (crashRecovery?.crashDetected) {
     return (
-      <CrashRecoveryScreen
-        detectedAt={crashRecovery.detectedAt}
-        failureKind={crashRecovery.failureKind}
-        onContinue={() => setCrashRecovery({ crashDetected: false })}
+      <Suspense fallback={<main className="crash-recovery" role="status" />}>
+        <i data-performance-shell="recovery" hidden />
+        <CrashRecoveryScreen
+          detectedAt={crashRecovery.detectedAt}
+          failureKind={crashRecovery.failureKind}
+          onContinue={() => setCrashRecovery({ crashDetected: false })}
+        />
+      </Suspense>
+    );
+  }
+
+  if (!startupReady) {
+    return (
+      <SafeStartupShell
+        failure={startupFailure}
+        readiness={startup?.readiness}
       />
     );
   }
 
   return (
     <main className="app-shell">
+      {isTauri && connectionSettings?.activeChannelId && (
+        <Suspense fallback={null}>
+          <RevisionedStateBridge
+            options={[
+              connectionSettings.activeChannelId,
+              snapshot,
+              stateChannelIdRef,
+              stateRevisionRef,
+              setConnectionSettings,
+              setSnapshot,
+              setPreflightScan,
+              setPreflightFileCount,
+              updateConnection,
+              loadFinalPreflightResult,
+            ]}
+          />
+        </Suspense>
+      )}
       <header className="topbar">
         <div className="brand-lockup">
           <img className="brand-mark" src="/favicon.svg" alt="" />
@@ -860,16 +1100,18 @@ export default function App() {
         !setupDismissed && (
           <>
             <div aria-hidden="true" className="google-setup-backdrop" />
-            <GoogleSetupWizard
-              onOpenConnectedAccount={() => {
-                setSetupDismissed(true);
-                setActiveTab("account");
-                setNotice(
-                  "Import your Desktop OAuth JSON from Connected account, then connect YouTube when you are ready.",
-                );
-              }}
-              onDismiss={() => setSetupDismissed(true)}
-            />
+            <Suspense fallback={<WorkspacePending />}>
+              <GoogleSetupWizard
+                onOpenConnectedAccount={() => {
+                  setSetupDismissed(true);
+                  setActiveTab("account");
+                  setNotice(
+                    "Import your Desktop OAuth JSON from Connected account, then connect YouTube when you are ready.",
+                  );
+                }}
+                onDismiss={() => setSetupDismissed(true)}
+              />
+            </Suspense>
           </>
         )}
       {exitConfirmationOpen && (
@@ -906,15 +1148,17 @@ export default function App() {
       {pendingImportPaths && (
         <>
           <div aria-hidden="true" className="intake-review-backdrop" />
-          <UploadIntakeReview
-            paths={pendingImportPaths}
-            onCancel={() => setPendingImportPaths(undefined)}
-            onConfirm={(settings) => {
-              const paths = pendingImportPaths;
-              setPendingImportPaths(undefined);
-              void importVideos(paths, settings);
-            }}
-          />
+          <Suspense fallback={<WorkspacePending />}>
+            <UploadIntakeReview
+              paths={pendingImportPaths}
+              onCancel={() => setPendingImportPaths(undefined)}
+              onConfirm={(settings) => {
+                const paths = pendingImportPaths;
+                setPendingImportPaths(undefined);
+                void importVideos(paths, settings);
+              }}
+            />
+          </Suspense>
         </>
       )}
       {!isTauri && (
@@ -939,6 +1183,7 @@ export default function App() {
               id={`workspace-tab-button-${id}`}
               key={id}
               onClick={() => setActiveTab(id)}
+              onKeyDown={handleWorkspaceKeyDown}
               role="tab"
               tabIndex={activeTab === id ? 0 : -1}
               type="button"
@@ -954,12 +1199,27 @@ export default function App() {
           ))}
         </nav>
         <div className="workspace-tabs">
-          <section
+          <Suspense
+            fallback={
+              <section
+                aria-labelledby={`workspace-tab-button-${activeTab}`}
+                className="workspace-tab"
+                id={`workspace-tab-${activeTab}`}
+                role="tabpanel"
+                tabIndex={0}
+              >
+                <WorkspacePending />
+              </section>
+            }
+          >
+          {activeTab === "batch" && (
+            <section
             aria-labelledby="workspace-tab-button-batch"
             className="workspace-tab"
-            hidden={activeTab !== "batch"}
+            data-performance-batch-content="ready"
             id="workspace-tab-batch"
             role="tabpanel"
+            tabIndex={0}
           >
             <UploadTitleDuplicateReview
               busy={busy}
@@ -1020,51 +1280,50 @@ export default function App() {
               <QueueTable
                 items={snapshot.items}
                 busy={busy}
-                onQueue={(item) => void queue(item)}
-                onCancel={(item) => void cancelUpload(item)}
-                onVisibilityChange={(item, visibility) =>
-                  void changeVisibility(item, visibility)
-                }
-                onDeleteSourceAfterUploadChange={(item, enabled) =>
-                  void changeSourceCleanup(item, enabled)
-                }
-                onDeleteUploadedSource={(item, confirmation) =>
-                  void deleteOriginalAfterUpload(item, confirmation)
-                }
+                onQueue={queue}
+                onCancel={cancelUpload}
+                onVisibilityChange={changeVisibility}
+                onDeleteSourceAfterUploadChange={changeSourceCleanup}
+                onDeleteUploadedSource={deleteOriginalAfterUpload}
               />
             </section>
-          </section>
+            </section>
+          )}
 
-          <section
+          {activeTab === "monitor" && (
+            <section
             aria-labelledby="workspace-tab-button-monitor"
             className="workspace-tab"
-            hidden={activeTab !== "monitor"}
             id="workspace-tab-monitor"
             role="tabpanel"
+            tabIndex={0}
           >
             <FolderMonitorPanel
               activeChannel={snapshot.activeChannel}
+              activeChannelId={snapshot.activeChannelId}
               onNotice={setNotice}
-              onQueueRefresh={async () => {
-                await refresh();
-              }}
+              onQueueRefresh={refreshQueue}
             />
-          </section>
+            </section>
+          )}
 
-          <section
+          {activeTab === "dedupe" && (
+            <section
             aria-labelledby="workspace-tab-button-dedupe"
             className="workspace-tab"
-            hidden={activeTab !== "dedupe"}
             id="workspace-tab-dedupe"
             role="tabpanel"
+            tabIndex={0}
           >
             <PreIngestDuplicatePanel
               busy={preflightBusy}
               fileCount={preflightFileCount}
               dropActive={preflightDropActive}
-              onCancel={() => void cancelPreflight()}
-              onChoose={(mode) => void chooseFilesForPreflight(mode)}
+              onCancel={cancelPreflight}
+              onChoose={chooseFilesForPreflight}
               onPrepareLocalDuplicateDelete={prepareLocalDuplicateDelete}
+              onLoadMetadata={loadPreflightDuplicateFileMetadata}
+              onLoadPage={loadPreflightPage}
               onDeleteLocalDuplicate={deleteLocalDuplicate}
               scan={preflightScan}
             />
@@ -1102,92 +1361,28 @@ export default function App() {
                 </div>
               </div>
               <DuplicateReview
+                activeChannelId={snapshot.activeChannelId}
                 candidates={snapshot.duplicates}
-                onIgnore={(candidateId) => ignoreDuplicate(candidateId)}
-                onDeletionComplete={async (videoId, title) => {
-                  await refresh();
-                  setNotice(
-                    `YouTube confirmed permanent deletion of ${videoId} (“${title}”). The local execution receipt was saved.`,
-                  );
-                }}
-                onBulkDeletionComplete={async (count) => {
-                  await refresh();
-                  setNotice(
-                    `YouTube confirmed permanent deletion of ${count} selected video${count === 1 ? "" : "s"}. Local execution receipts were saved.`,
-                  );
-                }}
+                onIgnore={ignoreDuplicate}
+                onDeletionComplete={handleDuplicateDeletionComplete}
+                onBulkDeletionComplete={handleBulkDuplicateDeletionComplete}
               />
-              {dedupeActivity.length > 0 && (
-                <section
-                  className="dedupe-activity"
-                  aria-labelledby="dedupe-activity-heading"
-                >
-                  <div className="dedupe-activity__heading">
-                    <div>
-                      <p className="eyebrow">DEVICE-LOCAL ACTIVITY</p>
-                      <h3 id="dedupe-activity-heading">Dedupe activity</h3>
-                    </div>
-                    {dedupeBusy && (
-                      <span className="dedupe-activity__running">
-                        In progress
-                      </span>
-                    )}
-                  </div>
-                  <div
-                    className={`dedupe-progress dedupe-progress--${dedupePhase}`}
-                  >
-                    <div className="dedupe-progress__heading">
-                      <span>Phase progress</span>
-                      <strong>
-                        {dedupeProgressStep(dedupePhase)} of{" "}
-                        {dedupeProgressStepCount}
-                      </strong>
-                    </div>
-                    <div
-                      aria-describedby="dedupe-progress-detail"
-                      aria-label={`Dedupe phase progress: ${dedupeProgressLabel(dedupePhase)}`}
-                      aria-valuemax={dedupeProgressStepCount}
-                      aria-valuemin={0}
-                      aria-valuenow={dedupeProgressStep(dedupePhase)}
-                      className="dedupe-progress__track"
-                      role="progressbar"
-                    >
-                      <span
-                        style={{
-                          width: `${(dedupeProgressStep(dedupePhase) / dedupeProgressStepCount) * 100}%`,
-                        }}
-                      />
-                    </div>
-                    <p id="dedupe-progress-detail">
-                      {dedupeProgressLabel(dedupePhase)}
-                    </p>
-                  </div>
-                  <ol
-                    className="dedupe-activity__list"
-                    aria-live="polite"
-                    aria-label="Dedupe activity log"
-                  >
-                    {dedupeActivity.map((entry) => (
-                      <li
-                        className={`dedupe-activity__entry dedupe-activity__entry--${entry.state}`}
-                        key={entry.id}
-                      >
-                        <span aria-hidden="true" />
-                        {entry.message}
-                      </li>
-                    ))}
-                  </ol>
-                </section>
-              )}
+              <DedupeActivityPanel
+                activity={dedupeActivity}
+                busy={dedupeBusy}
+                phase={dedupePhase}
+              />
             </section>
-          </section>
+            </section>
+          )}
 
-          <section
+          {activeTab === "deletion" && (
+            <section
             aria-labelledby="workspace-tab-button-deletion"
             className="workspace-tab"
-            hidden={activeTab !== "deletion"}
             id="workspace-tab-deletion"
             role="tabpanel"
+            tabIndex={0}
           >
             <section className="panel" aria-labelledby="deletion-heading">
               <div className="section-heading">
@@ -1198,45 +1393,54 @@ export default function App() {
               </div>
               <DeletionReview
                 activeChannel={snapshot.activeChannel}
+                activeChannelId={snapshot.activeChannelId}
                 busy={busy}
                 onNotice={setNotice}
                 refreshVersion={libraryRefreshVersion}
               />
             </section>
-          </section>
+            </section>
+          )}
 
-          <section
+          {activeTab === "transfer" && (
+            <section
             aria-labelledby="workspace-tab-button-transfer"
             className="workspace-tab"
-            hidden={activeTab !== "transfer"}
             id="workspace-tab-transfer"
             role="tabpanel"
+            tabIndex={0}
           >
             <TransferPanel
               onConnectionChange={updateConnection}
               onNotice={setNotice}
             />
-          </section>
+            </section>
+          )}
 
-          <section
+          {activeTab === "account" && (
+            <section
             aria-labelledby="workspace-tab-button-account"
             className="workspace-tab"
-            hidden={activeTab !== "account"}
             id="workspace-tab-account"
             role="tabpanel"
+            tabIndex={0}
           >
             <ConnectionPanel onConnectionChange={updateConnection} />
-          </section>
+            </section>
+          )}
 
-          <section
+          {activeTab === "about" && (
+            <section
             aria-labelledby="workspace-tab-button-about"
             className="workspace-tab"
-            hidden={activeTab !== "about"}
             id="workspace-tab-about"
             role="tabpanel"
+            tabIndex={0}
           >
             <DiagnosticsPanel />
-          </section>
+            </section>
+          )}
+          </Suspense>
         </div>
       </div>
 
