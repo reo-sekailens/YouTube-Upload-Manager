@@ -249,10 +249,10 @@ jobs:
               *macOS-Intel*portable.zip|*macos-intel*portable.zip)
                 printf '%s' 'macOS Intel portable app ZIP (extract and open)'
                 ;;
-              *macOS*Apple*Silicon*/bundle/macos/*.dmg)
+              *macOS*Apple*Silicon*/bundle/macos/*.dmg|*Apple*Silicon*.dmg|*apple-silicon*.dmg|*_aarch64.dmg)
                 printf '%s' 'macOS Apple Silicon disk image (install)'
                 ;;
-              *macOS*Intel*/bundle/macos/*.dmg)
+              *macOS*Intel*/bundle/macos/*.dmg|*macOS*Intel*.dmg|*macos-intel*.dmg|*_x64.dmg)
                 printf '%s' 'macOS Intel disk image (install)'
                 ;;
               *.apk)
@@ -335,7 +335,7 @@ jobs:
 
           - Choose **Apple Silicon** for M-series Macs (M1, M2, M3, M4) and **Intel** only for older Intel Macs.
           - **$(download_link 'macOS Apple Silicon disk image (install)')** or **$(download_link 'macOS Intel disk image (install)'):** Open it and install the app normally.
-          - **$(download_link 'macOS Apple Silicon portable app ZIP (extract and open)')** or **$(download_link 'macOS Intel portable app ZIP (extract and open)'):** Extract it, then open the contained `.app` bundle without an installer.
+          - **$(download_link 'macOS Apple Silicon portable app ZIP (extract and open)')** or **$(download_link 'macOS Intel portable app ZIP (extract and open)'):** Extract it, then open the contained app bundle without an installer.
 
           ### Android
 
@@ -354,6 +354,70 @@ jobs:
             --title "$TITLE" \
             --notes-file "$notes_file" \
             --prerelease
+
+          # GitHub is authoritative for final asset URLs. In particular, it
+          # may normalize uploaded filenames, so derive Markdown links only
+          # after the assets have been attached to the release.
+          release_assets="$(gh release view "$TAG" --json assets --jq '.assets[] | [.label, .url] | @tsv')"
+          download_link() {
+            local wanted="$1"
+            local label url
+            while IFS=$'\t' read -r label url; do
+              if [[ "$label" == "$wanted" ]]; then
+                printf '[%s](%s)' "$label" "$url"
+                return 0
+              fi
+            done <<< "$release_assets"
+            printf '**%s (not available in this nightly)**' "$wanted"
+          }
+
+          cat > "$notes_file" <<EOF
+          ## Build source
+
+          - **Commit:** [\`${short_sha}\`](https://github.com/${GH_REPO}/commit/${SHA})
+          - **Title:** ${commit_title}
+
+          EOF
+          if [[ -n "$commit_description" ]]; then
+            cat >> "$notes_file" <<EOF
+          **Description**
+
+          ${commit_description}
+
+          EOF
+          fi
+          cat >> "$notes_file" <<EOF
+          ## Which download should I use?
+
+          ### Windows
+
+          - $(download_link 'Windows x64 installer (recommended)') — Run this on a normal 64-bit Windows PC to install the app and add standard Start-menu integration.
+          - $(download_link 'Windows x64 portable ZIP (extract and run)') — Extract it anywhere you can write, then run **YouTube-Upload-Manager.exe**. No installer or administrator access is required. Windows WebView2 is still required.
+
+          ### Linux
+
+          - $(download_link 'Linux x64 portable AppImage (run directly)') — Mark it executable, then run it directly. Use this when you do not want to install a package.
+          - $(download_link 'Linux x64 Debian package (install with your package manager)') — Use this on Debian, Ubuntu, or a compatible distribution when you prefer package-manager installation.
+
+          ### macOS
+
+          - Choose **Apple Silicon** for M-series Macs (M1, M2, M3, M4) and **Intel** only for older Intel Macs.
+          - $(download_link 'macOS Apple Silicon disk image (install)') or $(download_link 'macOS Intel disk image (install)') — Open it and install the app normally.
+          - $(download_link 'macOS Apple Silicon portable app ZIP (extract and open)') or $(download_link 'macOS Intel portable app ZIP (extract and open)') — Extract it, then open the contained app bundle without an installer.
+
+          ### Android
+
+          - $(download_link 'Android universal debug APK (install on Android)') — Install it directly on an Android device. It is a debug build, not a Play Store release.
+
+          ## Important
+
+          These nightly artifacts are unsigned and may show your operating system's normal first-run security warning. Download only the artifact for your operating system and processor. Existing queues and OAuth credentials remain device-local and are never included in a release artifact.
+
+          ---
+
+          Automated pre-release from commit ${SHA}.
+          EOF
+          gh release edit "$TAG" --notes-file "$notes_file"
 
 # The Android test APK is debug-signed by the Android build tooling so devices
 # can install it. It uses no project keystore, certificate, or signing secret.

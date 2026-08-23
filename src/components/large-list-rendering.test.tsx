@@ -46,6 +46,35 @@ describe("large-list component rendering", () => {
     expect(countAttribute(markup, "data-queue-record")).toBeLessThan(100);
   });
 
+  it("explains when YouTube processing abandonment keeps the original source", () => {
+    const markup = renderToStaticMarkup(
+      <QueueTable
+        busy={false}
+        items={[{
+          confirmedBytes: 1,
+          deleteSourceAfterUpload: true,
+          fileName: "abandoned.mp4",
+          id: "abandoned",
+          madeForKids: false,
+          sizeBytes: 1,
+          sourceDeleteStatus: "retained_youtube_processing_failed",
+          status: "uploaded",
+          title: "Abandoned processing",
+          totalBytes: 1,
+          updatedAt: "2026-08-23T00:00:00.000Z",
+          visibility: "unlisted",
+        }]}
+        onCancel={() => undefined}
+        onDeleteSourceAfterUploadChange={() => undefined}
+        onDeleteUploadedSource={() => undefined}
+        onQueue={() => undefined}
+        onVisibilityChange={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain("Kept: YouTube processing failed or was abandoned");
+  });
+
   it("renders fewer than 100 duplicate candidate cards from 10,000 candidates", () => {
     const candidates: DuplicateCandidate[] = Array.from(
       { length: fixtureSize },

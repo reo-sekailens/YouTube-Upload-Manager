@@ -33,6 +33,26 @@ function formatEta(item: UploadItem) {
   return `ETA ${seconds}s`;
 }
 
+function sourceDeleteStatusLabel(status: NonNullable<UploadItem["sourceDeleteStatus"]>) {
+  switch (status) {
+    case "pending":
+    case "waiting_for_youtube_processing":
+      return "Kept until YouTube processing succeeds";
+    case "processing_verified":
+      return "Processing verified; safe cleanup is retrying";
+    case "retained_youtube_processing_failed":
+      return "Kept: YouTube processing failed or was abandoned";
+    case "retained_youtube_upload_failed":
+      return "Kept: YouTube reported an upload failure";
+    case "retained_youtube_upload_rejected":
+      return "Kept: YouTube rejected the upload";
+    case "deleted":
+      return "Deleted after YouTube processing succeeded";
+    default:
+      return "Kept for safety";
+  }
+}
+
 export function QueueTable({
   items,
   busy,
@@ -80,7 +100,7 @@ export function QueueTable({
       {pendingSourceDelete && (
         <div className="queue-table__cleanup-confirmation" role="dialog" aria-modal="true" aria-labelledby="source-cleanup-heading">
           <h3 id="source-cleanup-heading">Delete the original file?</h3>
-          <p>YouTube has confirmed this upload. The managed app copy and the YouTube video will remain.</p>
+          <p>YouTube processing must be verified before the app can delete this file. The managed app copy and the YouTube video will remain.</p>
           <p>Type <strong>{pendingSourceDelete.fileName}</strong> to permanently delete only its original external file.</p>
           <input
             aria-label="Exact original filename"
@@ -204,11 +224,11 @@ export function QueueTable({
                       }
                       type="checkbox"
                     />{" "}
-                    Automatically delete original after YouTube confirms upload
+                    Automatically delete original after YouTube processing succeeds
                   </label>
                   {item.sourceDeleteStatus ? (
                     <span className="queue-table__visibility-note">
-                      Original source: {item.sourceDeleteStatus}
+                      Original source: {sourceDeleteStatusLabel(item.sourceDeleteStatus)}
                     </span>
                   ) : null}
                 </td>

@@ -52,7 +52,15 @@ export type UploadItem = {
   /** Native, acknowledged transfer rate. Absent until enough upload progress is measured. */
   transferBytesPerSecond?: number;
   deleteSourceAfterUpload?: boolean;
-  sourceDeleteStatus?: "pending" | "deleted" | "retained";
+  sourceDeleteStatus?:
+    | "pending"
+    | "waiting_for_youtube_processing"
+    | "processing_verified"
+    | "deleted"
+    | "retained"
+    | "retained_youtube_processing_failed"
+    | "retained_youtube_upload_failed"
+    | "retained_youtube_upload_rejected";
   videoId?: string;
   detail?: string;
   updatedAt: string;

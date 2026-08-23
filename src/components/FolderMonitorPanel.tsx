@@ -301,9 +301,11 @@ export function FolderMonitorPanel({
       );
     } catch (error) {
       onNotice(
-        error instanceof Error
-          ? error.message
-          : "The cancelled watched-folder files could not be queued again.",
+        typeof error === "string" && error.trim()
+          ? error
+          : error instanceof Error
+            ? error.message
+            : "The cancelled watched-folder files could not be queued again.",
       );
     } finally {
       setBusy(false);
