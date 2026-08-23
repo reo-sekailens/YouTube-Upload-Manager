@@ -1,6 +1,6 @@
 [package]
 name = "youtube-upload-manager"
-version = "0.1.9"
+version = "1.0.0"
 description = "YouTube upload workspace"
 authors = ["YouTube Upload Manager"]
 edition = "2021"
