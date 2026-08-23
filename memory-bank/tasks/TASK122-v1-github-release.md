@@ -2,7 +2,7 @@
 
 ## Status
 
-in-progress
+completed
 
 ## Objective
 
@@ -39,4 +39,7 @@ x64 NSIS installer and a matching source tag.
   `YouTube Upload Manager_1.0.0_x64-setup.exe` (26,721,098 bytes; SHA-256
   `5564B0ABA17681101C6B1F3176435ADA62C72694E52162BD1E71B71C51E2FD69`).
   Authenticode status: `NotSigned`.
-- GitHub publication remains pending.
+- Published on 2026-08-23: [GitHub v1.0.0 release](https://github.com/reo-sekailens/YouTube-Upload-Manager/releases/tag/v1.0.0).
+  It is a non-draft, non-prerelease release for tag `v1.0.0`, resolving to
+  commit `9eb62659bb26ef351caa9653e17b6ace307d0f4a`. Its attached asset is
+  `YouTube.Upload.Manager_1.0.0_x64-setup.exe` (26,721,098 bytes).
