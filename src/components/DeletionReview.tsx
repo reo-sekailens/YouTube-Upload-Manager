@@ -18,6 +18,7 @@ import {
   loadConnectionSettings,
   requestVideoDeletion,
 } from "../lib/local";
+import { openAndCopyGoogleAuthorization } from "../lib/google-authorization";
 import { windowItems } from "../lib/list-windowing";
 import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
 import type { DeletionRequest, RemoteVideo } from "../lib/types";
@@ -188,11 +189,10 @@ export function DeletionReview({ activeChannel, activeChannelId, busy = false, i
     setAuthorizing(true);
     try {
       const { authorizationUrl } = await beginDeletionAuthorization();
-      const url = new URL(authorizationUrl);
-      if (url.protocol !== "https:") throw new Error("The deletion authorization request must use HTTPS.");
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      await openUrl(url.toString());
-      onNotice("Google opened in your browser to grant deletion permission. After consent, temporary deletion mode will be enabled for 15 minutes.");
+      const copied = await openAndCopyGoogleAuthorization(authorizationUrl);
+      onNotice(copied
+        ? "Google opened for deletion permission and the link was copied. After consent, temporary deletion mode will be enabled for 15 minutes."
+        : "Google opened for deletion permission, but clipboard access was unavailable.");
     } catch (error) {
       setAuthorizing(false);
       onNotice(error instanceof Error ? error.message : "Deletion authorization could not be started.");

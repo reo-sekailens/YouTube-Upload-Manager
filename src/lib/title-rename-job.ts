@@ -12,6 +12,14 @@ export type TitleRenameJobSnapshot = {
 
 type RenameExecutor = (changes: VideoTitleRename[]) => Promise<unknown>;
 
+function renameFailureDetail(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  if (typeof error === "object" && error && "message" in error && typeof error.message === "string")
+    return error.message;
+  return "YouTube did not confirm this title change.";
+}
+
 let snapshot: TitleRenameJobSnapshot = { activity: [], applying: false };
 const listeners = new Set<() => void>();
 
@@ -58,7 +66,7 @@ export async function startTitleRenameJob(
           ? { ...item, status: "completed", detail: "YouTube confirmed the title change." }
           : item));
       } catch (error) {
-        const detail = error instanceof Error ? error.message : "YouTube did not confirm this title change.";
+        const detail = renameFailureDetail(error);
         updateActivity((activity) => activity.map((item) => item.videoId === change.videoId
           ? { ...item, status: "failed", detail }
           : item));

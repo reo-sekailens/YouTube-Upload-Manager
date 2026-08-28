@@ -36,6 +36,12 @@
   --color-subtle-surface: #f8fafc;
   --color-notice-surface: #eff6ff;
   --color-notice-ink: #1e3a8a;
+  --color-warning-surface: #fffbeb;
+  --color-warning-ink: #78350f;
+  --color-focus-ring: #1d4ed8;
+  --color-focus-halo: rgb(29 78 216 / 24%);
+  --color-active-surface: #dbeafe;
+  --color-active-ink: #1d4ed8;
   --breakpoint-compact: 51.25rem;
 }
 
@@ -91,17 +97,17 @@
 
 @utility ui-button-secondary {
   cursor: pointer;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--color-line);
   border-radius: .375rem;
   background: var(--color-control);
   padding: .625rem .75rem;
-  color: #334155;
+  color: var(--color-ink);
   font-size: .79rem;
   font-weight: 600;
   line-height: 1.25;
   transition: background .15s, border-color .15s;
 
-  &:hover { border-color: #94a3b8; background: var(--color-control-hover); }
+  &:hover { border-color: var(--color-muted); background: var(--color-control-hover); }
   &:disabled { cursor: not-allowed; opacity: .5; }
 }
 
@@ -156,7 +162,7 @@
   display: flex;
   align-items: center;
   margin-top: 1rem;
-  border: 1px solid #dbeafe;
+  border: 1px solid var(--color-active-surface);
   border-radius: .375rem;
   background: var(--color-notice-surface);
   padding: .75rem .875rem;
@@ -168,11 +174,11 @@
 @utility ui-warning {
   display: flex;
   margin-top: 1rem;
-  border: 1px solid #fde68a;
+  border: 1px solid #d9a441;
   border-radius: .375rem;
-  background: #fffbeb;
+  background: var(--color-warning-surface);
   padding: .75rem .875rem;
-  color: #78350f;
+  color: var(--color-warning-ink);
   font-size: .875rem;
   line-height: 1.625;
 }
@@ -276,8 +282,8 @@
 }
 
 @utility ui-sidebar-tab-active {
-  background: #eff6ff;
-  color: #1d4ed8;
+  background: var(--color-active-surface);
+  color: var(--color-active-ink);
 }
 
 @utility ui-card-heading {
@@ -306,7 +312,7 @@
 
 @utility ui-modal-copy {
   margin: 0;
-  color: #475569;
+  color: var(--color-muted);
   font-size: .875rem;
   line-height: 1.625;
 }
@@ -421,6 +427,7 @@
     font-family: var(--font-sans);
     font-synthesis: none;
     text-rendering: optimizeLegibility;
+    color-scheme: light;
   }
 
   :root[data-theme="dark"] {
@@ -436,8 +443,15 @@
     --color-subtle-surface: #1d293d;
     --color-notice-surface: #16294a;
     --color-notice-ink: #d7e7ff;
+    --color-warning-surface: #33280e;
+    --color-warning-ink: #ffe29a;
+    --color-focus-ring: #93c5fd;
+    --color-focus-halo: rgb(147 197 253 / 35%);
+    --color-active-surface: #17396d;
+    --color-active-ink: #d9e8ff;
     color: var(--color-ink);
     background: var(--color-canvas);
+    color-scheme: dark;
   }
 
   * { box-sizing: border-box; }
@@ -453,7 +467,7 @@
   button { -webkit-tap-highlight-color: transparent; }
 
   button:focus-visible, input:focus-visible, select:focus-visible {
-    outline: 3px solid rgb(45 104 232 / 28%);
+    outline: 3px solid var(--color-focus-ring);
     outline-offset: 2px;
   }
 
@@ -468,9 +482,9 @@
   :root[data-theme="dark"] ::placeholder { color: #aab7cc; opacity: 1; }
 
   :root[data-theme="dark"] [class~="ui-warning"] {
-    border-color: #7c5c16 !important;
-    background: #33280e !important;
-    color: #f8d77a !important;
+    border-color: #9b761d !important;
+    background: var(--color-warning-surface) !important;
+    color: var(--color-warning-ink) !important;
   }
 
   :root[data-theme="dark"] [class~="ui-sidebar-tab"] { color: #c7d2e6 !important; }
@@ -489,12 +503,28 @@
   :root[data-theme="dark"] [class~="ui-section-copy"],
   :root[data-theme="dark"] [class~="ui-subtle"] { color: #c2cde0 !important; }
 
+  /* Older workspace utility strings include a wide range of muted literal
+   * foregrounds. Normalize them to the verified semantic foreground first;
+   * the explicit status/link accents below are the only intentional colors. */
+  :root [class*="text-[#"] { color: var(--color-ink) !important; }
+
+  :root [class*="text-[#1c6b49"],
+  :root [class*="text-[#24704d"],
+  :root [class*="text-[#26714e"],
+  :root [class*="text-[#28714e"] { color: var(--color-success) !important; }
+
+  :root [class*="text-[#a4413b"],
+  :root [class*="text-[#b94842"],
+  :root [class*="text-[#c95146"] { color: var(--color-danger) !important; }
+
+  :root [class*="text-[#1d4ed8"],
+  :root [class*="text-[#2463df"],
+  :root [class*="text-[#315389"] { color: var(--color-brand) !important; }
+
   /* Lazy workspaces are already Tailwind utility-only, but their pre-theme
    * light palette predates the shared tokens. This bridge keeps every mounted
    * workspace legible while preserving those utilities and their lazy chunks. */
-  :root[data-theme="dark"] [class*="bg-[#f"],
-  :root[data-theme="dark"] [class*="bg-[#e"],
-  :root[data-theme="dark"] [class*="bg-[#d"] {
+  :root[data-theme="dark"] [class*="bg-[#"] {
     background-color: var(--color-surface) !important;
   }
 
@@ -523,8 +553,31 @@
     color: var(--color-ink) !important;
   }
 
-  :root[data-theme="dark"] [class~="bg-[#2463df]"] { background-color: #3678f6 !important; }
+  :root[data-theme="dark"] [class~="bg-[#2463df]"],
+  :root[data-theme="dark"] [class~="bg-brand"] { background-color: #2b66d6 !important; }
   :root[data-theme="dark"] [class~="bg-[#a4413b]"],
   :root[data-theme="dark"] [class~="bg-[#b94842]"],
-  :root[data-theme="dark"] [class~="bg-[#c95146]"] { background-color: #c9564f !important; }
+  :root[data-theme="dark"] [class~="bg-[#c95146]"] { background-color: #b94842 !important; }
+
+  :root[data-theme="dark"] [class*="text-[#1c6b49"],
+  :root[data-theme="dark"] [class*="text-[#24704d"],
+  :root[data-theme="dark"] [class*="text-[#26714e"],
+  :root[data-theme="dark"] [class*="text-[#28714e"] { color: #7ee2a8 !important; }
+
+  :root[data-theme="dark"] [class*="text-[#a4413b"],
+  :root[data-theme="dark"] [class*="text-[#b94842"],
+  :root[data-theme="dark"] [class*="text-[#c95146"] { color: #ffaba5 !important; }
+
+  :root[data-theme="dark"] [class*="text-[#1d4ed8"],
+  :root[data-theme="dark"] [class*="text-[#2463df"],
+  :root[data-theme="dark"] [class*="text-[#315389"] { color: #a9ccff !important; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      scroll-behavior: auto !important;
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+    }
+  }
 }

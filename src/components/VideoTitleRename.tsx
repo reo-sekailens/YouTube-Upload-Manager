@@ -8,6 +8,7 @@ import {
   listRemoteVideos,
   loadConnectionSettings,
 } from "../lib/local";
+import { openAndCopyGoogleAuthorization } from "../lib/google-authorization";
 import {
   compileTitleRename,
   normalizationTemplates,
@@ -153,11 +154,10 @@ export default function VideoTitleRename({
     if (!isTauri) return;
     try {
       const { authorizationUrl } = await beginDeletionAuthorization();
-      const url = new URL(authorizationUrl);
-      if (url.protocol !== "https:") throw new Error("The video-management authorization request must use HTTPS.");
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      await openUrl(url.toString());
-      onNotice("Google opened to grant the separate video-management permission. Return here after consent; it is active for 15 minutes.");
+      const copied = await openAndCopyGoogleAuthorization(authorizationUrl);
+      onNotice(copied
+        ? "Google opened to grant video-management permission and the link was copied. Return here after consent; it is active for 15 minutes."
+        : "Google opened to grant video-management permission, but clipboard access was unavailable.");
       window.setTimeout(() => void refresh(), 1_000);
     } catch (error) {
       onNotice(error instanceof Error ? error.message : "Video-management authorization could not be started.");

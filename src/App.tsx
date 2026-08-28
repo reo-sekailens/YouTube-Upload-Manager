@@ -76,6 +76,7 @@ const workspaceTabs = [
   ["dedupe", "Duplicate review"],
   ["transfer", "Export and import"],
   ["rename", "Rename videos"],
+  ["playlists", "Playlists"],
   ["deletion", "Video deletion"],
   ["account", "Connected account"],
   ["about", "About and support"],
@@ -135,6 +136,7 @@ const DeletionReview = lazy(() =>
   })),
 );
 const VideoTitleRename = lazy(() => import("./components/VideoTitleRename"));
+const PlaylistManager = lazy(() => import("./components/PlaylistManager"));
 const DedupeActivityPanel = lazy(() =>
   import("./components/DedupeActivityPanel").then((module) => ({
     default: module.DedupeActivityPanel,
@@ -1290,10 +1292,10 @@ export default function App({
                 <div className="ui-drop-copy">
                   <strong>Drag and drop videos here</strong>
                   <p className="ui-drop-description">
-                    They are copied into this device’s managed workspace before
-                    any upload. Files over YouTube’s 256 GB or 12-hour limits
-                    are stopped before copying. You can also choose multiple
-                    files.
+                    The app keeps a verified reference to each original file;
+                    it does not make a managed copy before upload. Files over
+                    YouTube’s 256 GB or 12-hour limits are stopped before they
+                    are added. You can also choose multiple files.
                   </p>
                 </div>
                 <button
@@ -1414,6 +1416,10 @@ export default function App({
               onNotice={setNotice}
               refreshVersion={libraryRefreshVersion}
             />
+          )}
+
+          {activeTab === "playlists" && (
+            <PlaylistManager activeChannel={snapshot.activeChannel} onNotice={setNotice} refreshVersion={libraryRefreshVersion} />
           )}
 
           {activeTab === "transfer" && (

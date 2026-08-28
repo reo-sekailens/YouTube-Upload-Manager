@@ -8,14 +8,18 @@ import {
   listYouTubePlaylists,
   loadFolderMonitorOverview,
   requeueCancelledFolderMonitorFiles,
+  reconcileFolderMonitorUploads,
   deleteFolderMonitorUploadedSource,
+  deleteFolderMonitorUploadedSources,
   scanFolderMonitorNow,
 } from "../lib/local";
+import { listen } from "@tauri-apps/api/event";
 import type {
   FolderMonitorSettings,
   FolderMonitorFileActivity,
   FolderMonitorLogEntry,
   FolderMonitorVisibility,
+  FolderMonitorLocalDeleteResult,
   YouTubePlaylist,
 } from "../lib/types";
 import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
@@ -101,6 +105,8 @@ export function FolderMonitorPanel({
   const [deletionQueue, setDeletionQueue] = useState<FolderMonitorFileActivity[]>([]);
   const [deletionConfirmation, setDeletionConfirmation] = useState("");
   const [deletionSubmitting, setDeletionSubmitting] = useState(false);
+  const [deletionProgress, setDeletionProgress] = useState({ completed: 0, total: 0 });
+  const [deletionResults, setDeletionResults] = useState<FolderMonitorLocalDeleteResult[]>([]);
   const invalidationTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -159,6 +165,19 @@ export function FolderMonitorPanel({
       }
     };
   }, [activeChannel, activeChannelId]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | undefined;
+    void listen<{ completed: number; total: number; result: FolderMonitorLocalDeleteResult }>(
+      "folder-monitor-local-delete-progress",
+      (event) => {
+        setDeletionProgress({ completed: event.payload.completed, total: event.payload.total });
+        setDeletionResults((previous) => [...previous, event.payload.result]);
+      },
+    ).then((stop) => { unlisten = stop; }).catch(() => undefined);
+    return () => unlisten?.();
+  }, []);
 
   useEffect(() => {
     if (!isTauri || !activeChannel) {
@@ -273,7 +292,11 @@ export function FolderMonitorPanel({
     [files],
   );
   const queuedFiles = useMemo(
-    () => files.filter((file) => ["draft", "queued", "needs_reconciliation"].includes(file.uploadStatus ?? file.observationState)),
+    () => files.filter((file) => ["draft", "queued"].includes(file.uploadStatus ?? file.observationState)),
+    [files],
+  );
+  const reconciliationFiles = useMemo(
+    () => files.filter((file) => file.uploadStatus === "needs_reconciliation"),
     [files],
   );
   const cancelledFiles = useMemo(
@@ -295,6 +318,8 @@ export function FolderMonitorPanel({
           file.itemId &&
           file.videoId &&
           file.liveConfirmed &&
+          file.localSourceAvailable &&
+          file.sourceDeleteStatus !== "deleted" &&
           file.uploadStatus === "uploaded",
       ),
     [files],
@@ -305,6 +330,8 @@ export function FolderMonitorPanel({
     if (!isTauri || busy || deletionSubmitting || selected.length === 0) return;
     setDeletionQueue(selected);
     setDeletionConfirmation("");
+    setDeletionProgress({ completed: 0, total: selected.length });
+    setDeletionResults([]);
   };
 
   const deleteLocalSource = async () => {
@@ -312,9 +339,23 @@ export function FolderMonitorPanel({
     if (!isTauri || !target?.itemId || deletionSubmitting)
       return;
     setDeletionSubmitting(true);
+    setDeletionProgress({ completed: 0, total: deletionQueue.length });
+    setDeletionResults([]);
     try {
-      await deleteFolderMonitorUploadedSource(target.itemId, deletionConfirmation);
-      const remaining = deletionQueue.slice(1);
+      const bulk = deletionQueue.length > 1;
+      if (bulk) {
+        const results = await deleteFolderMonitorUploadedSources(
+          deletionQueue.flatMap((file) => file.itemId ? [file.itemId] : []),
+          deletionConfirmation,
+        );
+        setDeletionResults((previous) => previous.length === results.length ? previous : results);
+        setDeletionProgress({ completed: results.length, total: results.length });
+      } else {
+        const result = await deleteFolderMonitorUploadedSource(target.itemId, deletionConfirmation);
+        setDeletionResults([result]);
+        setDeletionProgress({ completed: 1, total: 1 });
+      }
+      const remaining = bulk ? [] : deletionQueue.slice(1);
       setDeletionQueue(remaining);
       setDeletionConfirmation("");
       const refreshed = await loadFolderMonitorOverview();
@@ -324,7 +365,7 @@ export function FolderMonitorPanel({
       onNotice(
         remaining.length > 0
           ? `Deleted the local source for “${target.fileName}”. Confirm the next local watched file.`
-          : "Local source deletion completed. The YouTube video and managed app copy were retained.",
+          : "Local source deletion finished. See the deletion log for any file retained by a safety check.",
       );
     } catch (error) {
       onNotice(
@@ -358,6 +399,24 @@ export function FolderMonitorPanel({
             ? error.message
             : "The cancelled watched-folder files could not be queued again.",
       );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reconcileUploads = async () => {
+    if (!isTauri || busy || reconciliationFiles.length === 0) return;
+    setBusy(true);
+    try {
+      const retried = await reconcileFolderMonitorUploads();
+      const refreshed = await loadFolderMonitorOverview();
+      setSettings(refreshed.settings);
+      setFiles(refreshed.files);
+      setLogs(refreshed.logs);
+      await onQueueRefresh();
+      onNotice(retried > 0 ? `${retried} watched upload${retried === 1 ? " was" : "s were"} absent from YouTube and queued for upload.` : "YouTube confirmed the ambiguous watched uploads; no duplicate upload was sent.");
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "Watched-upload reconciliation could not complete.");
     } finally {
       setBusy(false);
     }
@@ -459,7 +518,7 @@ export function FolderMonitorPanel({
                 <p className="mb-0.5 text-[0.67rem] font-bold tracking-[0.1em] text-[#68748a] uppercase">THIS FOLDER</p>
                 <h3 className="m-0 text-[0.92rem] text-[#25314a]" id="folder-monitor-live-heading">Live folder activity</h3>
               </div>
-              <span className="text-[0.7rem] font-bold text-[#3d668e] whitespace-nowrap">{uploadingFiles.length} uploading · {queuedFiles.length} queued</span>
+              <span className="text-[0.7rem] font-bold text-[#3d668e] whitespace-nowrap">{uploadingFiles.length} uploading · {queuedFiles.length} queued{reconciliationFiles.length > 0 ? ` · ${reconciliationFiles.length} to reconcile` : ""}</span>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2.5 max-sm:grid-cols-1">
               <div className="min-w-0 rounded-md border border-[#e2e8f0] bg-white p-2.5">
@@ -503,6 +562,17 @@ export function FolderMonitorPanel({
                 )}
               </div>
             </div>
+            {reconciliationFiles.length > 0 && (
+              <div className="mt-2.5 rounded-md border border-[#f0d39e] bg-[#fffaf0] p-2.5">
+                <div className="flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-start">
+                  <div>
+                    <strong className="text-[0.72rem] text-[#805b16]">{reconciliationFiles.length} upload{reconciliationFiles.length === 1 ? " needs" : "s need"} reconciliation</strong>
+                    <p className="mt-1 mb-0 text-[0.68rem] leading-snug text-[#806b43]">They are not treated as queued. Reconcile checks YouTube first, then retries only video IDs absent from the active channel.</p>
+                  </div>
+                  <button className="shrink-0 rounded-md border border-[#d9b970] bg-white px-3 py-2 text-[0.74rem] font-[680] text-[#765515] disabled:cursor-not-allowed disabled:opacity-50" disabled={busy} onClick={() => void reconcileUploads()} type="button">{busy ? "Checking YouTube…" : `Reconcile and upload (${reconciliationFiles.length})`}</button>
+                </div>
+              </div>
+            )}
             <details className="mt-3 border-t border-[#dfe7f2] pt-2">
               <summary className="cursor-pointer text-[0.72rem] font-bold text-[#355776]">Folder scan log ({logs.length})</summary>
               {logs.length === 0 ? (
@@ -570,9 +640,9 @@ export function FolderMonitorPanel({
                 </>
               )}
             </details>
-            <details className="mt-3 border-t border-[#dfe7f2] pt-2">
+            <details className="mt-4 border-t border-[#dfe7f2] pt-3">
               <summary className="cursor-pointer text-[0.72rem] font-bold text-[#355776]">Uploaded to YouTube ({uploadedFiles.length})</summary>
-              <p className="my-2 text-[0.68rem] leading-snug text-[#68788e]">Only watched files whose completed upload still appears in the authenticated active-channel YouTube inventory are shown. Delete removes the local watched source only; the YouTube video and managed app copy are retained.</p>
+              <p className="mt-2 mb-3 max-w-4xl text-[0.7rem] leading-relaxed text-[#68788e]">Only watched files whose completed upload still appears in the authenticated active-channel YouTube inventory are shown. Delete removes the local watched source only; the YouTube video and managed app copy are retained.</p>
               {uploadedFiles.length === 0 ? (
                 <p className="mt-2 mb-0 text-[0.7rem] leading-snug text-[#75849a]">No watched-folder uploads are currently confirmed by YouTube.</p>
               ) : (
@@ -583,29 +653,49 @@ export function FolderMonitorPanel({
                     onClick={() => openDeletionReview(uploadedFiles)}
                     type="button"
                   >
-                    Delete all local files ({uploadedFiles.length})…
+                    Delete ({uploadedFiles.length}) files…
                   </button>
                   {deletionQueue[0] && (
-                    <div className="mt-2 rounded-md border border-[#e5c2c0] bg-[#fff8f7] p-2.5" role="dialog" aria-label="Confirm local watched file deletion">
-                      <strong className="block text-[0.72rem] text-[#8f3731]">Delete local file {uploadedFiles.length - deletionQueue.length + 1} of {uploadedFiles.length}</strong>
-                      <p className="mt-1 mb-2 text-[0.68rem] leading-snug text-[#7b514d]">Type <code className="rounded bg-white px-1 py-0.5 text-[#8f3731]">{deletionQueue[0].fileName}</code> to permanently delete that local watched file. The YouTube video is not deleted.</p>
-                      <div className="flex flex-wrap gap-2">
+                    <div className="mt-3 grid gap-3 rounded-lg border border-[#e5c2c0] bg-[#fff8f7] p-3.5" role="dialog" aria-label="Confirm local watched file deletion">
+                      <div className="grid gap-1">
+                        <strong className="text-[0.75rem] text-[#8f3731]">{deletionQueue.length > 1 ? `Delete (${deletionQueue.length}) files` : "Delete local file"}</strong>
+                        <p className="m-0 text-[0.69rem] leading-relaxed text-[#7b514d]">{deletionQueue.length > 1 ? <>Type <code className="rounded bg-white px-1 py-0.5 text-[#8f3731]">DELETE {deletionQueue.length} FILES</code> to permanently delete all selected local watched files. The YouTube videos are not deleted.</> : <>Type <code className="rounded bg-white px-1 py-0.5 text-[#8f3731]">{deletionQueue[0].fileName}</code> to permanently delete that local watched file. The YouTube video is not deleted.</>}</p>
+                      </div>
+                      <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 max-sm:grid-cols-1">
                         <input
-                          aria-label="Exact local filename"
-                          className="min-w-[13rem] flex-1 rounded-md border border-[#d9b8b4] bg-white px-2.5 py-2 text-[0.74rem] text-[#503532]"
+                          aria-label={deletionQueue.length > 1 ? "Exact bulk deletion phrase" : "Exact local filename"}
+                          className="min-w-0 rounded-md border border-[#d9b8b4] bg-white px-3 py-2.5 text-[0.74rem] text-[#503532]"
                           disabled={deletionSubmitting}
                           onChange={(event) => setDeletionConfirmation(event.target.value)}
-                          placeholder="Exact local filename"
+                          placeholder={deletionQueue.length > 1 ? `DELETE ${deletionQueue.length} FILES` : "Exact local filename"}
                           value={deletionConfirmation}
                         />
-                        <button className="rounded-md border border-[#cbd3df] bg-white px-3 py-2 text-[0.74rem] font-[680] text-[#34405a] disabled:cursor-not-allowed disabled:opacity-50" disabled={deletionSubmitting} onClick={() => { setDeletionQueue([]); setDeletionConfirmation(""); }} type="button">Cancel</button>
-                        <button className="rounded-md border border-[#b94842] bg-[#b94842] px-3 py-2 text-[0.74rem] font-[680] text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={deletionSubmitting || deletionConfirmation.trim() !== deletionQueue[0].fileName} onClick={() => void deleteLocalSource()} type="button">{deletionSubmitting ? "Deleting…" : "Delete local file"}</button>
+                        <button className="rounded-md border border-[#cbd3df] bg-white px-3 py-2.5 text-[0.74rem] font-[680] text-[#34405a] disabled:cursor-not-allowed disabled:opacity-50" disabled={deletionSubmitting} onClick={() => { setDeletionQueue([]); setDeletionConfirmation(""); }} type="button">Cancel</button>
+                        <button className="rounded-md border border-[#b94842] bg-[#b94842] px-3 py-2.5 text-[0.74rem] font-[680] text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={deletionSubmitting || deletionConfirmation.trim() !== (deletionQueue.length > 1 ? `DELETE ${deletionQueue.length} FILES` : deletionQueue[0].fileName)} onClick={() => void deleteLocalSource()} type="button">{deletionSubmitting ? "Deleting…" : deletionQueue.length > 1 ? `Delete (${deletionQueue.length}) files` : "Delete local file"}</button>
                       </div>
+                      {deletionSubmitting && (
+                        <div className="grid gap-1.5" aria-live="polite">
+                          <div className="flex items-center justify-between gap-2 text-[0.68rem] font-semibold text-[#7b514d]"><span>Deleting local watched files…</span><span>{deletionProgress.completed} of {deletionProgress.total}</span></div>
+                          <progress className="h-2 w-full accent-[#b94842]" max={Math.max(deletionProgress.total, 1)} value={deletionProgress.completed} />
+                        </div>
+                      )}
                     </div>
                   )}
-                  <ul className="mt-2 grid max-h-56 list-none gap-1.5 overflow-auto p-0">
+                  {deletionResults.length > 0 && (
+                    <details className="mt-3 rounded-lg border border-[#dfe7f2] bg-white px-3 py-2" open={deletionResults.some((result) => result.status !== "deleted")}>
+                      <summary className="cursor-pointer text-[0.72rem] font-bold text-[#355776]">Deletion log ({deletionResults.length} files)</summary>
+                      <div className="mt-2 grid gap-1.5" aria-live="polite">
+                        <div className="flex items-center justify-between gap-2 text-[0.68rem] text-[#68788e]"><span>{deletionResults.filter((result) => result.status === "deleted").length} deleted locally · {deletionResults.filter((result) => result.status !== "deleted").length} retained</span><span>{deletionProgress.completed} of {deletionProgress.total || deletionResults.length}</span></div>
+                        <progress className="h-2 w-full accent-[#26714e]" max={Math.max(deletionProgress.total || deletionResults.length, 1)} value={Math.min(deletionProgress.completed || deletionResults.length, deletionProgress.total || deletionResults.length)} />
+                        <ul className="m-0 grid max-h-48 list-none gap-1.5 overflow-auto p-0">
+                          {deletionResults.map((result) => <li className="grid gap-0.5 border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={result.itemId}><div className="flex items-center justify-between gap-2"><strong className="truncate text-[0.7rem] text-[#2f4262]" title={result.fileName}>{result.fileName}</strong><span className={result.status === "deleted" ? "text-[0.65rem] font-bold text-[#26714e]" : "text-[0.65rem] font-bold text-[#a4413b]"}>{result.status === "deleted" ? "Deleted locally" : "Retained"}</span></div><p className="m-0 text-[0.65rem] leading-snug text-[#68788e]">{result.detail}</p></li>)}
+                        </ul>
+                      </div>
+                    </details>
+                  )}
+                  <ul className="mt-3 grid max-h-64 list-none gap-2 overflow-auto p-0">
                     {uploadedFiles.map((file) => (
-                      <li className="flex items-center justify-between gap-2 border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={`${file.itemId}-${file.videoId}`}>
+                      <li className="flex items-center justify-between gap-3 border-t border-[#edf0f5] py-2 first:border-t-0 first:pt-0" key={`${file.itemId}-${file.videoId}`}>
                         <div className="min-w-0">
                           <div className="flex items-baseline justify-between gap-2">
                             <strong className="min-w-0 truncate text-[0.72rem] text-[#2f4262]" title={file.fileName}>{file.uploadTitle ?? file.fileName}</strong>
@@ -613,7 +703,7 @@ export function FolderMonitorPanel({
                           </div>
                           <p className="mt-1 mb-0 text-[0.66rem] leading-snug text-[#68788e]">{file.fileName} · video ID {file.videoId}</p>
                         </div>
-                        <button className="shrink-0 rounded-md border border-[#e5c2c0] bg-white px-3 py-2 text-[0.79rem] font-[680] text-[#a4413b] disabled:cursor-not-allowed disabled:opacity-50" disabled={busy || deletionSubmitting} onClick={() => openDeletionReview([file])} type="button">Delete local file…</button>
+                        <button className="shrink-0 rounded-md border border-[#e5c2c0] bg-white px-3 py-2.5 text-[0.79rem] font-[680] text-[#a4413b] disabled:cursor-not-allowed disabled:opacity-50" disabled={busy || deletionSubmitting} onClick={() => openDeletionReview([file])} type="button">Delete local file…</button>
                       </li>
                     ))}
                   </ul>

@@ -21,7 +21,7 @@ use std::{
     thread,
     time::{Duration, Instant, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_fs::{FilePath, FsExt, OpenOptions as FsOpenOptions};
 use uuid::Uuid;
 
@@ -258,7 +258,7 @@ struct PreflightLocalDeleteTarget {
     path: PathBuf,
     file_name: String,
     signature: (u64, String),
-    digest: String,
+    reviewed_digest: Option<String>,
     created_at: Instant,
 }
 
@@ -656,6 +656,8 @@ struct FolderMonitorFileActivity {
     item_id: Option<String>,
     video_id: Option<String>,
     live_confirmed: bool,
+    local_source_available: bool,
+    source_delete_status: Option<String>,
     file_name: String,
     observation_state: String,
     size_bytes: u64,
@@ -665,6 +667,23 @@ struct FolderMonitorFileActivity {
     confirmed_bytes: Option<u64>,
     total_bytes: Option<u64>,
     detail: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderMonitorLocalDeleteResult {
+    item_id: String,
+    file_name: String,
+    status: String,
+    detail: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderMonitorLocalDeleteProgress {
+    completed: usize,
+    total: usize,
+    result: FolderMonitorLocalDeleteResult,
 }
 
 #[derive(Serialize)]
@@ -2278,6 +2297,18 @@ fn finalize_confirmed_source_cleanup(state: &AppState, item_id: &str) -> Result<
             "Original source was retained because the verified source path or digest is unavailable.",
         );
     };
+    // An absent watched path is terminal from the monitor's perspective. Check
+    // this before link inspection: a prior successful removal must not later
+    // be overwritten as a retained linked path by a repeated action.
+    if !Path::new(&source_path).exists() {
+        return record_source_delete_outcome(
+            &connection,
+            item_id,
+            "deleted",
+            "source_cleanup_absent_after_verified_delete",
+            "The verified local source is no longer present after deletion; the YouTube video was retained.",
+        );
+    }
     if has_link_or_reparse_component(Path::new(&source_path)).unwrap_or(true) {
         return record_source_delete_outcome(
             &connection,
@@ -2293,6 +2324,13 @@ fn finalize_confirmed_source_cleanup(state: &AppState, item_id: &str) -> Result<
     };
     let source = match Path::new(&source_path).canonicalize() {
         Ok(path) => path,
+        Err(_) if !Path::new(&source_path).exists() => return record_source_delete_outcome(
+            &connection,
+            item_id,
+            "deleted",
+            "source_cleanup_absent_after_verified_delete",
+            "The verified local source is no longer present after deletion; the YouTube video was retained.",
+        ),
         Err(_) => return record_source_delete_outcome(
             &connection,
             item_id,
@@ -2484,6 +2522,13 @@ fn valid_new_playlist_title(title: &str) -> Result<String, String> {
     Ok(title.to_string())
 }
 
+fn valid_playlist_privacy(value: &str) -> Result<&str, String> {
+    match value {
+        "private" | "unlisted" | "public" => Ok(value),
+        _ => Err("Choose private, unlisted, or public for the playlist visibility.".into()),
+    }
+}
+
 fn establish_upload_session(
     state: &AppState,
     item_id: &str,
@@ -2566,6 +2611,142 @@ fn add_video_to_playlist(
             "YouTube did not authorize adding this video to the selected playlist.".to_string()
         })?;
     Ok(())
+}
+
+#[derive(Clone)]
+struct PlaylistItemPosition {
+    id: String,
+    video_id: String,
+    title: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaylistSortProgress {
+    completed: usize,
+    total: usize,
+    current_title: String,
+    status: String,
+    detail: String,
+}
+
+fn ordered_playlist_items(
+    mut items: Vec<PlaylistItemPosition>,
+    direction: &str,
+) -> Vec<PlaylistItemPosition> {
+    items.sort_by(|left, right| {
+        left.title
+            .to_lowercase()
+            .cmp(&right.title.to_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    if direction == "descending" {
+        items.reverse();
+    }
+    items
+}
+
+fn emit_playlist_sort_progress(
+    app: &AppHandle,
+    completed: usize,
+    total: usize,
+    current_title: &str,
+    status: &str,
+    detail: impl Into<String>,
+) {
+    let _ = app.emit(
+        "playlist-sort-progress",
+        PlaylistSortProgress {
+            completed,
+            total,
+            current_title: current_title.into(),
+            status: status.into(),
+            detail: detail.into(),
+        },
+    );
+}
+
+fn load_playlist_item_positions(
+    state: &AppState,
+    token: &str,
+    playlist_id: &str,
+) -> Result<Vec<PlaylistItemPosition>, String> {
+    let mut items = Vec::new();
+    let mut page: Option<String> = None;
+    loop {
+        let mut query = vec![
+            ("part", "snippet"),
+            ("playlistId", playlist_id),
+            ("maxResults", "50"),
+        ];
+        if let Some(value) = page.as_deref() {
+            query.push(("pageToken", value));
+        }
+        let response = youtube_json(state, token, "playlistItems", &query)?;
+        for item in response
+            .get("items")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let (Some(id), Some(video_id), Some(title)) = (
+                item.get("id").and_then(|value| value.as_str()),
+                item.pointer("/snippet/resourceId/videoId")
+                    .and_then(|value| value.as_str()),
+                item.pointer("/snippet/title")
+                    .and_then(|value| value.as_str()),
+            ) else {
+                continue;
+            };
+            items.push(PlaylistItemPosition {
+                id: id.into(),
+                video_id: video_id.into(),
+                title: title.into(),
+            });
+        }
+        page = response
+            .get("nextPageToken")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        if page.is_none() {
+            break;
+        }
+    }
+    Ok(items)
+}
+
+fn update_playlist_item_position(
+    state: &AppState,
+    token: &str,
+    playlist_id: &str,
+    item: &PlaylistItemPosition,
+    position: usize,
+) -> Result<(), String> {
+    let response = provider_transport(state).control_client()?.put("https://www.googleapis.com/youtube/v3/playlistItems")
+        .query(&[("part", "snippet")]).bearer_auth(token)
+        .json(&serde_json::json!({"id": item.id, "snippet": {"playlistId": playlist_id, "resourceId": {"kind": "youtube#video", "videoId": item.video_id}, "position": position}}))
+        .send().map_err(|_| "YouTube could not update the playlist order. Check your connection and retry.".to_string())?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    let status = response.status().as_u16();
+    let reason = response
+        .text()
+        .ok()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .and_then(|body| {
+            body.pointer("/error/errors/0/reason")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        });
+    match reason.as_deref() {
+        Some("manualSortRequired") | Some("invalidPlaylistItemPosition") => Err("YouTube requires this playlist's ordering to be Manual. Open its settings in YouTube Studio, choose Manual, then retry.".into()),
+        Some("playlistItemsNotAccessible") => Err("YouTube says the management credential cannot update this playlist. Grant playlist-management permission again using the same channel that owns the playlist, then retry.".into()),
+        Some("playlistOperationUnsupported") => Err("YouTube does not allow custom ordering for this playlist, such as an uploads playlist. Choose a playlist you created instead.".into()),
+        Some("playlistItemNotFound") | Some("playlistNotFound") => Err("This playlist changed on YouTube. Refresh the playlist list and select it again.".into()),
+        _ if status == 400 => Err("YouTube rejected the custom playlist order. Set the playlist ordering to Manual in YouTube Studio, then retry.".into()),
+        _ => Err("YouTube did not authorize updating this playlist's order.".into()),
+    }
 }
 
 fn query_upload_session(
@@ -3814,11 +3995,6 @@ fn canonical_uploaded_title(title: &str) -> (String, bool) {
     title_matching::canonical(title)
 }
 
-#[cfg(test)]
-fn title_number_sequences(title: &str) -> Vec<String> {
-    title_matching::number_sequences(title)
-}
-
 /// Returns review-only title evidence. Numeric-sequence matching is deliberately
 /// conservative: it needs multiple ordered sequences and at least six digits,
 /// so short incidental numbers do not become duplicate candidates.
@@ -3862,43 +4038,6 @@ fn ensure_remote_title_keys(connection: &Connection, channel_id: &str) -> Result
                 title_matching::TITLE_KEYS_VERSION,
                 video_id,
                 channel_id
-            ])
-            .map_err(user_error)?;
-    }
-    Ok(())
-}
-
-fn ensure_upload_title_keys(connection: &Connection, channel_id: &str) -> Result<(), String> {
-    let stale = connection
-        .prepare(
-            "SELECT id, title FROM upload_items WHERE (channel_id = ?1 OR channel_id IS NULL OR channel_id = '') AND title_keys_version != ?2",
-        )
-        .map_err(user_error)?
-        .query_map(
-            params![channel_id, title_matching::TITLE_KEYS_VERSION],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .map_err(user_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(user_error)?;
-    if stale.is_empty() {
-        return Ok(());
-    }
-    let mut update = connection
-        .prepare_cached(
-            "UPDATE upload_items SET normalized_title = ?1, canonical_title = ?2, has_copy_marker = ?3, numeric_title_key = ?4, title_keys_version = ?5 WHERE id = ?6",
-        )
-        .map_err(user_error)?;
-    for (item_id, title) in stale {
-        let keys = title_matching::keys(&title);
-        update
-            .execute(params![
-                keys.normalized,
-                keys.canonical,
-                keys.has_copy_marker as i64,
-                keys.numeric,
-                title_matching::TITLE_KEYS_VERSION,
-                item_id
             ])
             .map_err(user_error)?;
     }
@@ -4011,104 +4150,28 @@ fn matching_uploaded_titles(
         .collect())
 }
 
-/// Lightweight local-title evidence for the active queue. Unscoped records are
-/// considered only when they belong to the current operator-selected batch, so
-/// one device's unqueued drafts cannot leak into another channel's review.
-fn matching_local_upload_titles(
-    connection: &Connection,
-    channel_id: &str,
-    title: &str,
-    excluded_item_id: &str,
-    batch_item_ids: &HashSet<String>,
-) -> Result<Vec<String>, String> {
-    ensure_upload_title_keys(connection, channel_id)?;
-    let keys = title_matching::keys(title);
-    let mut statement = connection
-        .prepare(
-            "SELECT id, title, channel_id FROM upload_items WHERE id != ?1 AND status IN ('draft', 'queued', 'dispatching', 'uploading', 'needs_reconciliation', 'uploaded', 'failed') AND (channel_id = ?2 OR channel_id IS NULL OR channel_id = '') AND (normalized_title = ?3 OR (canonical_title = ?4 AND (has_copy_marker = 1 OR ?5 = 1)) OR (?6 != '' AND numeric_title_key = ?6)) ORDER BY created_at ASC",
-        )
-        .map_err(user_error)?;
-    let items = statement
-        .query_map(
-            params![
-                excluded_item_id,
-                channel_id,
-                keys.normalized,
-                keys.canonical,
-                keys.has_copy_marker as i64,
-                keys.numeric
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )
-        .map_err(user_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(user_error)?;
-    Ok(items
-        .into_iter()
-        .filter(|(item_id, _, item_channel)| {
-            item_channel.as_deref() == Some(channel_id) || batch_item_ids.contains(item_id)
-        })
-        .map(|(_, candidate_title, _)| candidate_title)
-        .filter(|candidate_title| uploaded_titles_match(title, candidate_title))
-        .collect())
-}
-
-fn light_dedupe_match_scope(remote_match: bool, local_match: bool) -> String {
-    match (remote_match, local_match) {
-        (true, true) => "youtube_and_local".into(),
-        (true, false) => "youtube".into(),
-        (false, true) => "local_queue".into(),
-        (false, false) => "none".into(),
-    }
-}
-
 fn light_dedupe_title_match(
     connection: &Connection,
     channel_id: &str,
     title: &str,
-    item_id: &str,
-    batch_item_ids: &HashSet<String>,
 ) -> Result<Option<(Vec<String>, String)>, String> {
     let remote_index = RemoteTitleIndex::load(connection, channel_id)?;
-    light_dedupe_title_match_indexed(
-        connection,
-        channel_id,
-        title,
-        item_id,
-        batch_item_ids,
-        &remote_index,
-    )
+    light_dedupe_title_match_indexed(title, &remote_index)
 }
 
 fn light_dedupe_title_match_indexed(
-    connection: &Connection,
-    channel_id: &str,
     title: &str,
-    item_id: &str,
-    batch_item_ids: &HashSet<String>,
     remote_index: &RemoteTitleIndex,
 ) -> Result<Option<(Vec<String>, String)>, String> {
-    let mut remote_titles = remote_index
+    let remote_titles = remote_index
         .matches(title)
         .into_iter()
         .map(|candidate| candidate.title.clone())
         .collect::<Vec<_>>();
-    let mut local_titles =
-        matching_local_upload_titles(connection, channel_id, title, item_id, batch_item_ids)?;
-    let scope = light_dedupe_match_scope(!remote_titles.is_empty(), !local_titles.is_empty());
-    if scope == "none" {
+    if remote_titles.is_empty() {
         return Ok(None);
     }
-    remote_titles.append(&mut local_titles);
-    remote_titles.sort();
-    remote_titles.dedup();
-    Ok(Some((remote_titles, scope)))
+    Ok(Some((remote_titles, "youtube".into())))
 }
 
 fn pending_upload_title_duplicates(
@@ -4127,21 +4190,10 @@ fn pending_upload_title_duplicates(
         .map_err(user_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(user_error)?;
-    let pending_item_ids = rows
-        .iter()
-        .map(|(item_id, _)| item_id.clone())
-        .collect::<HashSet<_>>();
     let remote_index = RemoteTitleIndex::load(connection, channel_id)?;
     rows.into_iter()
         .filter_map(|(item_id, title)| {
-            match light_dedupe_title_match_indexed(
-                connection,
-                channel_id,
-                &title,
-                &item_id,
-                &pending_item_ids,
-                &remote_index,
-            ) {
+            match light_dedupe_title_match_indexed(&title, &remote_index) {
                 Ok(Some((matched_titles, match_scope))) => Some(Ok(UploadTitleDuplicate {
                     item_id,
                     title,
@@ -4173,7 +4225,6 @@ fn check_upload_title_duplicates_impl(
     let active_channel_id = connection_settings(&connection)?
         .active_channel_id
         .ok_or_else(|| "No active YouTube channel is available for the title check.".to_string())?;
-    let batch_item_ids = item_ids.iter().cloned().collect::<HashSet<_>>();
     let remote_index = RemoteTitleIndex::load(&connection, &active_channel_id)?;
     let mut candidates = Vec::new();
     for item_id in item_ids {
@@ -4201,14 +4252,8 @@ fn check_upload_title_duplicates_impl(
         {
             continue;
         }
-        let Some((matched_titles, match_scope)) = light_dedupe_title_match_indexed(
-            &connection,
-            &active_channel_id,
-            &title,
-            item_id,
-            &batch_item_ids,
-            &remote_index,
-        )?
+        let Some((matched_titles, match_scope)) =
+            light_dedupe_title_match_indexed(&title, &remote_index)?
         else {
             continue;
         };
@@ -5205,6 +5250,7 @@ fn register_preflight_local_delete_target(
     media_directory: &Path,
     source_path: Option<&Path>,
     file_name: &str,
+    reviewed_digest: Option<&str>,
 ) -> Option<String> {
     let source_path = source_path?;
     if has_link_or_reparse_component(source_path).ok()? {
@@ -5216,7 +5262,10 @@ fn register_preflight_local_delete_target(
         return None;
     }
     let signature = monitored_file_signature(&fs::metadata(&source_path).ok()?).ok()?;
-    let (_, digest) = digest_file(&source_path).ok()?;
+    // A light review intentionally stays filename/title based. It must not
+    // turn into an implicit full-file deep review merely because the operator
+    // selected permanent deletion. A deep review retains its reviewed digest
+    // for the final staged-byte check below.
     let token = Uuid::new_v4().to_string();
     preflight_local_delete_targets().lock().ok()?.insert(
         token.clone(),
@@ -5224,7 +5273,7 @@ fn register_preflight_local_delete_target(
             path: source_path,
             file_name: file_name.to_string(),
             signature,
-            digest,
+            reviewed_digest: reviewed_digest.map(str::to_owned),
             created_at: Instant::now(),
         },
     );
@@ -5232,8 +5281,8 @@ fn register_preflight_local_delete_target(
 }
 
 /// Creates a short-lived deletion target after re-reading the persisted opt-in
-/// duplicate review. The token records a fresh local content binding before
-/// any later permanent deletion.
+/// duplicate review. Only a deep review records a content binding; a light
+/// review remains a filename/title decision by operator choice.
 fn prepare_preflight_local_delete_target(
     state: &AppState,
     job_id: &str,
@@ -5300,8 +5349,18 @@ fn prepare_preflight_local_delete_target(
             "Local duplicate deletion is available only for a desktop filesystem source."
                 .to_string()
         })?;
-    register_preflight_local_delete_target(&state.media_directory, Some(&path), &file_name)
-        .ok_or_else(|| "This source cannot be safely deleted from duplicate review.".to_string())
+    let reviewed_digest = if mode == "deep" {
+        digest.as_deref()
+    } else {
+        None
+    };
+    register_preflight_local_delete_target(
+        &state.media_directory,
+        Some(&path),
+        &file_name,
+        reviewed_digest,
+    )
+    .ok_or_else(|| "This source cannot be safely deleted from duplicate review.".to_string())
 }
 
 fn delete_preflight_duplicate_file_impl(
@@ -5364,19 +5423,21 @@ fn delete_preflight_duplicate_file_impl(
         restore_staged_file(&staged, &current_path);
         return Err("The selected local file changed while deletion was being prepared; it was not deleted.".into());
     }
-    let staged_digest = match digest_file(&staged) {
-        Ok((_, digest)) => digest,
-        Err(error) => {
+    if let Some(reviewed_digest) = target.reviewed_digest.as_deref() {
+        let staged_digest = match digest_file(&staged) {
+            Ok((_, digest)) => digest,
+            Err(error) => {
+                restore_staged_file(&staged, &current_path);
+                return Err(error);
+            }
+        };
+        if staged_digest != reviewed_digest {
             restore_staged_file(&staged, &current_path);
-            return Err(error);
+            return Err(
+                "The selected local file no longer matches the reviewed content; it was not deleted."
+                    .into(),
+            );
         }
-    };
-    if staged_digest != target.digest {
-        restore_staged_file(&staged, &current_path);
-        return Err(
-            "The selected local file no longer matches the reviewed content; it was not deleted."
-                .into(),
-        );
     }
     fs::remove_file(&staged).map_err(user_error)?;
     preflight_local_delete_targets()
@@ -5984,7 +6045,7 @@ fn folder_monitor_overview(connection: &Connection) -> Result<FolderMonitorOverv
         });
     };
     let files = connection
-        .prepare("SELECT observations.file_path, uploads.id, uploads.video_id, EXISTS(SELECT 1 FROM remote_videos AS remote WHERE remote.video_id = uploads.video_id AND remote.channel_id = observations.channel_id AND remote.upload_status IN ('uploaded', 'processed')), observations.state, observations.size_bytes, observations.updated_at, uploads.title, uploads.status, uploads.confirmed_bytes, uploads.total_bytes, uploads.detail FROM folder_monitor_observations AS observations LEFT JOIN upload_items AS uploads ON uploads.id = observations.upload_item_id WHERE observations.channel_id = ?1 ORDER BY observations.updated_at DESC LIMIT 200")
+        .prepare("SELECT observations.file_path, uploads.id, uploads.video_id, EXISTS(SELECT 1 FROM remote_videos AS remote WHERE remote.video_id = uploads.video_id AND remote.channel_id = observations.channel_id AND remote.upload_status IN ('uploaded', 'processed')), observations.state, observations.size_bytes, observations.updated_at, uploads.title, uploads.status, uploads.confirmed_bytes, uploads.total_bytes, uploads.detail, uploads.source_delete_status FROM folder_monitor_observations AS observations LEFT JOIN upload_items AS uploads ON uploads.id = observations.upload_item_id WHERE observations.channel_id = ?1 ORDER BY observations.updated_at DESC LIMIT 200")
         .map_err(user_error)?
         .query_map([channel_id], |row| {
             let file_path = row.get::<_, String>(0)?;
@@ -5992,6 +6053,8 @@ fn folder_monitor_overview(connection: &Connection) -> Result<FolderMonitorOverv
                 item_id: row.get(1)?,
                 video_id: row.get(2)?,
                 live_confirmed: row.get::<_, i64>(3)? != 0,
+                local_source_available: Path::new(&file_path).is_file(),
+                source_delete_status: row.get(12)?,
                 file_name: Path::new(&file_path)
                     .file_name()
                     .and_then(|value| value.to_str())
@@ -6264,7 +6327,7 @@ fn ingest_stable_monitored_file(
 ) -> Result<MonitorFileOutcome, String> {
     let title = upload_title_from_source(&file.path);
     let channel_id = monitored_channel_id(connection, folder_path, channel_name)?;
-    if light_dedupe_title_match(connection, &channel_id, &title, "", &HashSet::new())?.is_some() {
+    if light_dedupe_title_match(connection, &channel_id, &title)?.is_some() {
         set_observation_state(
             connection,
             file,
@@ -6277,7 +6340,7 @@ fn ingest_stable_monitored_file(
             connection,
             channel_name,
             "folder_monitor_light_duplicate_detected",
-            "Watched file matched a normalized title in the local queue or current YouTube library before copy",
+            "Watched file matched an already-uploaded normalized title in the active YouTube channel",
         )?;
         return Ok(MonitorFileOutcome {
             disposition: MonitorDisposition::Skipped,
@@ -7494,7 +7557,7 @@ fn claim_queued_upload_items(
     {
         let mut claim = transaction
             .prepare_cached(
-                "UPDATE upload_items SET status = 'dispatching', detail = 'Upload worker claimed this item.', updated_at = ?1 WHERE id = ?2 AND status = 'queued'",
+                "UPDATE upload_items SET status = 'dispatching', detail = 'Verifying the unchanged local source before YouTube upload.', updated_at = ?1 WHERE id = ?2 AND status = 'queued'",
             )
             .map_err(user_error)?;
         let mut mark_observation = transaction
@@ -8595,6 +8658,53 @@ fn resume_queued_uploads(state: State<'_, AppState>) -> Result<usize, String> {
     start_queued_uploads_impl(state.inner())
 }
 
+/// Refreshes the authenticated YouTube inventory before allowing a previously
+/// ambiguous watched-folder upload to retry. IDs that now exist are completed;
+/// only IDs absent from the fresh provider result return to the queue.
+fn reconcile_folder_monitor_uploads_impl(state: &AppState) -> Result<usize, String> {
+    sync_channel_inventory_worker(state)?;
+    let connection = database(state)?;
+    let channel_id = connection_settings(&connection)?
+        .active_channel_id
+        .ok_or_else(|| "Connect YouTube before reconciling watched uploads.".to_string())?;
+    let items = connection
+        .prepare("SELECT id, video_id FROM upload_items WHERE channel_id = ?1 AND status = 'needs_reconciliation' AND id IN (SELECT upload_item_id FROM folder_monitor_observations WHERE channel_id = ?1) ORDER BY updated_at ASC")
+        .map_err(user_error)?
+        .query_map([&channel_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?;
+    let transaction = connection.unchecked_transaction().map_err(user_error)?;
+    let timestamp = now();
+    let mut retried = 0usize;
+    for (id, video_id) in items {
+        let live = video_id.as_deref().is_some_and(|video_id| transaction
+            .query_row("SELECT EXISTS(SELECT 1 FROM remote_videos WHERE video_id = ?1 AND channel_id = ?2)", params![video_id, &channel_id], |row| row.get::<_, i64>(0))
+            .unwrap_or(0) != 0);
+        if live {
+            transaction.execute("UPDATE upload_items SET status = 'uploaded', detail = 'YouTube directly confirmed the prior upload during reconciliation.', updated_at = ?1 WHERE id = ?2 AND status = 'needs_reconciliation'", params![&timestamp, &id]).map_err(user_error)?;
+            audit(&transaction, &id, "folder_monitor_reconciliation_confirmed", "Fresh authenticated YouTube inventory confirmed the provider video ID; no retry was sent.")?;
+        } else {
+            transaction.execute("UPDATE upload_items SET status = 'queued', video_id = NULL, detail = 'Fresh authenticated YouTube inventory did not contain the prior provider video ID; a new resumable upload is queued.', updated_at = ?1 WHERE id = ?2 AND status = 'needs_reconciliation'", params![&timestamp, &id]).map_err(user_error)?;
+            audit(&transaction, &id, "folder_monitor_reconciliation_requeued", "Fresh authenticated YouTube inventory did not contain the provider video ID; operator-approved retry was queued.")?;
+            retried += 1;
+        }
+    }
+    transaction.commit().map_err(user_error)?;
+    if retried > 0 {
+        start_queued_uploads_impl(state)?;
+    }
+    Ok(retried)
+}
+
+#[tauri::command]
+async fn reconcile_folder_monitor_uploads(state: State<'_, AppState>) -> Result<usize, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || reconcile_folder_monitor_uploads_impl(&state))
+        .await
+        .map_err(|_| "Watched-upload reconciliation stopped unexpectedly.".to_string())?
+}
+
 #[tauri::command]
 async fn check_upload_title_duplicates(
     item_ids: Vec<String>,
@@ -8802,8 +8912,10 @@ async fn list_youtube_playlists(
 fn create_youtube_playlist_impl(
     state: &AppState,
     title: String,
+    privacy_status: String,
 ) -> Result<YouTubePlaylist, String> {
     let title = valid_new_playlist_title(&title)?;
+    let privacy_status = valid_playlist_privacy(&privacy_status)?;
     let connection = database(state)?;
     if !connection_settings(&connection)?.connected {
         return Err("Connect YouTube before creating a playlist.".into());
@@ -8816,7 +8928,7 @@ fn create_youtube_playlist_impl(
         .bearer_auth(access_token)
         .json(&serde_json::json!({
             "snippet": { "title": title },
-            "status": { "privacyStatus": "private" }
+            "status": { "privacyStatus": privacy_status }
         }))
         .send()
         .map_err(|_| {
@@ -8858,12 +8970,110 @@ fn create_youtube_playlist_impl(
 #[tauri::command]
 async fn create_youtube_playlist(
     title: String,
+    privacy_status: String,
     state: State<'_, AppState>,
 ) -> Result<YouTubePlaylist, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || create_youtube_playlist_impl(&state, title))
-        .await
-        .map_err(|_| "Playlist creation stopped unexpectedly.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        create_youtube_playlist_impl(&state, title, privacy_status)
+    })
+    .await
+    .map_err(|_| "Playlist creation stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+async fn add_remote_videos_to_playlist(
+    playlist_id: String,
+    video_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let playlist_id = playlist_id.trim().to_string();
+        if playlist_id.is_empty() || playlist_id.len() > 128 {
+            return Err("Choose a valid YouTube playlist before adding videos.".into());
+        }
+        let video_ids = video_ids
+            .into_iter()
+            .filter(|id| !id.trim().is_empty() && id.len() <= 128)
+            .collect::<BTreeSet<_>>();
+        if video_ids.is_empty() || video_ids.len() > 200 {
+            return Err("Select between 1 and 200 saved YouTube videos to add.".into());
+        }
+        let connection = database(&state)?;
+        clear_expired_deletion_authorization(&connection)?;
+        let settings = connection_settings(&connection)?;
+        if !settings.deletion_authorized || !settings.deletion_sudo_active {
+            return Err("Grant video-management permission and enter its temporary 15-minute mode before adding videos to a playlist.".into());
+        }
+        let channel_id = settings.active_channel_id.ok_or_else(|| "Connect YouTube before managing playlists.".to_string())?;
+        let mut check = connection
+            .prepare("SELECT EXISTS(SELECT 1 FROM remote_videos WHERE video_id = ?1 AND channel_id = ?2)")
+            .map_err(user_error)?;
+        for video_id in &video_ids {
+            let exists = check.query_row(params![video_id, &channel_id], |row| row.get::<_, i64>(0)).map_err(user_error)? != 0;
+            if !exists {
+                return Err("One selected video is no longer in the active channel's saved library. Refresh and review again.".into());
+            }
+        }
+        let token = refreshed_deletion_access_token(&state)?;
+        if active_channel_id(&state, &token)? != channel_id {
+            return Err("The playlist-management credential is for a different YouTube channel. Grant permission again for the connected channel.".into());
+        }
+        for video_id in &video_ids {
+            add_video_to_playlist(&state, &token, &playlist_id, video_id)?;
+        }
+        audit_global(&connection, "youtube_playlist_videos_added", &format!("Added {} explicitly selected active-channel video(s) to a playlist.", video_ids.len()))?;
+        Ok(video_ids.len())
+    })
+    .await
+    .map_err(|_| "Adding videos to the playlist stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+async fn sort_playlist_items_by_title(
+    app: AppHandle,
+    playlist_id: String,
+    direction: String,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let playlist_id = playlist_id.trim().to_string();
+        if playlist_id.is_empty() || playlist_id.len() > 128 { return Err("Choose a valid playlist before ordering it.".into()); }
+        if !matches!(direction.as_str(), "ascending" | "descending") { return Err("Choose ascending or descending title order.".into()); }
+        let connection = database(&state)?;
+        clear_expired_deletion_authorization(&connection)?;
+        let settings = connection_settings(&connection)?;
+        if !settings.deletion_authorized || !settings.deletion_sudo_active { return Err("Grant video-management permission and enter its temporary 15-minute mode before changing playlist order.".into()); }
+        let channel_id = settings.active_channel_id.as_deref().ok_or_else(|| "Connect YouTube before changing playlist order.".to_string())?;
+        let token = refreshed_deletion_access_token(&state)?;
+        if active_channel_id(&state, &token)? != channel_id {
+            return Err("The playlist-management credential is for a different YouTube channel. Grant permission again for the connected channel.".into());
+        }
+        let items = ordered_playlist_items(load_playlist_item_positions(&state, &token, &playlist_id)?, &direction);
+        let total = items.len();
+        emit_playlist_sort_progress(&app, 0, total, "", "running", format!("Loaded {total} playlist video(s)."));
+        for (position, item) in items.iter().enumerate() {
+            emit_playlist_sort_progress(&app, position, total, &item.title, "running", format!("Placing video {} of {total}.", position + 1));
+            if let Err(error) = update_playlist_item_position(&state, &token, &playlist_id, item, position) {
+                emit_playlist_sort_progress(&app, position, total, &item.title, "error", error.clone());
+                return Err(error);
+            }
+            emit_playlist_sort_progress(&app, position + 1, total, &item.title, "running", format!("Placed video {} of {total}.", position + 1));
+        }
+        let retained = load_playlist_item_positions(&state, &token, &playlist_id)?;
+        let expected_ids = items.iter().map(|item| &item.id).collect::<Vec<_>>();
+        let retained_ids = retained.iter().map(|item| &item.id).collect::<Vec<_>>();
+        if expected_ids != retained_ids {
+            let detail = "YouTube accepted the update but the playlist did not retain the requested order. Open the playlist settings in YouTube Studio, set order to Manual, then retry.".to_string();
+            emit_playlist_sort_progress(&app, total, total, "", "error", detail.clone());
+            return Err(detail);
+        }
+        audit_global(&connection, "youtube_playlist_custom_ordered", &format!("Applied {direction} title order to {} playlist item(s).", items.len()))?;
+        emit_playlist_sort_progress(&app, total, total, "", "completed", format!("Verified {direction} title order for {total} playlist video(s)."));
+        Ok(items.len())
+    }).await.map_err(|_| "Playlist ordering stopped unexpectedly.".to_string())?
 }
 
 fn row_to_remote_video(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteVideo> {
@@ -8993,11 +9203,11 @@ fn delete_folder_monitor_uploaded_source_impl(
         .ok_or_else(|| {
             "Connect the active YouTube channel before deleting a local watched file.".to_string()
         })?;
-    let watched_path: String = connection
+    let (watched_path, recorded_source_path, digest): (String, Option<String>, Option<String>) = connection
         .query_row(
-            "SELECT observations.file_path FROM folder_monitor_observations AS observations JOIN upload_items AS uploads ON uploads.id = observations.upload_item_id JOIN remote_videos AS remote ON remote.video_id = uploads.video_id AND remote.channel_id = observations.channel_id WHERE observations.upload_item_id = ?1 AND observations.channel_id = ?2 AND uploads.channel_id = ?2 AND uploads.source_path = observations.file_path AND uploads.status = 'uploaded' AND remote.upload_status IN ('uploaded', 'processed')",
+            "SELECT observations.file_path, uploads.source_path, uploads.digest FROM folder_monitor_observations AS observations JOIN upload_items AS uploads ON uploads.id = observations.upload_item_id JOIN remote_videos AS remote ON remote.video_id = uploads.video_id AND remote.channel_id = observations.channel_id WHERE observations.upload_item_id = ?1 AND observations.channel_id = ?2 AND uploads.channel_id = ?2 AND uploads.status = 'uploaded' AND remote.upload_status IN ('uploaded', 'processed')",
             params![item_id, &channel_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|_| "This watched file is no longer an uploaded, live-confirmed source on the active YouTube channel. Refresh the folder monitor before deleting it.".to_string())?;
     let file_name = Path::new(&watched_path)
@@ -9008,10 +9218,24 @@ fn delete_folder_monitor_uploaded_source_impl(
     if confirmation.trim() != file_name {
         return Err("Type the exact local filename before deleting it.".into());
     }
+    if digest.is_none() {
+        return Err("The local watched file was retained because its verified content digest is unavailable.".into());
+    }
+    if let Some(recorded_source_path) = recorded_source_path {
+        let watched = Path::new(&watched_path).canonicalize().map_err(|_| {
+            "The local watched file was retained because it is no longer available at the saved location.".to_string()
+        })?;
+        let recorded = Path::new(&recorded_source_path).canonicalize().map_err(|_| {
+            "The local watched file was retained because its recorded source path is no longer available.".to_string()
+        })?;
+        if watched != recorded {
+            return Err("The local watched file was retained because its recorded source path no longer matches the watched file.".into());
+        }
+    }
     connection
         .execute(
-            "UPDATE upload_items SET source_delete_status = 'processing_verified', updated_at = ?1 WHERE id = ?2 AND channel_id = ?3 AND status = 'uploaded'",
-            params![now(), item_id, &channel_id],
+            "UPDATE upload_items SET source_path = COALESCE(source_path, ?1), source_delete_status = 'processing_verified', updated_at = ?2 WHERE id = ?3 AND channel_id = ?4 AND status = 'uploaded'",
+            params![&watched_path, now(), item_id, &channel_id],
         )
         .map_err(user_error)?;
     audit(
@@ -9043,13 +9267,87 @@ async fn delete_folder_monitor_uploaded_source(
     state: State<'_, AppState>,
     item_id: String,
     confirmation: String,
-) -> Result<(), String> {
+) -> Result<FolderMonitorLocalDeleteResult, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        delete_folder_monitor_uploaded_source_impl(&state, &item_id, &confirmation)
+        let file_name = confirmation.trim().to_string();
+        delete_folder_monitor_uploaded_source_impl(&state, &item_id, &confirmation)?;
+        Ok(FolderMonitorLocalDeleteResult {
+            item_id,
+            file_name,
+            status: "deleted".into(),
+            detail: "Local watched file deleted. The YouTube video was retained.".into(),
+        })
     })
     .await
     .map_err(|_| "Local watched-file deletion stopped unexpectedly.".to_string())?
+}
+
+fn delete_folder_monitor_uploaded_sources_impl(
+    state: &AppState,
+    item_ids: &[String],
+    confirmation: &str,
+    app: Option<&AppHandle>,
+) -> Result<Vec<FolderMonitorLocalDeleteResult>, String> {
+    if item_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let expected = format!("DELETE {} FILES", item_ids.len());
+    if confirmation.trim() != expected {
+        return Err(format!(
+            "Type {expected} to permanently delete these local watched files."
+        ));
+    }
+    let mut results = Vec::with_capacity(item_ids.len());
+    for (index, item_id) in item_ids.iter().enumerate() {
+        let file_name = database(state)
+            .and_then(|connection| connection.query_row("SELECT file_path FROM folder_monitor_observations WHERE upload_item_id = ?1", [item_id], |row| row.get::<_, String>(0)).map_err(user_error))
+            .ok()
+            .and_then(|path| Path::new(&path).file_name().and_then(|name| name.to_str()).map(str::to_string))
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "Unavailable watched file".into());
+        let result = match delete_folder_monitor_uploaded_source_impl(state, item_id, &file_name) {
+            Ok(()) => FolderMonitorLocalDeleteResult {
+                item_id: item_id.clone(),
+                file_name,
+                status: "deleted".into(),
+                detail: "Local watched file deleted. The YouTube video was retained.".into(),
+            },
+            Err(detail) => FolderMonitorLocalDeleteResult {
+                item_id: item_id.clone(),
+                file_name,
+                status: "retained".into(),
+                detail,
+            },
+        };
+        if let Some(app) = app {
+            let _ = app.emit(
+                "folder-monitor-local-delete-progress",
+                FolderMonitorLocalDeleteProgress {
+                    completed: index + 1,
+                    total: item_ids.len(),
+                    result: result.clone(),
+                },
+            );
+        }
+        results.push(result);
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+async fn delete_folder_monitor_uploaded_sources(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    item_ids: Vec<String>,
+    confirmation: String,
+) -> Result<Vec<FolderMonitorLocalDeleteResult>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_folder_monitor_uploaded_sources_impl(&state, &item_ids, &confirmation, Some(&app))
+    })
+    .await
+    .map_err(|_| "Bulk local watched-file deletion stopped unexpectedly.".to_string())?
 }
 
 #[tauri::command]
@@ -9146,6 +9444,35 @@ fn youtube_title_update_error(status: u16) -> String {
         500..=599 => "YouTube is temporarily unavailable. The remaining titles were left unchanged; retry later.".into(),
         _ => "YouTube rejected this title change. Refresh the library before retrying.".into(),
     }
+}
+
+fn confirmed_youtube_title(
+    response: &serde_json::Value,
+    video_id: &str,
+    channel_id: &str,
+    requested_title: &str,
+) -> Result<String, String> {
+    let snippet = response
+        .get("items")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("snippet"))
+        .ok_or_else(|| "YouTube did not return the updated video for confirmation.".to_string())?;
+    if snippet.get("channelId").and_then(|value| value.as_str()) != Some(channel_id) {
+        return Err(
+            "YouTube returned a video outside the active channel during title confirmation.".into(),
+        );
+    }
+    let confirmed_title = snippet
+        .get("title")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "YouTube did not return a title during confirmation.".to_string())?;
+    if confirmed_title != requested_title {
+        return Err(format!(
+            "YouTube did not confirm the requested title for video {video_id}; the active channel still reports a different title."
+        ));
+    }
+    Ok(confirmed_title.to_string())
 }
 
 fn rename_remote_videos_impl(
@@ -9246,20 +9573,35 @@ fn rename_remote_videos_impl(
             .send()
             .map_err(|_| "YouTube could not be reached while changing a title. Refresh the library before retrying.".to_string())?;
         if !update_response.status().is_success() {
-            return Err(youtube_title_update_error(
-                update_response.status().as_u16(),
-            ));
+            let detail = youtube_title_update_error(update_response.status().as_u16());
+            let _ = audit_global(&connection, "youtube_title_rename_failed", &detail);
+            return Err(detail);
         }
-        let updated_title = update_response
-            .json::<serde_json::Value>()
-            .ok()
-            .and_then(|value| {
-                value
-                    .pointer("/snippet/title")
-                    .and_then(|title| title.as_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or(change.title);
+        let confirmation = youtube_json(
+            state,
+            &access_token,
+            "videos",
+            &[("part", "snippet"), ("id", change.video_id.as_str())],
+        )
+        .map_err(|error| {
+            let detail = format!("YouTube accepted the title update but could not confirm it from the active channel: {error}");
+            let _ = audit_global(&connection, "youtube_title_rename_confirmation_failed", &detail);
+            detail
+        })?;
+        let updated_title = confirmed_youtube_title(
+            &confirmation,
+            &change.video_id,
+            saved_channel_id,
+            &change.title,
+        )
+        .map_err(|error| {
+            let _ = audit_global(
+                &connection,
+                "youtube_title_rename_confirmation_failed",
+                &error,
+            );
+            error
+        })?;
         let keys = title_matching::keys(&updated_title);
         let updated_at = now();
         connection.execute(
@@ -10129,6 +10471,7 @@ pub fn run() {
                     disconnect_youtube,
                     sync_channel_inventory,
                     resume_queued_uploads,
+                    reconcile_folder_monitor_uploads,
                     check_upload_title_duplicates,
                     ignore_duplicate_candidate,
                     re_audit_ignored_duplicate_candidates,
@@ -10145,6 +10488,7 @@ pub fn run() {
                     list_deletion_requests,
                     request_video_deletion,
                     delete_folder_monitor_uploaded_source,
+                    delete_folder_monitor_uploaded_sources,
                     cancel_deletion_request,
                     clear_deletion_requests,
                     begin_deletion_authorization,
@@ -10155,6 +10499,8 @@ pub fn run() {
                     import_and_queue_batch,
                     list_youtube_playlists,
                     create_youtube_playlist,
+                    add_remote_videos_to_playlist,
+                    sort_playlist_items_by_title,
                     set_item_visibility,
                     set_item_delete_source_after_upload,
                     delete_uploaded_source,
@@ -10802,6 +11148,40 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
+            "deleted"
+        );
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn confirmed_source_cleanup_keeps_an_absent_source_marked_deleted_before_link_checks() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let missing_source = root.join("missing-after-delete.mp4");
+        let connection = database(&state).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items(id, title, file_name, source_path, workspace_path, size_bytes, digest, status, total_bytes, delete_source_after_upload, source_delete_status, created_at, updated_at) VALUES('missing-after-delete', 'Missing', 'missing-after-delete.mp4', ?1, 'managed', 1, 'digest', 'uploaded', 1, 1, 'processing_verified', ?2, ?2)",
+            params![missing_source.to_string_lossy(), now()],
+        ).unwrap();
+        drop(connection);
+
+        finalize_confirmed_source_cleanup(&state, "missing-after-delete").unwrap();
+
+        let connection = database(&state).unwrap();
+        assert_eq!(
+            connection.query_row(
+                "SELECT source_delete_status FROM upload_items WHERE id = 'missing-after-delete'",
+                [],
+                |row| row.get::<_, String>(0),
+            ).unwrap(),
             "deleted"
         );
         drop(connection);
@@ -11505,6 +11885,13 @@ mod tests {
         drop(connection);
 
         let token = prepare_preflight_local_delete_target(&state, "light-job", 0).unwrap();
+        assert!(preflight_local_delete_targets()
+            .lock()
+            .unwrap()
+            .get(&token)
+            .unwrap()
+            .reviewed_digest
+            .is_none());
         delete_preflight_duplicate_file_impl(&state, &token, "camera-original.insv").unwrap();
 
         assert!(!source.exists());
@@ -11545,6 +11932,47 @@ mod tests {
         assert!(scan.files[0].can_delete_local_duplicate);
         assert!(scan.files[0].local_delete_token.is_none());
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deep_preflight_deletion_keeps_the_reviewed_digest_binding_until_staged_validation() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let source = root.join("camera-original.insv");
+        let reviewed_bytes = b"reviewed-deep-match-source";
+        fs::write(&source, reviewed_bytes).unwrap();
+        let reviewed_digest = blake3::hash(reviewed_bytes).to_hex().to_string();
+        let locator = serde_json::to_string(&FilePath::Path(source.clone())).unwrap();
+        let timestamp = now();
+        let connection = database(&state).unwrap();
+        connection.execute(
+            "INSERT INTO preflight_scan_jobs (id, mode, status, total_files, completed_files, inventory_status, created_at, updated_at) VALUES ('deep-review', 'deep', 'complete', 1, 1, 'not_requested', ?1, ?1)",
+            [timestamp.clone()],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO preflight_scan_files (job_id, ordinal, source_locator, file_name, size_bytes, digest, status) VALUES ('deep-review', 0, ?1, 'camera-original.insv', ?2, ?3, 'complete')",
+            params![locator, reviewed_bytes.len() as i64, reviewed_digest],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO upload_items (id, title, file_name, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES ('saved', 'Camera original', 'camera-original.insv', 'saved.media', ?1, ?2, 'uploaded', ?1, ?3, ?3)",
+            params![reviewed_bytes.len() as i64, reviewed_digest, timestamp],
+        ).unwrap();
+        drop(connection);
+
+        let token = prepare_preflight_local_delete_target(&state, "deep-review", 0).unwrap();
+        fs::write(&source, b"changed-after-deep-review").unwrap();
+
+        assert!(
+            delete_preflight_duplicate_file_impl(&state, &token, "camera-original.insv").is_err()
+        );
+        assert!(source.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -11677,12 +12105,22 @@ mod tests {
         database(&state).unwrap();
         let source = root.join("duplicate.insv");
         fs::write(&source, b"same-camera-bytes").unwrap();
-        let token = register_preflight_local_delete_target(&media, Some(&source), "duplicate.insv")
-            .unwrap();
+        let reviewed_digest = blake3::hash(b"reviewed-content").to_hex().to_string();
+        let token = register_preflight_local_delete_target(
+            &media,
+            Some(&source),
+            "duplicate.insv",
+            Some(&reviewed_digest),
+        )
+        .unwrap();
 
-        assert!(
-            register_preflight_local_delete_target(&media, Some(&media), "managed.media").is_none()
-        );
+        assert!(register_preflight_local_delete_target(
+            &media,
+            Some(&media),
+            "managed.media",
+            None
+        )
+        .is_none());
         assert!(delete_preflight_duplicate_file_impl(&state, &token, "wrong.insv").is_err());
         assert!(source.exists());
         fs::remove_file(&source).unwrap();
@@ -11707,8 +12145,14 @@ mod tests {
         database(&state).unwrap();
         let source = root.join("duplicate.insv");
         fs::write(&source, b"reviewed-content").unwrap();
-        let token = register_preflight_local_delete_target(&media, Some(&source), "duplicate.insv")
-            .unwrap();
+        let reviewed_digest = blake3::hash(b"reviewed-content").to_hex().to_string();
+        let token = register_preflight_local_delete_target(
+            &media,
+            Some(&source),
+            "duplicate.insv",
+            Some(&reviewed_digest),
+        )
+        .unwrap();
         fs::write(&source, b"replaced-content").unwrap();
         let forged_signature = monitored_file_signature(&fs::metadata(&source).unwrap()).unwrap();
         preflight_local_delete_targets()
@@ -11938,7 +12382,20 @@ mod tests {
     }
 
     #[test]
-    fn light_dedupe_catches_matching_titles_in_the_current_batch_and_active_queue() {
+    fn title_rename_confirmation_requires_the_requested_title_and_channel() {
+        let response = serde_json::json!({
+            "items": [{ "snippet": { "channelId": "channel-a", "title": "After" } }]
+        });
+        assert_eq!(
+            confirmed_youtube_title(&response, "video-a", "channel-a", "After").unwrap(),
+            "After"
+        );
+        assert!(confirmed_youtube_title(&response, "video-a", "channel-a", "Different").is_err());
+        assert!(confirmed_youtube_title(&response, "video-a", "channel-b", "After").is_err());
+    }
+
+    #[test]
+    fn light_dedupe_ignores_matching_titles_in_the_current_batch_and_active_queue() {
         let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
         let state = AppState {
             database_path: root.join("queue.sqlite3"),
@@ -11967,25 +12424,14 @@ mod tests {
                 params![id, title, channel_id, now()],
             ).unwrap();
         }
-        let batch = HashSet::from(["current".to_string(), "same-batch".to_string()]);
-        let (matches, scope) = light_dedupe_title_match(
+        let result = light_dedupe_title_match(
             &connection,
             "channel-a-id",
             "VID_20251219_204823_00_014.mp4",
-            "current",
-            &batch,
         )
-        .unwrap()
         .unwrap();
 
-        assert_eq!(scope, "local_queue");
-        assert_eq!(matches.len(), 2);
-        assert!(matches
-            .iter()
-            .any(|title| title == "VID 20251219 204823 00 014"));
-        assert!(matches
-            .iter()
-            .any(|title| title == "Camera copy 20251219 204823 00 014"));
+        assert!(result.is_none());
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }
@@ -12618,6 +13064,7 @@ mod tests {
             .unwrap();
         assert_eq!(live.video_id.as_deref(), Some("live-video"));
         assert!(live.live_confirmed);
+        assert!(!live.local_source_available);
         assert_eq!(overview.logs.len(), 1);
         assert!(!rendered.contains("private-source\\\\clip.mp4"));
         assert!(!rendered.contains("other.mp4"));
@@ -12678,6 +13125,39 @@ mod tests {
             "deleted"
         );
         drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_monitor_bulk_deletion_rebinds_a_digest_verified_legacy_watched_path() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let watched = root.join("legacy-watched.mp4");
+        let contents = b"legacy watched local source";
+        fs::write(&watched, contents).unwrap();
+        let timestamp = now();
+        let connection = database(&state).unwrap();
+        connection.execute("INSERT INTO connection_settings (singleton, active_channel, active_channel_id, connection_detail, updated_at) VALUES (1, 'Channel A', 'channel-a', 'Connected', ?1)", [&timestamp]).unwrap();
+        connection.execute("INSERT INTO upload_items (id, title, file_name, channel_name, channel_id, workspace_path, size_bytes, digest, status, video_id, confirmed_bytes, total_bytes, created_at, updated_at) VALUES ('legacy-watched', 'Legacy watched', 'legacy-watched.mp4', 'Channel A', 'channel-a', 'managed.media', ?1, ?2, 'uploaded', 'legacy-video', ?1, ?1, ?3, ?3)", params![contents.len() as i64, blake3::hash(contents).to_hex().to_string(), timestamp]).unwrap();
+        connection.execute("INSERT INTO folder_monitor_observations (channel_id, channel_name, file_path, size_bytes, modified_key, state, upload_item_id, first_seen_at, updated_at) VALUES ('channel-a', 'Channel A', ?1, ?2, 'stable', 'uploaded', 'legacy-watched', ?3, ?3)", params![watched.to_string_lossy(), contents.len() as i64, timestamp]).unwrap();
+        connection.execute("INSERT INTO remote_videos (video_id, channel_name, channel_id, title, upload_status, updated_at) VALUES ('legacy-video', 'Channel A', 'channel-a', 'Legacy watched', 'uploaded', ?1)", [&timestamp]).unwrap();
+        drop(connection);
+
+        let results = delete_folder_monitor_uploaded_sources_impl(
+            &state,
+            &["legacy-watched".into()],
+            "DELETE 1 FILES",
+            None,
+        )
+        .unwrap();
+        assert_eq!(results[0].status, "deleted");
+        assert!(!watched.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -12999,6 +13479,16 @@ mod tests {
                 )
                 .unwrap(),
             0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT detail FROM audit_events WHERE kind = 'folder_monitor_light_duplicate_detected' ORDER BY created_at DESC LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "Watched file matched an already-uploaded normalized title in the active YouTube channel"
         );
 
         connection
@@ -13686,7 +14176,7 @@ mod tests {
         fs::create_dir_all(&state.media_directory).unwrap();
 
         assert!(matches!(
-            create_youtube_playlist_impl(&state, "Uploads".into()),
+            create_youtube_playlist_impl(&state, "Uploads".into(), "private".into()),
             Err(message) if message == "Connect YouTube before creating a playlist."
         ));
         fs::remove_dir_all(root).unwrap();
@@ -14312,5 +14802,40 @@ mod tests {
         assert!(source_modified_key.is_some());
         drop(connection);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn playlist_title_order_is_deterministic_in_both_directions() {
+        let items = vec![
+            PlaylistItemPosition {
+                id: "third".into(),
+                video_id: "v3".into(),
+                title: "Zoo".into(),
+            },
+            PlaylistItemPosition {
+                id: "second".into(),
+                video_id: "v2".into(),
+                title: "alpha 10".into(),
+            },
+            PlaylistItemPosition {
+                id: "first".into(),
+                video_id: "v1".into(),
+                title: "Alpha 2".into(),
+            },
+        ];
+        assert_eq!(
+            ordered_playlist_items(items.clone(), "ascending")
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec!["second", "first", "third"],
+        );
+        assert_eq!(
+            ordered_playlist_items(items, "descending")
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec!["third", "first", "second"],
+        );
     }
 }

@@ -21,6 +21,8 @@ import type {
   UploadVisibility,
   YouTubeConnectionStart,
   YouTubePlaylist,
+  PlaylistPrivacy,
+  FolderMonitorLocalDeleteResult,
 } from "./types";
 
 // Use Tauri's public runtime detector. Internal bridge properties are not an
@@ -241,10 +243,22 @@ export async function listYouTubePlaylists(): Promise<YouTubePlaylist[]> {
 }
 
 /** Creates a private playlist for the currently connected YouTube channel. */
-export async function createYouTubePlaylist(title: string): Promise<YouTubePlaylist> {
+export async function createYouTubePlaylist(title: string, privacyStatus: PlaylistPrivacy = "private"): Promise<YouTubePlaylist> {
   if (!isTauri)
     throw new Error("Playlist creation is available only in the signed desktop app.");
-  return invoke<YouTubePlaylist>("create_youtube_playlist", { title });
+  return invoke<YouTubePlaylist>("create_youtube_playlist", { title, privacyStatus });
+}
+
+/** Adds an explicitly selected saved active-channel video set to a playlist. */
+export async function addRemoteVideosToPlaylist(playlistId: string, videoIds: string[]): Promise<number> {
+  if (!isTauri)
+    throw new Error("Playlist management is available only in the signed desktop app.");
+  return invoke<number>("add_remote_videos_to_playlist", { playlistId, videoIds });
+}
+
+export async function sortPlaylistItemsByTitle(playlistId: string, direction: "ascending" | "descending"): Promise<number> {
+  if (!isTauri) throw new Error("Playlist ordering is available only in the signed desktop app.");
+  return invoke<number>("sort_playlist_items_by_title", { playlistId, direction });
 }
 
 export async function loadManualUploadDefaults(): Promise<ManualUploadDefaults> {
@@ -499,6 +513,11 @@ export async function requeueCancelledFolderMonitorFiles(
   return invoke<number>("requeue_cancelled_folder_monitor_files", { itemIds });
 }
 
+/** Rechecks ambiguous watched uploads against YouTube before safely retrying absent IDs. */
+export async function reconcileFolderMonitorUploads(): Promise<number> {
+  return invoke<number>("reconcile_folder_monitor_uploads");
+}
+
 export async function loadConnectionSettings(): Promise<ConnectionSettings> {
   if (!isTauri) return { connected: false };
   return invoke<ConnectionSettings>("load_connection_settings");
@@ -548,11 +567,19 @@ export async function requestVideoDeletion(
 export async function deleteFolderMonitorUploadedSource(
   itemId: string,
   confirmation: string,
-): Promise<void> {
-  return invoke("delete_folder_monitor_uploaded_source", {
+): Promise<FolderMonitorLocalDeleteResult> {
+  return invoke<FolderMonitorLocalDeleteResult>("delete_folder_monitor_uploaded_source", {
     itemId,
     confirmation,
   });
+}
+
+/** Deletes a reviewed batch of local watched sources after one exact bulk phrase. */
+export async function deleteFolderMonitorUploadedSources(
+  itemIds: string[],
+  confirmation: string,
+): Promise<FolderMonitorLocalDeleteResult[]> {
+  return invoke<FolderMonitorLocalDeleteResult[]>("delete_folder_monitor_uploaded_sources", { itemIds, confirmation });
 }
 
 export async function cancelDeletionRequest(id: string): Promise<void> {

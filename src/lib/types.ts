@@ -33,6 +33,8 @@ export type YouTubePlaylist = {
   title: string;
 };
 
+export type PlaylistPrivacy = "private" | "unlisted" | "public";
+
 export type UploadItem = {
   id: string;
   title: string;
@@ -226,6 +228,10 @@ export type FolderMonitorFileActivity = {
   videoId?: string;
   /** The active channel's authenticated YouTube inventory still contains this ID. */
   liveConfirmed: boolean;
+  /** The watched source is still present locally when this overview was loaded. */
+  localSourceAvailable: boolean;
+  /** Local cleanup receipt; deleted sources are never offered again. */
+  sourceDeleteStatus?: string;
   fileName: string;
   observationState: string;
   sizeBytes: number;
@@ -235,6 +241,14 @@ export type FolderMonitorFileActivity = {
   confirmedBytes?: number;
   totalBytes?: number;
   detail?: string;
+};
+
+/** Outcome for one operator-confirmed local watched-file deletion. */
+export type FolderMonitorLocalDeleteResult = {
+  itemId: string;
+  fileName: string;
+  status: "deleted" | "retained";
+  detail: string;
 };
 
 /** Safe, bounded audit history for the currently monitored folder/channel. */

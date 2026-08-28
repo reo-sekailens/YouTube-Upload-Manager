@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { beginYoutubeConnection, cancelYoutubeConnection, disconnectYoutube, importDesktopOAuthClient, isTauri, loadConnectionSettings } from "../lib/local";
+import { openAndCopyGoogleAuthorization } from "../lib/google-authorization";
 import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
 import { subscribeLocalStateChanges } from "../lib/state-events";
 import type { ConnectionSettings } from "../lib/types";
@@ -114,16 +115,16 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
     try {
       const { authorizationUrl, attemptId } = await beginYoutubeConnection();
       setConnectionAttemptId(attemptId);
-      const url = new URL(authorizationUrl);
-      if (url.protocol !== "https:") throw new Error("The authorization request must use HTTPS.");
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      void openUrl(url.toString()).catch((error: unknown) => {
+      void openAndCopyGoogleAuthorization(authorizationUrl).then((copied) => {
+        setNotice(copied
+          ? "Google authorization was opened and its link was copied. Return to this app when consent is complete."
+          : "Google authorization was opened, but clipboard access was unavailable.");
+      }).catch((error: unknown) => {
         void cancelYoutubeConnection(attemptId).catch(() => undefined);
         setConnecting(false);
         setConnectionAttemptId(undefined);
         setNotice(error instanceof Error ? error.message : "Google authorization could not be opened.");
       });
-      setNotice("Google authorization was opened in your browser. Return to this app when consent is complete.");
     } catch (error) {
       setConnecting(false);
       setConnectionAttemptId(undefined);

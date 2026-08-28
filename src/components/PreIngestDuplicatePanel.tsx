@@ -30,6 +30,7 @@ type PreIngestDuplicatePanelProps = {
 type LocalDeleteTarget = {
   file: PreIngestDuplicateScan["files"][number];
   ordinal: number;
+  reviewMode: "light" | "deep";
 };
 
 function verdict(file: PreIngestDuplicateScan["files"][number]) {
@@ -42,6 +43,12 @@ function verdict(file: PreIngestDuplicateScan["files"][number]) {
 
 function isLocalDeleteEligible(file: PreIngestDuplicateScan["files"][number]) {
   return Boolean(file.localDeleteToken || file.canDeleteLocalDuplicate);
+}
+
+function operationMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  return fallback;
 }
 
 function formatYoutubeDuration(value?: string) {
@@ -164,6 +171,7 @@ export function PreIngestDuplicatePanel({
   );
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkStopRequested, setBulkStopRequested] = useState(false);
   const [bulkConfirmation, setBulkConfirmation] = useState("");
   const [bulkProgress, setBulkProgress] = useState({
     completed: 0,
@@ -175,6 +183,7 @@ export function PreIngestDuplicatePanel({
   const [confirmation, setConfirmation] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
   const activeScanId = useRef(scan?.id);
+  const stopBulkDeletionRef = useRef(false);
   const eligibleOrdinals =
     scan?.files.flatMap((file) =>
       isLocalDeleteEligible(file) ? [file.ordinal] : [],
@@ -274,13 +283,15 @@ export function PreIngestDuplicatePanel({
     setDeleteError("");
     try {
       const localDeleteToken = await prepareToken(file, ordinal);
-      setDeleteTarget({ file: { ...file, localDeleteToken }, ordinal });
+      setDeleteTarget({
+        file: { ...file, localDeleteToken },
+        ordinal,
+        reviewMode: scan!.mode === "deep" ? "deep" : "light",
+      });
       setConfirmation("");
     } catch (error) {
       setDeleteError(
-        error instanceof Error
-          ? error.message
-          : "The local file could not be prepared for deletion.",
+        operationMessage(error, "The local file could not be prepared for deletion."),
       );
     }
   };
@@ -301,50 +312,85 @@ export function PreIngestDuplicatePanel({
       clearSingleDelete();
     } catch (error) {
       setDeleteError(
-        error instanceof Error
-          ? error.message
-          : "The local file was not deleted.",
+        operationMessage(error, "The local file was not deleted."),
       );
     }
   };
   const closeBulkDelete = () => {
+    if (bulkDeleting) {
+      stopBulkDeletionRef.current = true;
+      setBulkStopRequested(true);
+      setBulkProgress((current) => ({
+        ...current,
+        stage: "Stopping after the file currently being verified is finished…",
+      }));
+      return;
+    }
     setBulkOpen(false);
     setBulkConfirmation("");
     setBulkError("");
+    setBulkStopRequested(false);
     setBulkProgress({ completed: 0, total: 0, stage: "" });
   };
   const deleteSelectedFiles = async () => {
     if (bulkConfirmation !== bulkPhrase || selectedFiles.length === 0) return;
     setBulkError("");
+    stopBulkDeletionRef.current = false;
+    setBulkStopRequested(false);
     setBulkDeleting(true);
     let deleted = 0;
+    const retained: string[] = [];
     try {
       for (const { file, ordinal } of selectedFiles) {
-        setBulkProgress({
-          completed: deleted,
-          total: selectedFiles.length,
-          stage: `Using the accepted duplicate review for “${file.fileName}”…`,
-        });
-        const token = await prepareToken(file, ordinal);
-        setBulkProgress({
-          completed: deleted,
-          total: selectedFiles.length,
-          stage: `Deleting “${file.fileName}”…`,
-        });
-        await onDeleteLocalDuplicate(token, file.fileName, ordinal);
-        deleted += 1;
-        removeDeletedOrdinal(ordinal);
-        setBulkProgress({
-          completed: deleted,
-          total: selectedFiles.length,
-          stage: `Deleted ${deleted} of ${selectedFiles.length} local file${selectedFiles.length === 1 ? "" : "s"}.`,
-        });
+        if (stopBulkDeletionRef.current) break;
+        try {
+          setBulkProgress({
+            completed: deleted,
+            total: selectedFiles.length,
+            stage:
+              scan!.mode === "deep"
+                ? `Securing “${file.fileName}” against the deep-review content…`
+                : `Checking the saved light match and safe path for “${file.fileName}” (no file scan)…`,
+          });
+          const token = await prepareToken(file, ordinal);
+          if (stopBulkDeletionRef.current) break;
+          setBulkProgress({
+            completed: deleted,
+            total: selectedFiles.length,
+            stage: `Permanently removing “${file.fileName}”…`,
+          });
+          await onDeleteLocalDuplicate(token, file.fileName, ordinal);
+          deleted += 1;
+          removeDeletedOrdinal(ordinal);
+          setBulkProgress({
+            completed: deleted,
+            total: selectedFiles.length,
+            stage: `Deleted ${deleted} of ${selectedFiles.length} local file${selectedFiles.length === 1 ? "" : "s"}.`,
+          });
+        } catch (error) {
+          retained.push(
+            `“${file.fileName}”: ${operationMessage(error, "not deleted")}`,
+          );
+        }
       }
-      closeBulkDelete();
+      if (stopBulkDeletionRef.current) {
+        setBulkProgress({
+          completed: deleted,
+          total: selectedFiles.length,
+          stage: `Stopped after ${deleted} of ${selectedFiles.length} local file${selectedFiles.length === 1 ? "" : "s"}. The remaining files were kept.`,
+        });
+      } else if (retained.length > 0) {
+        setBulkError(
+          `${deleted} local file${deleted === 1 ? " was" : "s were"} deleted. ${retained.length} retained: ${retained.join(" ")}`,
+        );
+      } else {
+        setBulkOpen(false);
+        setBulkConfirmation("");
+        setBulkError("");
+        setBulkProgress({ completed: 0, total: 0, stage: "" });
+      }
     } catch (error) {
-      setBulkError(
-        `${deleted} local file${deleted === 1 ? " was" : "s were"} deleted. ${error instanceof Error ? error.message : "The remaining files were not deleted."}`,
-      );
+      setBulkError(`${deleted} local file${deleted === 1 ? " was" : "s were"} deleted. ${operationMessage(error, "The remaining files were not deleted.")}`);
     } finally {
       setBulkDeleting(false);
     }
@@ -701,8 +747,9 @@ export function PreIngestDuplicatePanel({
           </h3>
           <p>
             This deletes only the dropped desktop source file. The matching
-            managed upload copy and any YouTube video stay unchanged. It reuses
-            the accepted duplicate review and does not hash this file again.
+            managed upload copy and any YouTube video stay unchanged. {deleteTarget.reviewMode === "light"
+              ? "It uses the accepted light filename or title match and does not read the whole file for a deep review."
+              : "It reuses the accepted deep duplicate review and checks the final staged-file content before removal."} The native app always keeps the no-follow path, managed-workspace, staging, and typed-confirmation safeguards.
           </p>
           <label htmlFor="local-duplicate-delete-confirmation">
             Type the exact file name to confirm
@@ -756,10 +803,9 @@ export function PreIngestDuplicatePanel({
             {selectedFiles.length === 1 ? "" : "s"}
           </h3>
           <p>
-            The accepted opt-in duplicate review is reused for each selected
-            file. Deletion does not hash the files again; hashing happens only
-            when you run duplicate review. Type <code>{bulkPhrase}</code> to
-            confirm this batch.
+            {scan?.mode === "light"
+              ? "This uses the accepted light filename or title matches; it does not start or perform a deep full-file review."
+              : "This reuses the accepted deep duplicate review and verifies the final staged-file content."} Every file still uses no-follow path validation, safe staging, managed-workspace exclusion, and typed confirmation. Type <code>{bulkPhrase}</code> to confirm this batch.
           </p>
           <ul className="my-2.5 max-h-40 overflow-auto pl-5 [&_li+li]:mt-1">
             {selectedFiles.map(({ file, ordinal }) => (
@@ -767,9 +813,30 @@ export function PreIngestDuplicatePanel({
             ))}
           </ul>
           {bulkProgress.total > 0 && (
-            <p className="font-semibold text-muted!" role="status">
-              {bulkProgress.stage}
-            </p>
+            <div
+              aria-atomic="true"
+              aria-live="polite"
+              className="grid gap-2 rounded-md border border-[#d8bebb] bg-white px-3 py-2.5 text-[#3e2a2a]"
+              role="status"
+            >
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                <strong className="text-[0.82rem]">
+                  Deletion progress: {bulkProgress.completed} of {bulkProgress.total}
+                </strong>
+                <span className="text-[0.72rem] font-semibold text-[#704b49]">
+                  {bulkStopRequested ? "Stopping safely" : "Working"}
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-[#f0d9d6]" aria-hidden="true">
+                <span
+                  className="block h-full rounded-full bg-danger transition-[width] duration-200"
+                  style={{ width: `${bulkProgress.total === 0 ? 0 : Math.round((bulkProgress.completed / bulkProgress.total) * 100)}%` }}
+                />
+              </div>
+              <span className="text-[0.78rem] leading-[1.4] font-medium text-[#5e4848]">
+                {bulkProgress.stage}
+              </span>
+            </div>
           )}
           <label htmlFor="bulk-local-delete-confirmation">
             Type {bulkPhrase} to permanently delete the selected local files
@@ -790,15 +857,15 @@ export function PreIngestDuplicatePanel({
           )}
           <div>
             <button
-              className="cursor-pointer rounded-md border border-[#cdd4df] bg-white px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-[#34405a] transition-[background,border-color,box-shadow] duration-150 hover:border-[#aeb9c8] hover:bg-[#f3f5f8] disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={busy || bulkDeleting}
+              className="cursor-pointer rounded-md border border-[#34405a] bg-white px-3 py-2.5 text-[0.79rem] leading-[1.2] font-bold text-[#20334e] transition-[background,border-color,box-shadow] duration-150 hover:border-[#20334e] hover:bg-[#e9eff7] focus-visible:outline-3 focus-visible:outline-[#2d68e847] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:border-[#aeb9c8] disabled:bg-[#f3f5f8] disabled:text-[#65738a] disabled:opacity-100"
+              disabled={(!bulkDeleting && busy) || bulkStopRequested}
               onClick={closeBulkDelete}
               type="button"
             >
-              Cancel deletion
+              {bulkDeleting ? "Stop after current file" : "Cancel deletion"}
             </button>
             <button
-              className="cursor-pointer rounded-md border border-danger bg-danger px-3 py-2.5 text-[0.79rem] leading-[1.2] font-semibold text-white transition-[background,border-color,box-shadow] duration-150 hover:border-[#85342f] hover:bg-[#85342f] disabled:cursor-not-allowed disabled:opacity-50"
+              className="cursor-pointer rounded-md border border-danger bg-danger px-3 py-2.5 text-[0.79rem] leading-[1.2] font-bold text-white transition-[background,border-color,box-shadow] duration-150 hover:border-[#85342f] hover:bg-[#85342f] focus-visible:outline-3 focus-visible:outline-[#c44f463d] focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:border-[#b87974] disabled:bg-[#b87974] disabled:text-white disabled:opacity-100"
               disabled={busy || bulkDeleting || bulkConfirmation !== bulkPhrase}
               onClick={() => void deleteSelectedFiles()}
               type="button"

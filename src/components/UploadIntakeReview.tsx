@@ -90,8 +90,8 @@ export function UploadIntakeReview({
         Review {paths.length} video{paths.length === 1 ? "" : "s"}
       </h2>
       <p className="-mt-1 mb-0 text-[0.78rem] leading-snug text-[#617086]">
-        These choices apply to this drop before the files are copied into this
-        device’s managed workspace.
+        These choices apply to this drop before the original files are
+        referenced by this device-local queue.
       </p>
       <fieldset className="grid gap-2 rounded-lg border border-[#dce3ed] p-3">
         <legend className="px-1 text-[0.78rem] font-bold text-[#344a67]">Made for Kids</legend>
@@ -171,7 +171,7 @@ export function UploadIntakeReview({
           type="checkbox"
         />{" "}
         Delete each original source file only after YouTube confirms its upload.
-        The managed app copy is retained.
+        No app-managed copy is created.
       </label>
       {playlistError && <p className="m-0 text-[0.72rem] text-[#a4413b]">{playlistError}</p>}
       <footer className="flex flex-wrap justify-end gap-2">

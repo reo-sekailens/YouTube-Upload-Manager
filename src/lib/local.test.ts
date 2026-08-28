@@ -402,6 +402,7 @@ describe("manual upload intake settings", () => {
 
     expect(invoke).toHaveBeenCalledWith("create_youtube_playlist", {
       title: "New uploads",
+      privacyStatus: "private",
     });
     isTauri.mockReturnValue(false);
     vi.resetModules();

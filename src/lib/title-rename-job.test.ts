@@ -41,4 +41,15 @@ describe("title rename jobs", () => {
       ],
     });
   });
+
+  it("keeps an actionable native string rejection in the activity log", async () => {
+    await expect(startTitleRenameJob(
+      [{ videoId: "one", previousTitle: "Before", title: "After" }],
+      async () => Promise.reject("YouTube did not confirm the requested title for video one."),
+      () => undefined,
+    )).resolves.toBe(false);
+    expect(getTitleRenameJobSnapshot().activity).toMatchObject([
+      { status: "failed", detail: "YouTube did not confirm the requested title for video one." },
+    ]);
+  });
 });

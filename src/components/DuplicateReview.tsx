@@ -25,6 +25,7 @@ import {
   openYouTubeAccountBrowser,
   requestVideoDeletion,
 } from "../lib/local";
+import { openAndCopyGoogleAuthorization } from "../lib/google-authorization";
 import { windowItems } from "../lib/list-windowing";
 import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
 import { subscribeLocalStateChanges } from "../lib/state-events";
@@ -903,11 +904,8 @@ export function DuplicateReview({
     setBulkError("");
     try {
       const { authorizationUrl } = await beginDeletionAuthorization();
-      const url = new URL(authorizationUrl);
-      if (url.protocol !== "https:")
-        throw new Error("The deletion authorization request must use HTTPS.");
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      await openUrl(url.toString());
+      const copied = await openAndCopyGoogleAuthorization(authorizationUrl);
+      if (!copied) setBulkError("Google opened for permission, but clipboard access was unavailable.");
     } catch (error) {
       setBulkAuthorizing(false);
       setBulkError(
