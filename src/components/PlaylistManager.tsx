@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import "./PlaylistManager.lazy.css";
 import {
   addRemoteVideosToPlaylist,
   beginDeletionAuthorization,

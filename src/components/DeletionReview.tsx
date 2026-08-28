@@ -5,6 +5,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import "./DeletionReview.lazy.css";
 import {
   beginDeletionAuthorization,
   cancelDeletionRequest,

@@ -3,6 +3,7 @@ import { windowItems } from "../lib/list-windowing";
 import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
 import type { PreIngestDuplicateScan } from "../lib/types";
 import { PaginationControls } from "./PaginationControls";
+import "./PreIngestDuplicatePanel.lazy.css";
 
 type PreIngestDuplicatePanelProps = {
   busy: boolean;

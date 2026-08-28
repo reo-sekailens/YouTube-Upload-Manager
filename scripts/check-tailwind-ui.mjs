@@ -19,13 +19,17 @@ if (/@apply\b/.test(styles)) {
 for (const component of [
   "DeletionReview",
   "DuplicateReview",
-  "PreIngestDuplicatePanel",
   "FolderMonitorPanel",
+  "PlaylistManager",
+  "PreIngestDuplicatePanel",
   "VideoTitleRename",
 ]) {
   const css = read(`src/components/${component}.lazy.css`);
   if (!css.includes(`@source "./${component}.tsx"`)) {
     failures.push(`${component}.lazy.css must emit its own statically detected utility CSS.`);
+  }
+  if (!read(`src/components/${component}.tsx`).includes(`./${component}.lazy.css`)) {
+    failures.push(`${component}.tsx must import its lazy Tailwind CSS entry.`);
   }
 }
 

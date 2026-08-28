@@ -146,3 +146,13 @@ signing, deployment, or release configuration.
 - Authenticode status: `NotSigned`. The NSIS build used the verified x64
   FFprobe sidecar and the configured license resource; this remains an unsigned
   local installer, not a production-signed release.
+
+## Lazy-workspace CSS repair rebuild (2026-08-28)
+
+- Built `1.0.2-nightly.17` after restoring emitted Tailwind CSS ownership for
+  the Deletion Review, Playlists, and Pre-ingest Duplicate Review workspaces.
+- Artifact: [YouTube Upload Manager_1.0.2-nightly.17_x64-setup.exe](../../src-tauri/target/release/bundle/nsis/YouTube%20Upload%20Manager_1.0.2-nightly.17_x64-setup.exe)
+  (26,812,169 bytes; SHA-256
+  `2079B9DFB0CB8DB6EA6F1A164113AA3925568A332779B656EA064B63C1B024E6`).
+- Authenticode status: `NotSigned`. The x64 FFprobe sidecar and license
+  resource were present in the package.
