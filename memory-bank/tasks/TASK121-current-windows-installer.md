@@ -136,3 +136,13 @@ signing, deployment, or release configuration.
   (26,786,895 bytes; SHA-256
   `C274B80136DF49FB95C0C1D0B61559B1E9360B60AF8CB0F6269B4F98C9BC6166`).
   Authenticode status: `NotSigned`.
+
+## Current local rebuild (2026-08-28)
+
+- Rebuilt commit `5a0ef19` with `npm run tauri -- build --bundles nsis`.
+- Artifact: [YouTube Upload Manager_1.0.2-nightly.16_x64-setup.exe](../../src-tauri/target/release/bundle/nsis/YouTube%20Upload%20Manager_1.0.2-nightly.16_x64-setup.exe)
+  (26,785,398 bytes; SHA-256
+  `20C3FAE071BC43C994870EED42BFAC5B4E9EDFB800BF50F4FE307BDEF43DDE1D`).
+- Authenticode status: `NotSigned`. The NSIS build used the verified x64
+  FFprobe sidecar and the configured license resource; this remains an unsigned
+  local installer, not a production-signed release.
