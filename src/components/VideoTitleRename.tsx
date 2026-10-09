@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./VideoTitleRename.lazy.css";
 import {
@@ -9,6 +9,8 @@ import {
   loadConnectionSettings,
 } from "../lib/local";
 import { openAndCopyGoogleAuthorization } from "../lib/google-authorization";
+import { windowItems } from "../lib/list-windowing";
+import { assertWorkspaceChannel, useWorkspaceRequestFence, workspaceErrorMessage } from "../lib/workspace-requests";
 import {
   compileTitleRename,
   normalizationTemplates,
@@ -17,7 +19,7 @@ import {
   type TitleNormalizationTemplate,
 } from "../lib/title-rename";
 import {
-  getTitleRenameJobSnapshot,
+  getScopedTitleRenameJobSnapshot,
   startTitleRenameJob,
   subscribeTitleRenameJob,
 } from "../lib/title-rename-job";
@@ -25,6 +27,7 @@ import type { RemoteVideo, VideoTitleRename as VideoTitleRenameRequest } from ".
 
 type VideoTitleRenameProps = {
   activeChannel?: string;
+  activeChannelId?: string;
   onNotice: (notice: string) => void;
   refreshVersion?: number;
 };
@@ -58,6 +61,7 @@ async function renameRemoteVideos(
 
 export default function VideoTitleRename({
   activeChannel,
+  activeChannelId,
   onNotice,
   refreshVersion = 0,
 }: VideoTitleRenameProps) {
@@ -73,39 +77,48 @@ export default function VideoTitleRename({
   const [managementActive, setManagementActive] = useState(false);
   const [managementAuthorized, setManagementAuthorized] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadedChannelId, setLoadedChannelId] = useState<string>();
+  const [loadError, setLoadError] = useState("");
+  const [authorizing, setAuthorizing] = useState(false);
+  const [page, setPage] = useState(1);
+  const [activityPage, setActivityPage] = useState(1);
+  const authorizationRunning = useRef(false);
+  const loadFence = useWorkspaceRequestFence(activeChannelId);
+  const operationFence = useWorkspaceRequestFence(activeChannelId);
+  const currentLibrary = Boolean(activeChannelId && loadedChannelId === activeChannelId);
+  const getJobSnapshot = useCallback(() => getScopedTitleRenameJobSnapshot(activeChannelId), [activeChannelId]);
   const { activity, applying } = useSyncExternalStore(
     subscribeTitleRenameJob,
-    getTitleRenameJobSnapshot,
-    getTitleRenameJobSnapshot,
+    getJobSnapshot,
+    getJobSnapshot,
   );
 
   const refresh = useCallback(async () => {
-    if (!isTauri || !activeChannel) {
-      setVideos([]);
-      setSelected(new Set());
-      setManagementActive(false);
-      setManagementAuthorized(false);
-      return;
-    }
-    setLoading(true);
+    const current = loadFence.begin();
+    if (!isTauri || !activeChannelId) return;
+    setLoading(true); setLoadError("");
     try {
-      const [nextVideos, settings] = await Promise.all([
-        listRemoteVideos(),
-        loadConnectionSettings(),
-      ]);
+      assertWorkspaceChannel(await loadConnectionSettings(), activeChannelId);
+      if (!current()) return;
+      const nextVideos = await listRemoteVideos();
+      const settings = await loadConnectionSettings();
+      assertWorkspaceChannel(settings, activeChannelId);
+      if (!current()) return;
       setVideos(nextVideos);
+      setLoadedChannelId(activeChannelId);
       setManagementAuthorized(settings.deletionAuthorized === true);
       setManagementActive(settings.deletionSudoActive === true);
     } catch (error) {
-      onNotice(
-        error instanceof Error
-          ? error.message
-          : "Saved YouTube library titles could not be loaded.",
-      );
+      if (current()) setLoadError(workspaceErrorMessage(error, "Saved YouTube library titles could not be loaded."));
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
-  }, [activeChannel, onNotice]);
+  }, [activeChannelId, loadFence]);
+
+  useEffect(() => {
+    setVideos([]); setSelected(new Set()); setLoadedChannelId(undefined);
+    setManagementActive(false); setManagementAuthorized(false); setPage(1);
+  }, [activeChannelId]);
 
   useEffect(() => {
     void refresh();
@@ -113,8 +126,8 @@ export default function VideoTitleRename({
 
   const compiled = useMemo(() => compileTitleRename(pattern, flags), [pattern, flags]);
   const preview = useMemo(
-    () => previewTitleRenames(videos, { pattern, flags, replacement, normalization }),
-    [videos, pattern, flags, replacement, normalization],
+    () => previewTitleRenames(currentLibrary ? videos : [], { pattern, flags, replacement, normalization }),
+    [currentLibrary, videos, pattern, flags, replacement, normalization],
   );
   const eligible = useMemo(
     () => selectedTitleRenamePreviews(preview.items, "all-matches"),
@@ -125,6 +138,8 @@ export default function VideoTitleRename({
     [preview.items, selected],
   );
   const allSelected = eligible.length > 0 && eligible.every((item) => selected.has(item.videoId));
+  const previewWindow = windowItems(eligible, page);
+  const activityWindow = windowItems(activity, activityPage);
   const completedChanges = activity.filter((item) => item.status === "completed").length;
   const activeChange = activity.find((item) => item.status === "running");
   const waitingChanges = activity.filter((item) => item.status === "pending").length;
@@ -134,6 +149,8 @@ export default function VideoTitleRename({
     const eligibleIds = new Set(eligible.map((item) => item.videoId));
     setSelected((current) => new Set([...current].filter((id) => eligibleIds.has(id))));
   }, [eligible]);
+
+  useEffect(() => { setPage(1); }, [pattern, flags, replacement, normalization]);
 
   const toggleTemplate = (template: TitleNormalizationTemplate) => {
     setNormalization((current) =>
@@ -151,39 +168,58 @@ export default function VideoTitleRename({
   const selectAll = () => setSelected(allSelected ? new Set() : new Set(eligible.map((item) => item.videoId)));
 
   const authorizeManagement = async () => {
-    if (!isTauri) return;
+    if (!isTauri || authorizationRunning.current || !currentLibrary) return;
+    authorizationRunning.current = true; setAuthorizing(true);
+    const current = operationFence.begin();
     try {
+      assertWorkspaceChannel(await loadConnectionSettings(), activeChannelId);
+      if (!current()) return;
       const { authorizationUrl } = await beginDeletionAuthorization();
+      if (!current()) return;
       const copied = await openAndCopyGoogleAuthorization(authorizationUrl);
+      if (!current()) return;
       onNotice(copied
         ? "Google opened to grant video-management permission and the link was copied. Return here after consent; it is active for 15 minutes."
         : "Google opened to grant video-management permission, but clipboard access was unavailable.");
-      window.setTimeout(() => void refresh(), 1_000);
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : "Video-management authorization could not be started.");
-    }
+      if (current()) onNotice(workspaceErrorMessage(error, "Video-management authorization could not be started."));
+    } finally { authorizationRunning.current = false; setAuthorizing(false); }
   };
   const activateManagement = async () => {
+    if (authorizationRunning.current || !currentLibrary) return;
+    authorizationRunning.current = true; setAuthorizing(true);
+    const current = operationFence.begin();
     try {
+      assertWorkspaceChannel(await loadConnectionSettings(), activeChannelId);
+      if (!current()) return;
       const settings = await enableDeletionSudoMode();
+      if (!current()) return;
       setManagementActive(settings.deletionSudoActive === true);
       setManagementAuthorized(settings.deletionAuthorized === true);
       onNotice("Temporary video-management mode is active for 15 minutes. No video will change until you apply this reviewed selection.");
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : "Video-management mode could not be enabled.");
-    }
+      if (current()) onNotice(workspaceErrorMessage(error, "Video-management mode could not be enabled."));
+    } finally { authorizationRunning.current = false; setAuthorizing(false); }
   };
   const apply = async () => {
-    if (selectedChanges.length === 0) return;
+    if (!currentLibrary || loading || applying || authorizing || !activeChannelId || selectedChanges.length === 0) return;
+    const reviewedChannelId = activeChannelId;
+    const current = operationFence.begin();
+    setActivityPage(1);
     const changes: VideoTitleRenameRequest[] = selectedChanges.map((item) => ({
       videoId: item.videoId,
       previousTitle: item.title,
       title: item.renamedTitle,
     }));
     try {
-      if (await startTitleRenameJob(changes, renameRemoteVideos, onNotice)) setSelected(new Set());
+      if (await startTitleRenameJob(changes, async (nextChanges) => {
+        assertWorkspaceChannel(await loadConnectionSettings(), reviewedChannelId);
+        return renameRemoteVideos(nextChanges);
+      }, (message) => { if (current()) onNotice(message); }, reviewedChannelId) && current()) setSelected(new Set());
+    } catch (error) {
+      if (current()) onNotice(workspaceErrorMessage(error, "Title changes could not be started."));
     } finally {
-      await refresh();
+      if (current()) await refresh();
     }
   };
 
@@ -211,6 +247,8 @@ export default function VideoTitleRename({
           <h2 id="rename-heading">Rename YouTube videos</h2>
         </div>
       </div>
+      {loadError && <div className="mt-3 grid gap-2" role="alert"><p className="text-sm font-semibold text-danger">{loadError}</p><button className={secondaryButtonClass} disabled={loading || applying || authorizing} onClick={() => void refresh()} type="button">Retry library load</button></div>}
+      {applying && activity.length === 0 && <p className="ui-subtle" role="status">A title job is finishing on another channel. New changes will be available when it completes.</p>}
       <div className="grid gap-4">
         <section
           className="rounded-xl border border-[#dce5f1] p-4 [&_h3]:my-1 [&_h3]:text-base [&_h3]:text-[#263b59] [&_p]:mt-1.5 [&_p]:text-[0.78rem] [&_p]:leading-relaxed [&_p]:text-[#617086]"
@@ -251,17 +289,17 @@ export default function VideoTitleRename({
               <h3 id="title-rename-review-heading">Review title changes</h3>
               <p>{eligible.length} changed matching title{eligible.length === 1 ? "" : "s"}; {selectedChanges.length} selected.</p>
             </div>
-            <button className={secondaryButtonClass} disabled={eligible.length === 0 || applying} onClick={selectAll} type="button">
+            <button className={secondaryButtonClass} disabled={eligible.length === 0 || applying || loading || authorizing || !currentLibrary} onClick={selectAll} type="button">
               {allSelected ? "Clear all" : `Select all matches (${eligible.length})`}
             </button>
           </header>
           {videos.length === 0 && <p className="mt-1.5 text-[0.78rem] leading-relaxed text-[#617086]">{loading ? "Loading saved YouTube videos…" : "Sync the YouTube library to preview title edits."}</p>}
           {videos.length > 0 && eligible.length === 0 && compiled.ok && <p className="mt-1.5 text-[0.78rem] leading-relaxed text-[#617086]">No saved titles have a changed match for this expression and normalization.</p>}
           <div className="mt-3 grid gap-2.5">
-            {eligible.map((item) => (
+            {previewWindow.items.map((item) => (
               <article className="grid grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)] items-center gap-3.5 rounded-lg border border-[#dbe5f2] bg-[#fafcff] px-3 py-2.5 max-sm:grid-cols-[auto_minmax(0,1fr)]" key={item.videoId}>
                 <label aria-label={`Select ${item.title} for title rename`}>
-                  <input className="accent-[#2463df]" checked={selected.has(item.videoId)} disabled={applying} onChange={() => toggleSelection(item.videoId)} type="checkbox" />
+                  <input className="accent-[#2463df]" checked={selected.has(item.videoId)} disabled={applying || authorizing || loading || !currentLibrary} onChange={() => toggleSelection(item.videoId)} type="checkbox" />
                 </label>
                 <div>
                   <span className="block text-[0.62rem] font-[750] tracking-[0.07em] text-[#718095]">BEFORE</span>
@@ -274,19 +312,20 @@ export default function VideoTitleRename({
               </article>
             ))}
           </div>
+          {previewWindow.pageCount > 1 && <nav aria-label="Title preview pages" className="mt-3 flex flex-wrap items-center justify-between gap-2"><span className="ui-subtle">{previewWindow.start + 1}–{previewWindow.end} of {previewWindow.total} title changes</span><div className="flex gap-2"><button className={secondaryButtonClass} disabled={previewWindow.page === 1} onClick={() => setPage(previewWindow.page - 1)} type="button">Previous</button><button className={secondaryButtonClass} disabled={previewWindow.page === previewWindow.pageCount} onClick={() => setPage(previewWindow.page + 1)} type="button">Next</button></div></nav>}
           {activity.length > 0 && (
             <section className="mt-3.5 grid gap-2.5 rounded-lg border border-[#d9e4f5] bg-[#f5f8fe] p-3" aria-label="Title rename progress" aria-live="polite">
               <div className="flex flex-wrap items-baseline justify-between gap-x-2.5 gap-y-1.5">
                 <strong className="text-[0.76rem] text-[#30496c]">{completedChanges} of {activity.length} title changes confirmed</strong>
                 <span className="text-[0.72rem] text-[#60728c]">{activeChange ? `Renaming “${activeChange.previousTitle}”` : waitingChanges > 0 ? `${waitingChanges} title change${waitingChanges === 1 ? "" : "s"} waiting` : "Rename review complete"}</span>
               </div>
-              <div aria-valuemax={activity.length} aria-valuemin={0} aria-valuenow={completedChanges} className="h-2 overflow-hidden rounded-full bg-[#d7e2f2]" role="progressbar">
+              <div aria-label="Confirmed title changes" aria-valuemax={activity.length} aria-valuemin={0} aria-valuenow={completedChanges} className="h-2 overflow-hidden rounded-full bg-[#d7e2f2]" role="progressbar">
                 <span className="block h-full rounded-[inherit] bg-[#2463df] transition-[width] duration-200" style={{ width: `${progressPercent}%` }} />
               </div>
               <details className="text-[0.74rem] text-[#445d80] [&_summary]:cursor-pointer [&_summary]:font-[720] [&_ol]:mt-3 [&_ol]:grid [&_ol]:list-none [&_ol]:gap-1.5 [&_ol]:p-0">
                 <summary>Rename activity log ({activity.length})</summary>
                 <ol>
-                  {activity.map((item) => (
+                  {activityWindow.items.map((item) => (
                     <li className={`grid gap-0.5 rounded-r border-l-[3px] bg-white px-2 py-2 ${activityBorderClass(item.status)}`} key={item.videoId}>
                       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                         <strong className="text-[0.7rem]">{item.status === "pending" ? "Waiting" : item.status === "running" ? "Renaming" : item.status === "completed" ? "Renamed" : "Needs attention"}</strong>
@@ -296,20 +335,22 @@ export default function VideoTitleRename({
                     </li>
                   ))}
                 </ol>
+                {activityWindow.pageCount > 1 && <nav aria-label="Rename activity pages" className="mt-2 flex flex-wrap items-center justify-between gap-2"><span>{activityWindow.start + 1}–{activityWindow.end} of {activityWindow.total} entries</span><div className="flex gap-2"><button className={secondaryButtonClass} disabled={activityWindow.page === 1} onClick={() => setActivityPage(activityWindow.page - 1)} type="button">Previous</button><button className={secondaryButtonClass} disabled={activityWindow.page === activityWindow.pageCount} onClick={() => setActivityPage(activityWindow.page + 1)} type="button">Next</button></div></nav>}
               </details>
             </section>
           )}
           <footer className="mt-3.5 flex flex-wrap items-center justify-between gap-3 border-t border-[#e1e8f2] pt-3.5 max-sm:flex-col max-sm:items-stretch max-sm:[&>_*]:w-full max-sm:[&_button]:w-full">
-            <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button className={secondaryButtonClass} disabled={loading || applying || authorizing} onClick={() => void refresh()} type="button">Refresh library &amp; permission</button>
               {!managementAuthorized ? (
-                <button className={secondaryButtonClass} disabled={applying} onClick={() => void authorizeManagement()} type="button">Grant video-management permission</button>
+                <button className={secondaryButtonClass} disabled={applying || authorizing || loading || !currentLibrary} onClick={() => void authorizeManagement()} type="button">Grant video-management permission</button>
               ) : !managementActive ? (
-                <button className={secondaryButtonClass} disabled={applying} onClick={() => void activateManagement()} type="button">Enter video-management mode (15 min)</button>
+                <button className={secondaryButtonClass} disabled={applying || authorizing || loading || !currentLibrary} onClick={() => void activateManagement()} type="button">Enter video-management mode (15 min)</button>
               ) : (
                 <span className="text-[0.74rem] font-bold text-[#24704d]">Video-management mode is active.</span>
               )}
             </div>
-            <button className={primaryButtonClass} disabled={!managementActive || applying || selectedChanges.length === 0} onClick={() => void apply()} type="button">
+            <button className={primaryButtonClass} disabled={!managementActive || applying || authorizing || loading || !currentLibrary || selectedChanges.length === 0} onClick={() => void apply()} type="button">
               {applying ? "Applying reviewed titles…" : `Apply ${selectedChanges.length} title change${selectedChanges.length === 1 ? "" : "s"}`}
             </button>
           </footer>

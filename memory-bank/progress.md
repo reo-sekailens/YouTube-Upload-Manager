@@ -1,5 +1,57 @@
 # Progress
 
+## 2026-10-09 — Original-file uploads restored under explicit storage constraint
+
+- TASK142 restores manual and watched intake from original files without new
+  `.media`/`.partial` files, links, reflinks, or clones. The user's instruction
+  supersedes TASK141's copy decision; AGENTS.md and the project brief now record
+  this boundary. Originals must remain available and unchanged through upload
+  and recovery. Queue IDs, source integrity evidence, channel isolation, and
+  protected resumable checkpoints remain persisted.
+- Existing referenced legacy media is retained when recovery needs it; cleanup
+  only removes unreferenced owned files. No real operator profile, original
+  video, or previously queued media was changed during implementation.
+- Queue, intake, watched-folder, exit, error, and duplicate-deletion wording now
+  describes original-file dependence truthfully. Other TASK141 improvements
+  remain. Frontend verification passed 119 tests, TypeScript, Tailwind guard,
+  production webview build, and unchanged bundle limits (228,557 B JS raw,
+  71,461 B JS gzip, 39,649 B CSS raw). Eight rendered desktop/mobile light/dark
+  checks passed; screenshots are under `output/playwright/task142-*`.
+- TASK142 is complete for local source/browser scope. Eight exact focused native
+  tests passed; the full native suite passed 154 tests with zero failures and five
+  intentionally ignored release-only benchmarks. Ordinary Rust check and
+  formatting passed. Source hashes and environment receipts are recorded in
+  `output/task142-native-validation.json`. Local evidence continues to exclude
+  packaged launch and live Google/YouTube operations.
+
+## 2026-10-09 — Integrated reliability, operations, and usability improvements
+
+- TASK141 is complete for local source and browser evidence. Manual and watched
+  intake now save verified, flushed device-local media before queue admission;
+  interrupted intake recovers after the safe shell. Startup retains referenced
+  media and checkpoints, and eligible older reference-only items migrate without
+  changing item identity or their provider checkpoint. TASK113 is superseded.
+- Immutable channel fences discard late dashboard/library responses, scope
+  playlist progress and rename activity, and stop sequential rename work when
+  the connection changes. Picker, OAuth, intake, and queue failures have normal
+  operator feedback. Library, activity, and rename lists use bounded pages.
+- Queue filters show status counts, sizes use appropriate units, eligible failed
+  items expose retry, and progress/ETA use all active upload workers. Keyboard
+  workspace navigation and light/dark compact layouts are verified locally.
+- Integrated checks passed: 24 frontend files/119 tests; 161 native tests with
+  zero failures and five intentionally ignored release-only benchmarks; 14
+  operations regressions; four exact native gates; TypeScript, Rust check/fmt,
+  Tailwind guard, and production webview build. Initial assets are 228,468 B JS
+  raw, 71,443 B JS gzip, and 39,649 B CSS raw, within unchanged budgets.
+- Browser fixtures passed 36 checks across all nine workspaces at 1440/390 px
+  in light/dark themes. Screenshots and receipts are under `output/playwright`.
+  Current source validation used process-only local build paths because existing
+  checkout/toolchain junctions target an unavailable drive; sidecar packaging was
+  excluded from native source checks. Packaged launch, signed/cross-platform
+  builds, actual power-loss behavior, and live Google/YouTube remain unverified.
+- Consolidated findings, receipts, and follow-ups:
+  `memory-bank/certification/TASK141-reliability-and-usability.md`.
+
 ## 2026-08-23 — Performance implementation and available Windows certification complete
 
 - TASK102 through TASK112 are complete for the available evidence scope. The

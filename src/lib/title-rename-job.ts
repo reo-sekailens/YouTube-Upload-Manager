@@ -6,6 +6,7 @@ export type RenameActivity = VideoTitleRename & {
 };
 
 export type TitleRenameJobSnapshot = {
+  channelId?: string;
   activity: RenameActivity[];
   applying: boolean;
 };
@@ -41,6 +42,15 @@ export function getTitleRenameJobSnapshot() {
   return snapshot;
 }
 
+const idleOtherChannel: TitleRenameJobSnapshot = { activity: [], applying: false };
+const busyOtherChannel: TitleRenameJobSnapshot = { activity: [], applying: true };
+
+/** Keep the global mutation lock, but never disclose another channel's log. */
+export function getScopedTitleRenameJobSnapshot(channelId?: string) {
+  if (channelId && snapshot.channelId === channelId) return snapshot;
+  return snapshot.applying ? busyOtherChannel : idleOtherChannel;
+}
+
 /**
  * This job belongs to the app session rather than the Rename tab, so changing
  * workspaces cannot cancel a confirmed provider operation or discard its log.
@@ -49,9 +59,12 @@ export async function startTitleRenameJob(
   changes: VideoTitleRename[],
   execute: RenameExecutor,
   onNotice: (notice: string) => void,
+  channelId: string,
 ) {
+  if (!channelId) throw new Error("A connected channel is required for title renaming.");
   if (snapshot.applying) throw new Error("A title-rename job is already running.");
   publish({
+    channelId,
     applying: true,
     activity: changes.map((change) => ({ ...change, status: "pending" })),
   });

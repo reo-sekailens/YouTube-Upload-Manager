@@ -21,8 +21,8 @@ Google LLC; other marks belong to their respective owners.
 | Rust local command layer | OAuth exchange, validation, scoped filesystem access, batch orchestration, audit events | Rendering untrusted UI or exposing token material |
 | Local job engine | Crash-safe queue, resumable upload execution, provider reconciliation, retries, quota/rate-limit handling | User interface state as its source of truth |
 | OS secure store | Refresh tokens, encryption keys, session secrets | Webview-readable or plaintext secret storage |
-| Local SQLite database | Canonical batches, items, source locators/signatures, idempotency keys, lifecycle, cache, and audit records | Raw OAuth tokens or source-video copies |
-| Source-media boundary | Original operator-selected source path, stable signature/digest, and resume-safe verification | App-managed `.media` or `.partial` copies, automatic cloud copying, or a copy fallback |
+| Local SQLite database | Canonical batches, items, source locators/signatures, idempotency keys, lifecycle, cache, and audit records | Raw OAuth tokens or video bytes |
+| Source-media boundary | Original source locator/signature, BLAKE3 digest, and persisted queue/recovery identity | New app-owned video copies, links/clones, automatic cloud copying, or unverified replacement bytes |
 | YouTube APIs | Account authorization and video upload/publish outcomes | Local operational state |
 
 The native runtime now uses incremental, ownership-based modules rather than a
@@ -42,7 +42,7 @@ cannot bypass its bounded read/process guards.
 - **Account connection:** the authorized YouTube identity and its credential reference; scoped to an operator or tenant when multi-user support exists.
 - **Upload batch:** operator-owned group of proposed uploads with a review and execution state.
 - **Upload item:** one source asset plus its requested metadata, idempotency identity, lifecycle state, and provider video reference once known.
-- **Local asset:** an operator-selected device-local source reference with byte size, stable filesystem signature, BLAKE3 digest, and import state. It remains available for retry only while the original path remains available and unchanged; the application creates no app-managed media copy.
+- **Local asset:** an operator-selected original file with its signature, locator, BLAKE3 digest, and persisted intake/queue state. New intake does not copy or clone video bytes. The original must remain available and unchanged through upload and recovery. Existing referenced legacy media remains protected when needed for recovery.
 - **Execution attempt:** an append-only record of a specific provider interaction, retry decision, response reference, redacted error details, and durable resume checkpoint.
 - **Resume checkpoint:** encrypted resumable session URI, total byte length, provider-confirmed byte offset, request metadata fingerprint, and checkpoint time. It is updated transactionally after each acknowledged range.
 - **Inventory video:** an account-scoped projection of an operator-owned YouTube video and its last synchronization state.
@@ -55,7 +55,7 @@ cannot bypass its bounded read/process guards.
 
 `draft → reviewed → queued → uploading → uploaded | failed | cancelled`
 
-On launch, any `uploading` item is reconciled before it can send another byte: verify the original referenced source has not moved or changed, refresh authorization if necessary, query the persisted provider session, then continue only from the provider-confirmed range. A completed response records its returned video ID; an unavailable or changed source, expired session, or ambiguous completion is marked **needs reconciliation**, never silently retried as a new upload.
+On launch, any `uploading` item is reconciled before it can send another byte: verify the original source reference, refresh authorization if necessary, query the protected provider session, then continue only from the provider-confirmed range. Expired sessions or ambiguous completion enter **needs reconciliation**, never silently starting a second upload. Missing or changed originals fail safely; the app does not copy substitute bytes or ask for another file drop. Referenced legacy managed files remain usable without creating new copies.
 
 Queue recovery has an explicit two-phase native boundary. Before the webview
 can dispatch work, one database-only transaction returns pre-network claims to
@@ -66,9 +66,11 @@ safe holding shell; only then can one bounded recovery coordinator resume
 source-reference validation, protected resumable-session lookup, watched hashes,
 and preflight work. Queue actions remain disabled until classification, safe-shell
 rendering, deferred recovery, and immutable active-channel binding all pass.
-After classification, startup may remove legacy app-managed `.media` and
-`.partial` files only when no live queue job references them; queued, uploading,
-and reconciling legacy jobs retain their referenced files.
+After classification, deferred recovery retains interrupted legacy intake for
+review and verifies saved original references before dispatch without writing
+video copies. Cleanup may remove only
+owned UUID media with no upload-record reference; referenced legacy files and
+protected checkpoints remain intact, including failed/cancelled work.
 The dashboard therefore exposes no manual recovery control.
 
 SQLite also owns the durable webview synchronization cursor. Every relevant
@@ -113,13 +115,13 @@ Watched-folder automation is a deliberate recurring approval rather than an
 unreviewed publishing path. The operator chooses private or unlisted visibility
 when enabling the monitor; public visibility is unavailable. The local worker
 scans direct child files only while the app runs, requires an unchanged
-signature across consecutive scans, hashes and references accepted media in
-place without creating a managed-media copy, withholds local-digest and
+signature across consecutive scans, validates and references the original without
+creating a copy, withholds local-digest and
 last-synchronized-title matches for review, and
 dispatches only the persisted private or unlisted resumable uploader. A
 connection mismatch pauses before network use. The watched source must remain
-available and unchanged until YouTube confirms the upload; if it moves or
-changes, the item fails safely rather than uploading a replacement.
+available and unchanged until upload/recovery completes. Guarded opt-in original cleanup
+still checks the original and waits for confirmed YouTube processing success.
 
 Completed manual intake batches are queued and dispatch automatically whenever
 their approved channel is connected. If YouTube reports its daily upload limit,
@@ -152,13 +154,14 @@ locators in list or batch receipt payloads.
 
 Manual multi-file intake is one native batch boundary rather than one bridge
 round trip per file. Native code independently validates and references each
-original source in place, performs one channel inventory/title preparation, commits accepted
+original source without copying its bytes, performs one
+channel inventory/title preparation, commits accepted
 queue rows together, returns redacted per-item receipts, and wakes dispatch
 once. A failed item does not conceal or roll back the receipts of independent
 items, and every import, receipt, lookup, and queue row remains bound to the
-reviewed immutable channel. Manual intake has the same availability and
-unchanged-source requirement as watched-folder intake; it has no managed-copy
-fallback.
+reviewed immutable channel. Both intake paths require the original to remain
+available and unchanged through upload and recovery. No copy, hard-link, reflink,
+or clone fallback is permitted. TASK142 records the explicit storage preference.
 
 The product display name is **YouTube Upload Manager**. Its Tauri identifier
 and OS credential-store service name use the `com.sekailens` namespace:

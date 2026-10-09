@@ -210,7 +210,7 @@ export function FolderMonitorPanel({
       setSettings(updated);
       setLoadError("");
       onNotice(
-        `Folder monitoring is enabled for ${updated.channelName ?? activeChannel}. New completed videos will be copied locally, queued, and start uploading as ${updated.visibility} once stable.`,
+        `Folder monitoring is enabled for ${updated.channelName ?? activeChannel}. Stable videos will be queued and upload from this folder as ${updated.visibility}. Keep each original available and unchanged until upload or recovery completes.`,
       );
     } catch (error) {
       onNotice(
@@ -451,10 +451,12 @@ export function FolderMonitorPanel({
         </strong>
         <span className="text-[0.76rem] leading-relaxed text-[#536987]">
           Enabling this is recurring approval to upload supported files directly
-          from this folder to the bound YouTube channel. No full app copy is
-          made. Every supported direct-child file is accepted automatically once
-          it remains unchanged across two scans. Keep each source available and
-          unchanged until YouTube confirms it; optional cleanup runs only then.
+          from this folder to the bound YouTube channel. Queue and session records
+          store upload state without creating another video file. Every supported
+          direct-child file is accepted automatically once it remains unchanged
+          across two scans. Keep each source available and unchanged until upload
+          or recovery completes; optional cleanup waits for YouTube processing
+          to succeed.
         </span>
       </div>
 
@@ -485,13 +487,13 @@ export function FolderMonitorPanel({
               <dt className="mb-1 text-[0.64rem] font-bold tracking-[0.07em] text-[#7a8799] uppercase">Original source cleanup</dt>
               <dd className="m-0 wrap-anywhere text-[0.78rem] text-[#34405a]">
                 {settings.deleteSourceAfterUpload
-                  ? "Automatic after confirmed upload"
+                  ? "Automatic after YouTube processing succeeds"
                   : "Keep original"}
               </dd>
             </div>
             <div className="min-w-0 rounded-lg border border-[#e3e7ed] bg-[#fafbfc] px-3 py-2.5">
               <dt className="mb-1 text-[0.64rem] font-bold tracking-[0.07em] text-[#7a8799] uppercase">Transfer source</dt>
-              <dd className="m-0 wrap-anywhere text-[0.78rem] text-[#34405a]">Watched file in place</dd>
+              <dd className="m-0 wrap-anywhere text-[0.78rem] text-[#34405a]">Original watched file in place</dd>
             </div>
             <div className="min-w-0 rounded-lg border border-[#e3e7ed] bg-[#fafbfc] px-3 py-2.5">
               <dt className="mb-1 text-[0.64rem] font-bold tracking-[0.07em] text-[#7a8799] uppercase">Playlist</dt>
@@ -642,7 +644,7 @@ export function FolderMonitorPanel({
             </details>
             <details className="mt-4 border-t border-[#dfe7f2] pt-3">
               <summary className="cursor-pointer text-[0.72rem] font-bold text-[#355776]">Uploaded to YouTube ({uploadedFiles.length})</summary>
-              <p className="mt-2 mb-3 max-w-4xl text-[0.7rem] leading-relaxed text-[#68788e]">Only watched files whose completed upload still appears in the authenticated active-channel YouTube inventory are shown. Delete removes the local watched source only; the YouTube video and managed app copy are retained.</p>
+              <p className="mt-2 mb-3 max-w-4xl text-[0.7rem] leading-relaxed text-[#68788e]">Only watched files whose completed upload still appears in the authenticated active-channel YouTube inventory are shown. Delete removes the local watched source only; the YouTube video is retained.</p>
               {uploadedFiles.length === 0 ? (
                 <p className="mt-2 mb-0 text-[0.7rem] leading-snug text-[#75849a]">No watched-folder uploads are currently confirmed by YouTube.</p>
               ) : (
@@ -761,7 +763,7 @@ export function FolderMonitorPanel({
                   }
                   type="checkbox"
                 />{" "}
-                Automatically delete original only after YouTube confirms each upload
+                Automatically delete original only after YouTube processing succeeds
               </label>
               <label className="flex flex-[11rem] items-center gap-2 text-[0.72rem] font-[680] text-[#4f6078]">
                 <span>Audience</span>
@@ -839,9 +841,10 @@ export function FolderMonitorPanel({
         still stop changing before it is accepted; files over YouTube’s 256 GB
         or 12-hour limits are rejected before upload. A matching local
         BLAKE3 record or title in the last synced YouTube library is not
-        uploaded automatically. Watched files are used in place, so keep each
-        one unchanged and available until YouTube confirms it. Source cleanup
-        re-hashes the original and runs only after that confirmation.
+        uploaded automatically. The original watched file is the transfer
+        source; keep it available and unchanged until upload or recovery
+        completes. Source cleanup re-hashes the original and runs only after
+        YouTube processing succeeds.
       </p>
     </section>
   );

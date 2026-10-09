@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { KeyboardEvent } from "react";
+import type { WorkspaceTab } from "./components/AppWorkspaceParts";
 import {
   cancelPreflightDuplicateScan,
   cancelUploadItem,
@@ -51,6 +51,8 @@ import type {
   DedupeProgressPhase,
 } from "./lib/dedupe-activity";
 import { resolveTheme, type AppTheme } from "./lib/theme";
+import { canAcceptChannelSnapshot } from "./lib/channel-snapshot";
+import type { OperatorAction } from "./lib/operator-feedback";
 
 const emptySnapshot: DashboardSnapshot = {
   revision: 0,
@@ -70,20 +72,7 @@ const subtleClass = "ui-subtle";
 const panelClass = "ui-panel";
 const sectionHeadingClass = "ui-section-heading";
 const actionRowClass = "ui-action-row";
-const workspaceTabs = [
-  ["batch", "Batch uploads"],
-  ["monitor", "Folder monitor"],
-  ["dedupe", "Duplicate review"],
-  ["transfer", "Export and import"],
-  ["rename", "Rename videos"],
-  ["playlists", "Playlists"],
-  ["deletion", "Video deletion"],
-  ["account", "Connected account"],
-  ["about", "About and support"],
-] as const;
-type WorkspaceTab = (typeof workspaceTabs)[number][0];
 
-const AppActionIcon = lazy(() => import("./components/AppActionIcon"));
 const QueueToolbar = lazy(() => import("./components/QueueToolbar"));
 
 const ConnectionPanel = lazy(() =>
@@ -96,11 +85,21 @@ const CrashRecoveryScreen = lazy(() =>
     default: module.CrashRecoveryScreen,
   })),
 );
-const GoogleSetupWizard = lazy(() =>
-  import("./components/GoogleSetupWizard").then((module) => ({
-    default: module.GoogleSetupWizard,
-  })),
-);
+const AppDialogs = lazy(() => import("./components/AppWorkspaceParts").then((module) => ({ default: module.AppDialogs })));
+let prefetchedNavigation: typeof import("./components/AppWorkspaceParts")["WorkspaceNavigation"] | undefined;
+const loadBatchImportArea = () => import("./components/AppWorkspaceParts").then((module) => {
+  prefetchedNavigation = module.WorkspaceNavigation;
+  return { default: module.BatchImportArea };
+});
+const BatchImportArea = lazy(loadBatchImportArea);
+const WorkspaceHeader = lazy(() => import("./components/AppWorkspaceParts").then((module) => ({ default: module.WorkspaceHeader })));
+const WorkspaceFooter = lazy(() => import("./components/AppWorkspaceParts").then((module) => ({ default: module.WorkspaceFooter })));
+const BrowserPreviewNotice = lazy(() => import("./components/AppWorkspaceParts").then((module) => ({ default: module.BrowserPreviewNotice })));
+const LazyWorkspaceNavigation = lazy(() => import("./components/AppWorkspaceParts").then((module) => ({ default: module.WorkspaceNavigation })));
+function WorkspaceNavigation(props: Parameters<NonNullable<typeof prefetchedNavigation>>[0]) {
+  const Navigation = prefetchedNavigation ?? LazyWorkspaceNavigation;
+  return <Navigation {...props} />;
+}
 const loadQueueTable = () =>
   import("./components/QueueTable").then((module) => ({
     default: module.QueueTable,
@@ -128,6 +127,7 @@ export function prefetchBatchWorkspace() {
     loadManualUploadDefaultsPanel(),
     loadUploadProgressSummary(),
     loadUploadTitleDuplicateReview(),
+    loadBatchImportArea(),
   ]);
 }
 const DeletionReview = lazy(() =>
@@ -165,11 +165,6 @@ const PreIngestDuplicatePanel = lazy(() =>
 const TransferPanel = lazy(() =>
   import("./components/TransferPanel").then((module) => ({
     default: module.TransferPanel,
-  })),
-);
-const UploadIntakeReview = lazy(() =>
-  import("./components/UploadIntakeReview").then((module) => ({
-    default: module.UploadIntakeReview,
   })),
 );
 const RevisionedStateBridge = lazy(
@@ -286,6 +281,9 @@ export default function App({
   const preflightRunId = useRef(0);
   const stateRevisionRef = useRef(initialStartup?.snapshot.revision ?? 0);
   const stateChannelIdRef = useRef(initialStartup?.snapshot.activeChannelId);
+  const stateChannelGenerationRef = useRef(0);
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
   const finalizedPreflightJobs = useRef(new Set<string>());
   const startupCompletionRequest = useRef<
     Promise<StartupBootstrap> | undefined
@@ -309,6 +307,25 @@ export default function App({
   }, [theme]);
 
   const updateConnection = useCallback((settings: ConnectionSettings) => {
+    const channelChanged = stateChannelIdRef.current !== settings.activeChannelId;
+    if (channelChanged) {
+      stateChannelGenerationRef.current += 1;
+      stateChannelIdRef.current = settings.activeChannelId;
+      stateRevisionRef.current = 0;
+      preflightRunId.current += 1;
+      finalizedPreflightJobs.current.clear();
+      setPreflightScan(undefined);
+      setPreflightFileCount(0);
+      setPreflightBusy(false);
+      setPendingImportPaths(undefined);
+      setDedupeActivity([]);
+      setDedupePhase("idle");
+      snapshotRef.current = {
+        ...emptySnapshot,
+        activeChannel: settings.activeChannel,
+        activeChannelId: settings.activeChannelId,
+      };
+    }
     setConnectionSettings(settings);
     setSnapshot((current) => {
       if (current.activeChannelId === settings.activeChannelId) {
@@ -317,8 +334,6 @@ export default function App({
           activeChannel: settings.activeChannel,
         };
       }
-      stateChannelIdRef.current = settings.activeChannelId;
-      stateRevisionRef.current = 0;
       return {
         ...emptySnapshot,
         activeChannel: settings.activeChannel,
@@ -326,16 +341,20 @@ export default function App({
       };
     });
     if (isTauri) {
+      const requested = {
+        channelId: settings.activeChannelId,
+        generation: stateChannelGenerationRef.current,
+        revision: stateRevisionRef.current,
+      };
       void loadSnapshot()
         .then((next) => {
-          if (next.activeChannelId !== settings.activeChannelId) return;
-          if (
-            stateChannelIdRef.current === next.activeChannelId &&
-            next.revision < stateRevisionRef.current
-          )
-            return;
-          stateChannelIdRef.current = next.activeChannelId;
+          if (!canAcceptChannelSnapshot(requested, {
+            channelId: stateChannelIdRef.current,
+            generation: stateChannelGenerationRef.current,
+            revision: stateRevisionRef.current,
+          }, next)) return;
           stateRevisionRef.current = next.revision;
+          snapshotRef.current = next;
           setSnapshot(next);
         })
         .catch(() => undefined);
@@ -343,14 +362,19 @@ export default function App({
   }, []);
 
   const refresh = useCallback(async () => {
+    const requested = {
+      channelId: stateChannelIdRef.current,
+      generation: stateChannelGenerationRef.current,
+      revision: stateRevisionRef.current,
+    };
     const next = await loadSnapshot();
-    if (
-      stateChannelIdRef.current === next.activeChannelId &&
-      next.revision < stateRevisionRef.current
-    )
-      return next;
-    stateChannelIdRef.current = next.activeChannelId;
+    if (!canAcceptChannelSnapshot(requested, {
+      channelId: stateChannelIdRef.current,
+      generation: stateChannelGenerationRef.current,
+      revision: stateRevisionRef.current,
+    }, next)) return snapshotRef.current;
     stateRevisionRef.current = next.revision;
+    snapshotRef.current = next;
     setSnapshot(next);
     return next;
   }, []);
@@ -358,6 +382,13 @@ export default function App({
   const refreshQueue = useCallback(async () => {
     await refresh();
   }, [refresh]);
+
+  const reportOperatorError = useCallback(async (error: unknown, action: OperatorAction) => {
+    const { operatorFailureMessage } = await import("./lib/operator-feedback");
+    const message = operatorFailureMessage(error, action);
+    setNotice(message);
+    return message;
+  }, []);
 
   const updateSnapshotItem = useCallback((updated: UploadItem) => {
     setSnapshot((current) => ({
@@ -377,28 +408,6 @@ export default function App({
     setCrashRecovery(next.crashRecovery);
   }, []);
 
-  const handleWorkspaceKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLButtonElement>) => {
-      const currentIndex = workspaceTabs.findIndex(([id]) => id === activeTab);
-      let nextIndex: number | undefined;
-      if (event.key === "ArrowDown" || event.key === "ArrowRight")
-        nextIndex = (currentIndex + 1) % workspaceTabs.length;
-      else if (event.key === "ArrowUp" || event.key === "ArrowLeft")
-        nextIndex =
-          (currentIndex - 1 + workspaceTabs.length) % workspaceTabs.length;
-      else if (event.key === "Home") nextIndex = 0;
-      else if (event.key === "End") nextIndex = workspaceTabs.length - 1;
-      if (nextIndex === undefined) return;
-
-      event.preventDefault();
-      const nextTab = workspaceTabs[nextIndex][0];
-      setActiveTab(nextTab);
-      window.requestAnimationFrame(() => {
-        document.getElementById(`workspace-tab-button-${nextTab}`)?.focus();
-      });
-    },
-    [activeTab],
-  );
 
   const logDedupeActivity = useCallback(
     (state: DedupeActivityState, message: string) => {
@@ -529,12 +538,7 @@ export default function App({
         );
       } catch (error) {
         if (runId !== preflightRunId.current) return;
-        setNotice(
-          operatorErrorMessage(
-            error,
-            "The selected files could not be checked for duplicates.",
-          ),
-        );
+        await reportOperatorError(error, "preflight");
       } finally {
         if (runId === preflightRunId.current) setPreflightBusy(false);
       }
@@ -545,10 +549,11 @@ export default function App({
   const loadFinalPreflightResult = useCallback(async (jobId: string) => {
     if (finalizedPreflightJobs.current.has(jobId)) return;
     finalizedPreflightJobs.current.add(jobId);
+    const generation = stateChannelGenerationRef.current;
     try {
       const scan = await loadPreflightDuplicateScan(jobId);
-      if (scan.id !== jobId) return;
-      setPreflightScan(scan);
+      if (scan.id !== jobId || generation !== stateChannelGenerationRef.current) return;
+      setPreflightScan((current) => current?.id === jobId ? scan : current);
       setPreflightFileCount(
         Math.max(0, scan.totalFiles - scan.completedFiles),
       );
@@ -574,6 +579,7 @@ export default function App({
   ) => {
     const current = preflightScan;
     if (!current) return;
+    const runId = preflightRunId.current;
     const size = 48;
     const scan = await loadPreflightDuplicateScan(current.id, {
       fileOffset: kind === "files" ? (page - 1) * size : current.fileOffset ?? 0,
@@ -582,7 +588,8 @@ export default function App({
         kind === "activity" ? (page - 1) * size : current.activityOffset ?? 0,
       activityLimit: size,
     });
-    setPreflightScan(scan);
+    if (runId !== preflightRunId.current || scan.id !== current.id) return;
+    setPreflightScan((latest) => latest?.id === current.id ? scan : latest);
   }, [preflightScan]);
 
   const deleteLocalDuplicate = useCallback(
@@ -598,7 +605,7 @@ export default function App({
             },
         );
         setNotice(
-          `Deleted “${confirmation}” from this device. Its managed upload copy and YouTube videos were not changed.`,
+          `Deleted “${confirmation}” from this device. YouTube videos were not changed.`,
         );
       } finally {
         setPreflightBusy(false);
@@ -621,13 +628,17 @@ export default function App({
 
   const cancelPreflight = useCallback(async () => {
     if (!preflightScan || preflightScan.status === "complete") return;
-    await cancelPreflightDuplicateScan(preflightScan.id);
-    setPreflightScan(
-      (current) => current && { ...current, status: "cancelled" },
-    );
-    setNotice(
-      "The pre-ingest duplicate job was cancelled. No selected file was ingested or uploaded.",
-    );
+    try {
+      await cancelPreflightDuplicateScan(preflightScan.id);
+      setPreflightScan(
+        (current) => current?.id === preflightScan.id ? { ...current, status: "cancelled" } : current,
+      );
+      setNotice(
+        "The pre-ingest duplicate job was cancelled. No selected file was ingested or uploaded.",
+      );
+    } catch (error) {
+      await reportOperatorError(error, "cancelPreflight");
+    }
   }, [preflightScan]);
 
   const clearUploads = useCallback(async () => {
@@ -638,6 +649,8 @@ export default function App({
       setNotice(
         `${cleared} local upload job${cleared === 1 ? " was" : "s were"} removed from this queue. Local records, BLAKE3 hashes, and original files were retained.`,
       );
+    } catch (error) {
+      await reportOperatorError(error, "clearQueue");
     } finally {
       setBusy(false);
     }
@@ -648,7 +661,9 @@ export default function App({
     try {
       await cancelUploadItem(item.id);
       await refresh();
-      setNotice(`Removed “${item.title}” from the upload queue. Media was retained.`);
+      setNotice(`Removed “${item.title}” from the upload queue. Its original file was retained.`);
+    } catch (error) {
+      await reportOperatorError(error, "cancelUpload");
     } finally {
       setBusy(false);
     }
@@ -657,6 +672,7 @@ export default function App({
   const importVideos = useCallback(
     async (paths: string[], settings: ManualUploadSettings) => {
       setBusy(true);
+      setNotice(`Checking ${paths.length} original video${pluralS(paths.length)} for the saved queue. Keep them available and unchanged until upload or recovery completes.`);
       try {
         const receipt = await importAndQueueBatch(paths, settings);
         await refresh();
@@ -671,15 +687,15 @@ export default function App({
         }
         if (receipt.detail) {
           setNotice(
-            `${receipt.importedCount} video${pluralS(receipt.importedCount)} safely imported to this device. ${receipt.detail}`,
+            `${receipt.importedCount} original video${pluralS(receipt.importedCount)} added to the saved queue. ${receipt.detail}`,
           );
           return;
         }
         const importNotice = receipt.duplicateCount > 0
-          ? `${receipt.importedCount} video${pluralS(receipt.importedCount)} imported locally. ${receipt.duplicateCount} light duplicate match${receipt.duplicateCount === 1 ? " needs" : "es need"} your decision.`
+          ? `${receipt.importedCount} original video${pluralS(receipt.importedCount)} saved as source references. ${receipt.duplicateCount} light duplicate match${receipt.duplicateCount === 1 ? " needs" : "es need"} your decision.`
           : receipt.queuedCount > 0
-            ? `${receipt.importedCount} video${pluralS(receipt.importedCount)} imported and ${receipt.queuedCount} queued locally.`
-            : `${receipt.importedCount} video${pluralS(receipt.importedCount)} safely imported to this device. Connect YouTube to start uploading them.`;
+            ? `${receipt.importedCount} original video${pluralS(receipt.importedCount)} saved as source references and ${receipt.queuedCount} queued.`
+            : `${receipt.importedCount} original video${pluralS(receipt.importedCount)} saved as source references. Connect YouTube to start uploading them.`;
         const firstFailure = receipt.items.find(
           (item) => item.status === "failed",
         )?.detail;
@@ -689,6 +705,8 @@ export default function App({
         setNotice(
           `${importNotice}${receipt.queuedCount > 0 ? " Uploads start automatically when capacity is available." : ""}${failuresNotice}`.trim(),
         );
+      } catch (error) {
+        await reportOperatorError(error, "import");
       } finally {
         setBusy(false);
       }
@@ -771,12 +789,16 @@ export default function App({
   const addVideo = useCallback(async () => {
     if (!isTauri) {
       setNotice(
-        "Run this screen through Tauri to import a file into the managed local workspace.",
+        "Run this screen through Tauri to select original files for the saved upload queue.",
       );
       return;
     }
-    const { selectVideoFiles } = await import("./lib/video-picker");
-    reviewImport(await selectVideoFiles());
+    try {
+      const { selectVideoFiles } = await import("./lib/video-picker");
+      reviewImport(await selectVideoFiles());
+    } catch (error) {
+      await reportOperatorError(error, "videoPicker");
+    }
   }, [reviewImport]);
 
   const queue = useCallback(async (item: UploadItem) => {
@@ -795,6 +817,8 @@ export default function App({
       setNotice(
         `${updated.fileName} is queued and will start automatically when capacity is available.`,
       );
+    } catch (error) {
+      await reportOperatorError(error, "queue");
     } finally {
       setBusy(false);
     }
@@ -805,8 +829,12 @@ export default function App({
       setNotice("Run this screen through Tauri to check files before ingest.");
       return;
     }
-    const { selectPreflightFiles } = await import("./lib/video-picker");
-    void runPreflightDuplicateCheck(await selectPreflightFiles(), mode);
+    try {
+      const { selectPreflightFiles } = await import("./lib/video-picker");
+      await runPreflightDuplicateCheck(await selectPreflightFiles(), mode);
+    } catch (error) {
+      await reportOperatorError(error, "preflightPicker");
+    }
   }, [runPreflightDuplicateCheck]);
 
   const resolveTitleDuplicates = useCallback(async (
@@ -825,9 +853,7 @@ export default function App({
           : `${resolved.length} duplicate video${resolved.length === 1 ? " was" : "s were"} skipped. The local files were not changed.`,
       );
     } catch (error) {
-      setNotice(
-        operatorErrorMessage(error, "The duplicate decision could not be saved."),
-      );
+      await reportOperatorError(error, "duplicateDecision");
       await refresh();
     } finally {
       setBusy(false);
@@ -844,9 +870,7 @@ export default function App({
       updateSnapshotItem(updated);
       setNotice(`${updated.fileName} will upload as ${visibility}.`);
     } catch (error) {
-      setNotice(
-        operatorErrorMessage(error, "The upload visibility could not be changed."),
-      );
+      await reportOperatorError(error, "visibility");
     } finally {
       setBusy(false);
     }
@@ -865,13 +889,11 @@ export default function App({
       updateSnapshotItem(updated);
       setNotice(
         deleteSourceAfterUpload
-          ? `${updated.fileName} will delete its original source only after YouTube confirms the upload.`
+          ? `${updated.fileName} will delete its original source only after YouTube processing succeeds.`
           : `${updated.fileName} will retain its original source after upload.`,
       );
     } catch (error) {
-      setNotice(
-        operatorErrorMessage(error, "The source cleanup choice could not be saved."),
-      );
+      await reportOperatorError(error, "cleanupChoice");
     } finally {
       setBusy(false);
     }
@@ -886,12 +908,10 @@ export default function App({
       await deleteUploadedSource(item.id, confirmation);
       await refresh();
       setNotice(
-        `Original source cleanup completed for “${item.fileName}”. The managed app copy and YouTube video were retained.`,
+        `Original source cleanup completed for “${item.fileName}”. The YouTube video was retained.`,
       );
     } catch (error) {
-      setNotice(
-        operatorErrorMessage(error, "The original source could not be deleted."),
-      );
+      await reportOperatorError(error, "cleanupOriginal");
     } finally {
       setBusy(false);
     }
@@ -899,6 +919,7 @@ export default function App({
 
   const refreshYouTubeLibrary = async () => {
     const channel = snapshot.activeChannel;
+    const generation = stateChannelGenerationRef.current;
     if (!channel) {
       setNotice("Connect a YouTube channel before refreshing its library.");
       return;
@@ -907,20 +928,20 @@ export default function App({
     setNotice(`Refreshing ${channel}'s YouTube library…`);
     try {
       const synced = await syncChannelInventory();
+      if (generation !== stateChannelGenerationRef.current) return;
       const started = await resumeQueuedUploads();
+      if (generation !== stateChannelGenerationRef.current) return;
       await refresh();
-      updateConnection(await loadConnectionSettings());
+      if (generation !== stateChannelGenerationRef.current) return;
+      const nextConnection = await loadConnectionSettings();
+      if (generation !== stateChannelGenerationRef.current) return;
+      updateConnection(nextConnection);
       setLibraryRefreshVersion((version) => version + 1);
       setNotice(
         `Library refreshed: ${synced} YouTube video${pluralS(synced)} saved locally for ${channel}.${started > 0 ? ` ${started} queued upload${pluralS(started)} started.` : " Automatic upload dispatch was checked."}`,
       );
     } catch (error) {
-      setNotice(
-        operatorErrorMessage(
-          error,
-          "The YouTube library could not be refreshed. Your last complete local library was kept.",
-        ),
-      );
+      await reportOperatorError(error, "library");
     } finally {
       setBusy(false);
     }
@@ -928,6 +949,7 @@ export default function App({
 
   const runDedupe = async () => {
     const channel = snapshot.activeChannel;
+    const generation = stateChannelGenerationRef.current;
     if (!channel) {
       setNotice(
         "Connect a YouTube channel before running duplicate detection.",
@@ -946,6 +968,7 @@ export default function App({
     setNotice(`Checking ${channel}'s uploaded-video titles for duplicates…`);
     try {
       const synced = await syncChannelInventory();
+      if (generation !== stateChannelGenerationRef.current) return;
       logDedupeActivity(
         "success",
         `Synced ${synced} uploaded video${pluralS(synced)} into this device's channel inventory.`,
@@ -956,6 +979,7 @@ export default function App({
         "Rebuilding normalized exact-title and numbered-copy candidates locally…",
       );
       const refreshed = await refresh();
+      if (generation !== stateChannelGenerationRef.current) return;
       const candidateCount = refreshed.duplicates.length;
       logDedupeActivity(
         "success",
@@ -966,10 +990,8 @@ export default function App({
         `Dedupe complete for ${channel}: ${synced} uploaded video${pluralS(synced)} checked and ${candidateCount} candidate${pluralS(candidateCount)} ready for review.`,
       );
     } catch (error) {
-      const message = operatorErrorMessage(
-        error,
-        "The YouTube library could not be synchronized.",
-      );
+      if (generation !== stateChannelGenerationRef.current) return;
+      const message = await reportOperatorError(error, "dedupe");
       setDedupePhase("error");
       logDedupeActivity("error", `Dedupe stopped: ${message}`);
       setNotice(`Dedupe could not run: ${message}`);
@@ -988,12 +1010,7 @@ export default function App({
         "This potential match is ignored on this device. Re-audit ignored matches restores it for review.",
       );
     } catch (error) {
-      setNotice(
-        operatorErrorMessage(
-          error,
-          "The duplicate review decision could not be saved.",
-        ),
-      );
+      await reportOperatorError(error, "ignoreDuplicate");
     } finally {
       setBusy(false);
     }
@@ -1016,9 +1033,7 @@ export default function App({
         );
       }
     } catch (error) {
-      setNotice(
-        operatorErrorMessage(error, "Ignored duplicate matches could not be restored."),
-      );
+      await reportOperatorError(error, "reAudit");
     } finally {
       setBusy(false);
     }
@@ -1085,159 +1100,43 @@ export default function App({
           />
         </Suspense>
       )}
-      <header className={topbarClass}>
-        <div className={brandLockupClass}>
-          <img className="ui-brand-mark" src="/favicon.svg" alt="" />
-          <div>
-            <p className={eyebrowClass}>UPLOAD WORKSPACE</p>
-            <h1 className={titleClass}>YouTube Upload Manager</h1>
-            <p className={subtleClass}>
-              {snapshot.activeChannel
-                ? `Active channel: ${snapshot.activeChannel}`
-                : "Your files stay on this device until you start an upload."}
-            </p>
-          </div>
-        </div>
-        <div className="flex flex-wrap justify-end gap-2">
-          <button
-            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} appearance`}
-            aria-pressed={theme === "dark"}
-            className={`${secondaryButtonClass} min-h-9`}
-            onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}
-            title={`Switch to ${theme === "dark" ? "light" : "dark"} appearance`}
-            type="button"
-          >
-            {theme === "dark" ? "Light mode" : "Dark mode"}
-          </button>
-          <button
-            aria-label="Refresh library"
-            className={`${secondaryButtonClass} inline-flex size-9 items-center justify-center p-0`}
-            disabled={!snapshot.activeChannel || busy}
-            onClick={() => void refreshYouTubeLibrary()}
-            title="Refresh library"
-            type="button"
-          >
-            <Suspense fallback={null}>
-              <AppActionIcon name="refresh" />
-            </Suspense>
-          </button>
-          <button
-            className={primaryButtonClass}
-            disabled={busy}
-            onClick={() => void addVideo()}
-          >
-            Import videos
-          </button>
-        </div>
-      </header>
+      <Suspense fallback={<WorkspacePending />}>
+        <WorkspaceHeader channel={snapshot.activeChannel} dark={theme === "dark"} busy={busy}
+          onTheme={() => setTheme((current) => current === "dark" ? "light" : "dark")}
+          onRefresh={() => void refreshYouTubeLibrary()} onImport={() => void addVideo()} />
+      </Suspense>
 
       <p className="ui-notice" role="status">
         <span aria-hidden="true" className="ui-notice-dot" />
         {notice}
       </p>
-      {connectionSettings &&
-        !connectionSettings.oauthConfigured &&
-        !setupDismissed && (
-          <>
-            <div aria-hidden="true" className="ui-backdrop z-[19]" />
-            <Suspense fallback={<WorkspacePending />}>
-              <GoogleSetupWizard
-                onOpenConnectedAccount={() => {
-                  setSetupDismissed(true);
-                  setActiveTab("account");
-                  setNotice(
-                    "Import your Desktop OAuth JSON from Connected account, then connect YouTube when you are ready.",
-                  );
-                }}
-                onDismiss={() => setSetupDismissed(true)}
-              />
-            </Suspense>
-          </>
-        )}
-      {exitConfirmationOpen && (
-        <>
-          <div aria-hidden="true" className="ui-backdrop z-[29]" />
-          <section
-            aria-labelledby="exit-confirmation-heading"
-            aria-modal="true"
-            className="ui-exit-dialog"
-            role="dialog"
-          >
-            <p className={eyebrowClass}>EXIT APPLICATION</p>
-            <h2 className="ui-card-heading" id="exit-confirmation-heading">Exit YouTube Upload Manager?</h2>
-            <p className="ui-modal-copy">
-              Your queue and duplicate-review progress are saved locally. Any
-              active upload will be recovered when you open the app again.
-            </p>
-            <div className="ui-modal-actions">
-              <button
-                autoFocus
-                className={secondaryButtonClass}
-                onClick={() => setExitConfirmationOpen(false)}
-                type="button"
-              >
-                Keep app open
-              </button>
-              <button className="ui-danger-button" onClick={() => void confirmExit()} type="button">
-                Exit app
-              </button>
-            </div>
-          </section>
-        </>
-      )}
-      {pendingImportPaths && (
-        <>
-          <div aria-hidden="true" className="ui-backdrop z-[9] bg-slate-950/30" />
-          <Suspense fallback={<WorkspacePending />}>
-            <UploadIntakeReview
-              paths={pendingImportPaths}
-              onCancel={() => setPendingImportPaths(undefined)}
-              onConfirm={(settings) => {
-                const paths = pendingImportPaths;
-                setPendingImportPaths(undefined);
-                void importVideos(paths, settings);
-              }}
-            />
-          </Suspense>
-        </>
+      {(exitConfirmationOpen || pendingImportPaths || (connectionSettings && !connectionSettings.oauthConfigured && !setupDismissed)) && (
+        <Suspense fallback={<WorkspacePending />}>
+          <AppDialogs
+            setupOpen={Boolean(connectionSettings && !connectionSettings.oauthConfigured && !setupDismissed)}
+            exitOpen={exitConfirmationOpen}
+            importPaths={pendingImportPaths}
+            onOpenAccount={() => { setSetupDismissed(true); setActiveTab("account"); }}
+            onDismissSetup={() => setSetupDismissed(true)}
+            onKeepOpen={() => setExitConfirmationOpen(false)}
+            onExit={() => void confirmExit()}
+            onCancelImport={() => setPendingImportPaths(undefined)}
+            onConfirmImport={(settings) => {
+              const paths = pendingImportPaths;
+              setPendingImportPaths(undefined);
+              if (paths) void importVideos(paths, settings);
+            }}
+          />
+        </Suspense>
       )}
       {!isTauri && (
-        <p className="ui-warning">
-          Browser preview mode: managed local file import is available only in
-          the signed Tauri app.
-        </p>
+        <Suspense fallback={null}><BrowserPreviewNotice /></Suspense>
       )}
 
       <div className="ui-workspace-layout">
-        <nav
-          aria-label="Workspace sections"
-          className="ui-sidebar"
-          role="tablist"
-        >
-          <span className="ui-sidebar-label">Workspace</span>
-          {workspaceTabs.map(([id, label]) => (
-            <button
-              aria-controls={`workspace-tab-${id}`}
-              aria-selected={activeTab === id}
-              className={`ui-sidebar-tab ${activeTab === id ? "ui-sidebar-tab-active" : ""}`}
-              id={`workspace-tab-button-${id}`}
-              key={id}
-              onClick={() => setActiveTab(id)}
-              onKeyDown={handleWorkspaceKeyDown}
-              role="tab"
-              tabIndex={activeTab === id ? 0 : -1}
-              type="button"
-            >
-              {label}
-              {id === "dedupe" && dedupeBusy && (
-                <span
-                  className="size-1.5 animate-pulse rounded-full bg-current"
-                  aria-label="Duplicate detection in progress"
-                />
-              )}
-            </button>
-          ))}
-        </nav>
+        <Suspense fallback={<WorkspacePending />}>
+          <WorkspaceNavigation active={activeTab} dedupeBusy={dedupeBusy} onSelect={setActiveTab} />
+        </Suspense>
         <div className="min-w-0">
           <Suspense
             fallback={
@@ -1276,8 +1175,9 @@ export default function App({
                   <p className={eyebrowClass}>PERSISTENT QUEUE</p>
                   <h2 className="ui-card-heading" id="queue-heading">Your upload queue</h2>
                   <p className="ui-section-copy">
-                    Every import and upload state is saved locally, so
-                    interrupted work can continue where it stopped.
+                    Queue and session state are saved locally without making
+                    another video file. Recovery requires each original to stay
+                    available and unchanged until its upload completes.
                   </p>
                 </div>
                 <Suspense fallback={<span className="ui-queue-count">{snapshot.items.length} saved item{snapshot.items.length === 1 ? "" : "s"}</span>}>
@@ -1286,27 +1186,7 @@ export default function App({
               </div>
               <UploadProgressSummary items={snapshot.items} />
               <ManualUploadDefaultsPanel />
-              <div
-                className={`ui-drop-zone ${dropActive ? "border-brand bg-blue-50" : ""}`}
-              >
-                <div className="ui-drop-copy">
-                  <strong>Drag and drop videos here</strong>
-                  <p className="ui-drop-description">
-                    The app keeps a verified reference to each original file;
-                    it does not make a managed copy before upload. Files over
-                    YouTube’s 256 GB or 12-hour limits are stopped before they
-                    are added. You can also choose multiple files.
-                  </p>
-                </div>
-                <button
-                  className={secondaryButtonClass}
-                  disabled={busy}
-                  onClick={() => void addVideo()}
-                  type="button"
-                >
-                  Choose videos
-                </button>
-              </div>
+              <BatchImportArea active={dropActive} busy={busy} onChoose={() => void addVideo()} />
               <QueueTable
                 items={snapshot.items}
                 busy={busy}
@@ -1413,13 +1293,14 @@ export default function App({
           {activeTab === "rename" && (
             <VideoTitleRename
               activeChannel={snapshot.activeChannel}
+              activeChannelId={snapshot.activeChannelId}
               onNotice={setNotice}
               refreshVersion={libraryRefreshVersion}
             />
           )}
 
           {activeTab === "playlists" && (
-            <PlaylistManager activeChannel={snapshot.activeChannel} onNotice={setNotice} refreshVersion={libraryRefreshVersion} />
+            <PlaylistManager activeChannel={snapshot.activeChannel} activeChannelId={snapshot.activeChannelId} onNotice={setNotice} refreshVersion={libraryRefreshVersion} />
           )}
 
           {activeTab === "transfer" && (
@@ -1441,12 +1322,7 @@ export default function App({
         </div>
       </div>
 
-      <footer className="ui-disclaimer">
-        YouTube Upload Manager is an independent project and is not affiliated
-        with, endorsed by, sponsored by, or provided by Google or YouTube.
-        Google and YouTube are trademarks of Google LLC; all other names, logos,
-        and trademarks belong to their respective owners.
-      </footer>
+      <Suspense fallback={null}><WorkspaceFooter /></Suspense>
     </main>
   );
 }

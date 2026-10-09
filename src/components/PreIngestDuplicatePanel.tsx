@@ -605,7 +605,7 @@ export function PreIngestDuplicatePanel({
                     </p>
                   </section>
                   <section>
-                    <span>Saved local copy</span>
+                    <span>Saved local item</span>
                     {file.localMatches.map((match) => (
                       <div key={`${match.fileName}-${match.status}`}>
                         <strong>{match.fileName}</strong>
@@ -747,8 +747,8 @@ export function PreIngestDuplicatePanel({
             Delete “{deleteTarget.file.fileName}” from this device
           </h3>
           <p>
-            This deletes only the dropped desktop source file. The matching
-            managed upload copy and any YouTube video stay unchanged. {deleteTarget.reviewMode === "light"
+            This deletes only the selected original file. Any YouTube video stays
+            unchanged. Keep originals needed by unfinished uploads available. {deleteTarget.reviewMode === "light"
               ? "It uses the accepted light filename or title match and does not read the whole file for a deep review."
               : "It reuses the accepted deep duplicate review and checks the final staged-file content before removal."} The native app always keeps the no-follow path, managed-workspace, staging, and typed-confirmation safeguards.
           </p>

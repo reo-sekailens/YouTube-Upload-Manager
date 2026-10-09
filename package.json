@@ -11,6 +11,7 @@
     "check:tailwind-ui": "node scripts/check-tailwind-ui.mjs",
     "test": "vitest run",
     "test:ffprobe": "node --test scripts/prepare-ffprobe.tests.mjs",
+    "test:operations": "node --test scripts/prepare-ffprobe.tests.mjs scripts/performance/native-budget-check.tests.mjs",
     "performance:frontend": "npm run build && node scripts/performance/frontend-baseline.mjs",
     "performance:frontend:check": "npm run build && node scripts/performance/frontend-baseline.mjs --check",
     "performance:package:windows": "node scripts/performance/build-windows-harness.mjs",

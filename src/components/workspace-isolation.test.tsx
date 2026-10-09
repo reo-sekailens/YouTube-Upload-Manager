@@ -22,7 +22,8 @@ const readyStartup: StartupBootstrap = {
 };
 
 describe("workspace render isolation", () => {
-  it("renders the Batch workspace without mounting any inactive tab panel", () => {
+  it("renders the Batch workspace without mounting any inactive tab panel", async () => {
+    await prefetchBatchWorkspace();
     const markup = renderToStaticMarkup(<App initialStartup={readyStartup} />);
 
     expect(markup).toContain('id="workspace-tab-batch"');

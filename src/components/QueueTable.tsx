@@ -1,7 +1,14 @@
-import { useDeferredValue, useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { Trash2, X } from "lucide-react";
 import type { UploadItem, UploadVisibility } from "../lib/types";
 import { windowItems } from "../lib/list-windowing";
+import {
+  filterQueueItems,
+  formatQueueSize,
+  matchesQueueStatus,
+  queueStatusFilters,
+} from "../lib/queue-presentation";
+import type { QueueStatusFilter } from "../lib/queue-presentation";
 import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
 import { PaginationControls } from "./PaginationControls";
 import { StatusPill } from "./StatusPill";
@@ -23,13 +30,8 @@ const dangerButtonClass =
 const dataCellClass =
   "bg-[#fbfcff] px-3 py-3 text-[0.81rem] align-middle text-[#4d5a70] border-y border-[#dfe6f2] first:rounded-l-lg first:border-l last:rounded-r-lg last:border-r max-sm:block max-sm:w-full max-sm:border-0 max-sm:bg-transparent max-sm:px-0 max-sm:py-1 max-sm:before:mb-1 max-sm:before:inline-block max-sm:before:text-[0.62rem] max-sm:before:font-bold max-sm:before:tracking-[0.07em] max-sm:before:text-[#7b8799] max-sm:before:uppercase max-sm:before:content-[attr(data-label)]";
 
-function formatSize(bytes: number) {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 * 1024 ? 0 : 1)} GB`;
-}
-
 function formatEta(item: UploadItem) {
-  if (!item.transferBytesPerSecond || item.transferBytesPerSecond <= 0)
+  if (!item.transferBytesPerSecond || !Number.isFinite(item.transferBytesPerSecond) || item.transferBytesPerSecond <= 0)
     return "ETA calculating";
   const seconds = Math.ceil(
     Math.max(0, item.totalBytes - item.confirmedBytes) /
@@ -75,23 +77,49 @@ export function QueueTable({
     "",
   );
   const deferredTitleQuery = useDeferredValue(titleQuery);
+  const [statusFilter, setStatusFilter] = useRetainedWorkspaceState<QueueStatusFilter>(
+    "batch.queue-status-filter",
+    "all",
+  );
   const [page, setPage] = useRetainedWorkspaceState("batch.queue-page", 1);
   const [pendingSourceDelete, setPendingSourceDelete] = useState<UploadItem>();
   const [sourceDeleteConfirmation, setSourceDeleteConfirmation] = useState("");
+  const sourceDeleteTrigger = useRef<HTMLButtonElement | null>(null);
 
-  const matchingItems = useMemo(() => {
-    const normalizedQuery = deferredTitleQuery.trim().toLocaleLowerCase();
-    return normalizedQuery
-      ? items.filter((item) => item.title.toLocaleLowerCase().includes(normalizedQuery))
-      : items;
-  }, [deferredTitleQuery, items]);
+  const closeSourceDelete = () => {
+    setPendingSourceDelete(undefined);
+    setSourceDeleteConfirmation("");
+    sourceDeleteTrigger.current?.focus();
+  };
+  const resetFilters = () => {
+    setTitleQuery("");
+    setStatusFilter("all");
+    setPage(1);
+  };
+
+  const matchingItems = useMemo(
+    () => filterQueueItems(items, deferredTitleQuery, statusFilter),
+    [deferredTitleQuery, items, statusFilter],
+  );
+  const statusCounts = useMemo(
+    () => Object.fromEntries(queueStatusFilters.map(({ id }) => [
+      id,
+      items.filter((item) => matchesQueueStatus(item.status, id)).length,
+    ])) as Record<QueueStatusFilter, number>,
+    [items],
+  );
   const visibleItems = useMemo(
     () => windowItems(matchingItems, page),
     [matchingItems, page],
   );
 
   if (items.length === 0) {
-    return <p className="m-0 pt-6 pb-1 text-[0.84rem] leading-relaxed text-[#758196]">Your upload queue is empty.</p>;
+    return (
+      <div className="grid gap-1.5 py-6 text-[0.84rem] leading-relaxed" role="status">
+        <strong className="font-semibold text-[#344a67]">Your upload queue is empty.</strong>
+        <p className="m-0 max-w-xl text-[#5f6c80]">Choose videos above or drag them into the upload area. Review their settings to add them to this device’s saved queue.</p>
+      </div>
+    );
   }
 
   return (
@@ -101,28 +129,29 @@ export function QueueTable({
       data-queue-table
     >
       {pendingSourceDelete && (
-        <div className="mb-3 grid max-w-xl gap-2.5 rounded-lg border border-[#edc7c3] bg-white p-3.5 shadow-[0_12px_32px_rgba(35,49,72,0.16)]" role="dialog" aria-modal="true" aria-labelledby="source-cleanup-heading">
+        <section className="mb-4 grid max-w-xl gap-2.5 rounded-lg border border-[#edc7c3] bg-white p-3.5" aria-labelledby="source-cleanup-heading" onKeyDown={(event) => { if (event.key === "Escape") closeSourceDelete(); }}>
           <h3 className="m-0 text-[0.95rem] text-[#8d3932]" id="source-cleanup-heading">Delete the original file?</h3>
-          <p className="m-0 text-[0.75rem] leading-relaxed text-[#5f6c80]">YouTube processing must be verified before the app can delete this file. The managed app copy and the YouTube video will remain.</p>
+          <p className="m-0 text-[0.75rem] leading-relaxed text-[#5f6c80]">YouTube processing must be verified before the app can delete this file. The YouTube video will remain.</p>
           <p className="m-0 text-[0.75rem] leading-relaxed text-[#5f6c80]">Type <strong>{pendingSourceDelete.fileName}</strong> to permanently delete only its original external file.</p>
           <input
-            className="rounded-md border border-[#ccd6e4] px-2.5 py-2"
+            className="min-w-0 rounded-md border border-[#ccd6e4] px-2.5 py-2 focus:border-[#2463df] focus:outline-3 focus:outline-[#2d68e824]"
             aria-label="Exact original filename"
+            autoFocus
             onChange={(event) => setSourceDeleteConfirmation(event.target.value)}
             placeholder={pendingSourceDelete.fileName}
             value={sourceDeleteConfirmation}
           />
           <div className="flex flex-wrap justify-end gap-2">
-            <button className={secondaryButtonClass} onClick={() => { setPendingSourceDelete(undefined); setSourceDeleteConfirmation(""); }} type="button">Keep original</button>
-            <button className={dangerButtonClass} disabled={busy || sourceDeleteConfirmation.trim() !== pendingSourceDelete.fileName} onClick={() => { onDeleteUploadedSource(pendingSourceDelete, sourceDeleteConfirmation); setPendingSourceDelete(undefined); setSourceDeleteConfirmation(""); }} type="button">Delete original</button>
+            <button className={secondaryButtonClass} onClick={closeSourceDelete} type="button">Keep original</button>
+            <button className={dangerButtonClass} disabled={busy || sourceDeleteConfirmation.trim() !== pendingSourceDelete.fileName} onClick={() => { onDeleteUploadedSource(pendingSourceDelete, sourceDeleteConfirmation); closeSourceDelete(); }} type="button">Delete original</button>
           </div>
-        </div>
+        </section>
       )}
       <div className="mb-3 grid gap-1.5 text-[0.74rem] font-bold text-[#465775]">
         <label htmlFor="upload-queue-title-search">Search video titles</label>
         <div className="flex flex-wrap items-center gap-2">
           <input
-            className="min-w-[16rem] max-w-xl flex-1 rounded-md border border-[#cbd5e3] bg-white px-2.5 py-2 font-medium text-[#27344a] focus:border-[#2463df] focus:outline-3 focus:outline-[#2d68e824]"
+            className="min-w-0 max-w-xl flex-1 rounded-md border border-[#cbd5e3] bg-white px-2.5 py-2 font-medium text-[#27344a] focus:border-[#2463df] focus:outline-3 focus:outline-[#2d68e824]"
             aria-busy={titleQuery !== deferredTitleQuery}
             id="upload-queue-title-search"
             onChange={(event) => { setTitleQuery(event.target.value); setPage(1); }}
@@ -130,10 +159,24 @@ export function QueueTable({
             type="search"
             value={titleQuery}
           />
-          {titleQuery ? <button aria-label="Clear search" className={`${secondaryButtonClass} inline-flex size-8 items-center justify-center p-0`} onClick={() => setTitleQuery("")} title="Clear search" type="button"><X aria-hidden="true" size={15} strokeWidth={2.25} /></button> : null}
+          {titleQuery ? <button aria-label="Clear search" className={`${secondaryButtonClass} inline-flex size-9 shrink-0 items-center justify-center p-0`} onClick={() => { setTitleQuery(""); setPage(1); }} title="Clear search" type="button"><X aria-hidden="true" size={15} strokeWidth={2.25} /></button> : null}
         </div>
       </div>
-      <table className="w-full min-w-[860px] border-separate border-spacing-y-2.5 max-sm:min-w-0 max-sm:[&_tbody]:block max-sm:[&_tr]:block max-sm:[&_tr]:w-full max-sm:[&_tr]:border-b max-sm:[&_tr]:border-[#e4e8ee] max-sm:[&_tr]:py-3 max-sm:[&_thead]:hidden" >
+      <div aria-label="Filter queue by upload status" className="mb-2 flex flex-wrap gap-2" role="group">
+        {queueStatusFilters.map(({ id, label }) => (
+          <button
+            aria-pressed={statusFilter === id}
+            className={`${secondaryButtonClass} min-h-9 aria-pressed:border-[#2463df] aria-pressed:bg-[#eef4ff] aria-pressed:text-[#1c4e91]`}
+            key={id}
+            onClick={() => { setStatusFilter(id); setPage(1); }}
+            type="button"
+          >
+            {label} <span className="ml-1 tabular-nums">{statusCounts[id]}</span>
+          </button>
+        ))}
+      </div>
+      <p aria-live="polite" className="m-0 text-[0.72rem] leading-relaxed text-[#5f6c80]">{matchingItems.length} of {items.length} saved video{items.length === 1 ? "" : "s"}{titleQuery !== deferredTitleQuery ? " · Updating search…" : ""}</p>
+      <table aria-label="Saved upload queue" className="w-full min-w-[860px] border-separate border-spacing-y-2.5 max-sm:min-w-0 max-sm:[&_tbody]:block max-sm:[&_tr]:block max-sm:[&_tr]:w-full max-sm:[&_tr]:border-b max-sm:[&_tr]:border-[#e4e8ee] max-sm:[&_tr]:py-3 max-sm:[&_thead]:hidden" >
         <thead>
           <tr>
             <th className="w-1/4 border-b border-[#dfe4eb] px-2.5 pb-2 text-left text-[0.65rem] font-[740] tracking-[0.08em] text-[#7a8799] uppercase" scope="col">Video</th>
@@ -152,8 +195,8 @@ export function QueueTable({
               <tr className="max-sm:block max-sm:w-full" data-queue-record key={item.id}>
                 <td className={dataCellClass} data-label="Video">
                   <div>
-                    <strong className="mb-0.5 block overflow-wrap-anywhere font-[680] text-[#28354d]">{item.title}</strong>
-                    <span className="block text-[0.72rem] text-[#7b8799]">{item.fileName} · {formatSize(item.sizeBytes)}</span>
+                    <strong className="mb-0.5 block break-words font-[680] text-[#28354d]">{item.title}</strong>
+                    <span className="block break-all text-[0.72rem] text-[#5f6c80]">{item.fileName} · {formatQueueSize(item.sizeBytes)}</span>
                   </div>
                 </td>
                 <td className={dataCellClass} data-label="Visibility">
@@ -166,7 +209,7 @@ export function QueueTable({
                   <span className="mt-1 block text-[0.67rem] text-[#7b8799]">{item.status === "draft" || item.status === "failed" ? "Set before queueing" : "Locked for this upload"}</span>
                   <span className="mt-1 block text-[0.67rem] text-[#7b8799]">{item.madeForKids ? "Made for kids" : "Not made for kids"}{item.playlistTitle ? ` · ${item.playlistTitle}` : " · No playlist"}</span>
                   <label className="mt-2 flex items-start gap-1.5 text-[0.68rem] leading-snug text-[#4f6078] has-[:disabled]:opacity-55">
-                    <input className="mt-0.5 shrink-0 accent-[#2463df]" checked={item.deleteSourceAfterUpload} disabled={busy || !["draft", "failed"].includes(item.status)} onChange={(event) => onDeleteSourceAfterUploadChange(item, event.target.checked)} type="checkbox" />
+                    <input aria-label={`Automatically delete original for ${item.title} after YouTube processing succeeds`} className="mt-0.5 shrink-0 accent-[#2463df]" checked={Boolean(item.deleteSourceAfterUpload)} disabled={busy || !["draft", "failed"].includes(item.status)} onChange={(event) => onDeleteSourceAfterUploadChange(item, event.target.checked)} type="checkbox" />
                     Automatically delete original after YouTube processing succeeds
                   </label>
                   {item.sourceDeleteStatus ? <span className="mt-1 block text-[0.67rem] text-[#7b8799]">Original source: {sourceDeleteStatusLabel(item.sourceDeleteStatus)}</span> : null}
@@ -177,26 +220,64 @@ export function QueueTable({
                 </td>
                 <td className={dataCellClass} data-label="Transfer">
                   <div className="flex min-w-36 items-center gap-2">
-                    <div aria-label={`${progress}% uploaded`} aria-valuemax={100} aria-valuemin={0} aria-valuenow={progress} className="h-1.5 w-25 overflow-hidden rounded-full bg-[#e6eaf0]" role="progressbar">
+                    <div aria-label={`Upload progress for ${item.title}`} aria-valuemax={100} aria-valuemin={0} aria-valuenow={progress} className="h-1.5 w-25 overflow-hidden rounded-full bg-[#e6eaf0]" role="progressbar">
                       <div className="h-full rounded-[inherit] bg-[#2463df]" style={{ width: `${progress}%` }} />
                     </div>
                     <span className="block text-[0.72rem] text-[#66748a]">{progress}%</span>
                   </div>
                   {item.status === "uploading" ? <span className="mt-1 block text-[0.72rem] text-[#66748a]">{formatEta(item)}</span> : null}
-                  {item.detail ? <span className="mt-1 block max-w-xs text-[0.72rem] text-[#7b8799]">{item.detail}</span> : null}
+                  {item.detail ? <span className="mt-1 block max-w-xs break-words text-[0.72rem] text-[#5f6c80]">{item.detail}</span> : null}
                 </td>
                 <td className={dataCellClass} data-label="Status">
                   <div className="flex flex-col items-start gap-2">
                     <StatusPill status={item.status} />
                     <div className="flex flex-wrap justify-end gap-1.5 max-sm:mt-1 max-sm:justify-start">
-                      {item.status === "draft" ? <><button className={secondaryButtonClass} disabled={busy} onClick={() => onQueue(item)} type="button">Add to queue</button><button className={dangerButtonClass} disabled={busy} onClick={() => onCancel(item)} type="button">Remove</button></> : item.status === "uploaded" && !item.deleteSourceAfterUpload && !item.sourceDeleteStatus ? <button aria-label="Delete original file" className={`${dangerButtonClass} inline-flex size-8 items-center justify-center p-0`} disabled={busy} onClick={() => setPendingSourceDelete(item)} title="Delete original file" type="button"><Trash2 aria-hidden="true" size={15} strokeWidth={2.25} /></button> : ["queued", "dispatching", "uploading", "needs_reconciliation", "failed", "importing"].includes(item.status) ? <button className={dangerButtonClass} disabled={busy} onClick={() => onCancel(item)} type="button">{item.status === "uploading" ? "Cancel upload" : "Remove"}</button> : <span className="text-[0.72rem] leading-snug text-[#7b8799]">Receipt saved on this device</span>}
+                      {item.status === "draft" || item.status === "failed" ? (
+                        <>
+                          <button
+                            aria-label={`${item.status === "failed" ? "Retry upload" : "Add to queue"}: ${item.title}`}
+                            className={secondaryButtonClass}
+                            disabled={busy}
+                            onClick={() => onQueue(item)}
+                            type="button"
+                          >
+                            {item.status === "failed" ? "Retry upload" : "Add to queue"}
+                          </button>
+                          <button aria-label={`Remove from queue: ${item.title}`} className={dangerButtonClass} disabled={busy} onClick={() => onCancel(item)} type="button">Remove</button>
+                        </>
+                      ) : item.status === "uploaded" && !item.deleteSourceAfterUpload && !item.sourceDeleteStatus ? (
+                        <button
+                          aria-label={`Delete original file: ${item.fileName}`}
+                          className={`${dangerButtonClass} inline-flex size-9 items-center justify-center p-0`}
+                          disabled={busy}
+                          onClick={(event) => {
+                            sourceDeleteTrigger.current = event.currentTarget;
+                            setPendingSourceDelete(item);
+                            setSourceDeleteConfirmation("");
+                          }}
+                          title="Delete original file"
+                          type="button"
+                        >
+                          <Trash2 aria-hidden="true" size={15} strokeWidth={2.25} />
+                        </button>
+                      ) : ["queued", "dispatching", "uploading", "needs_reconciliation", "importing"].includes(item.status) ? (
+                        <button
+                          aria-label={`${item.status === "uploading" ? "Cancel upload" : "Remove from queue"}: ${item.title}`}
+                          className={dangerButtonClass}
+                          disabled={busy}
+                          onClick={() => onCancel(item)}
+                          type="button"
+                        >
+                          {item.status === "uploading" ? "Cancel upload" : "Remove"}
+                        </button>
+                      ) : <span className="text-[0.72rem] leading-snug text-[#7b8799]">Receipt saved on this device</span>}
                     </div>
                   </div>
                 </td>
               </tr>
             );
           })}
-          {matchingItems.length === 0 ? <tr className="max-sm:block"><td className="pt-1 pb-0 text-[0.84rem] leading-relaxed text-[#758196] max-sm:block" colSpan={5}>No video titles match “{titleQuery.trim()}”.</td></tr> : null}
+          {matchingItems.length === 0 ? <tr className="max-sm:block"><td className="pt-3 pb-2 text-[0.84rem] leading-relaxed text-[#5f6c80] max-sm:block" colSpan={5}><p className="m-0">{deferredTitleQuery.trim() ? <>No videos match “{deferredTitleQuery.trim()}”{statusFilter !== "all" ? ` in ${queueStatusFilters.find(({ id }) => id === statusFilter)?.label.toLowerCase()}` : ""}.</> : `No videos ${statusFilter === "active" ? "are currently in progress" : statusFilter === "attention" ? "need attention" : statusFilter === "ready" ? "are ready to queue" : statusFilter === "uploaded" ? "have been uploaded" : "are in this queue"}.`}</p><button className={`${secondaryButtonClass} mt-2`} onClick={resetFilters} type="button">Show all videos</button></td></tr> : null}
         </tbody>
       </table>
       <PaginationControls end={visibleItems.end} label="Upload queue" onPageChange={setPage} page={visibleItems.page} pageCount={visibleItems.pageCount} start={visibleItems.start} total={visibleItems.total} />

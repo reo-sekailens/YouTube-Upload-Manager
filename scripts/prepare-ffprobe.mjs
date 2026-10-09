@@ -17,6 +17,7 @@ import { pathToFileURL } from "node:url";
 export const FFMPEG_STATIC_RELEASE = "b6.1.1";
 export const PREPARATION_VERSION = 2;
 export const RECEIPT_FILENAME = ".ffprobe-provenance.json";
+export const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 const LICENSE_DIGESTS = {
   "win32-x64.LICENSE": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
@@ -179,9 +180,12 @@ export async function streamFileSha256(path) {
   return { digest: hash.digest("hex"), byteLength };
 }
 
-async function streamToFile(readable, path) {
+async function streamToFile(readable, path, signal) {
   const hash = createHash("sha256");
   let byteLength = 0;
+  const source = typeof readable.getReader === "function"
+    ? Readable.fromWeb(readable, { signal })
+    : readable;
   const verifier = new Transform({
     transform(chunk, _encoding, callback) {
       hash.update(chunk);
@@ -189,7 +193,7 @@ async function streamToFile(readable, path) {
       callback(null, chunk);
     },
   });
-  await pipeline(readable, verifier, createWriteStream(path, { flags: "wx", mode: 0o644 }));
+  await pipeline(source, verifier, createWriteStream(path, { flags: "wx", mode: 0o644 }), { signal });
   return { digest: hash.digest("hex"), byteLength };
 }
 
@@ -198,14 +202,23 @@ async function replaceFile(temporaryPath, destination) {
   await rename(temporaryPath, destination);
 }
 
-async function downloadVerified({ url, destination, expectedDigest, executable, fetchImpl }) {
+async function downloadVerified({
+  url,
+  destination,
+  expectedDigest,
+  executable,
+  fetchImpl,
+  downloadTimeoutMs,
+}) {
   const temporaryPath = `${destination}.download-${process.pid}-${randomUUID()}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), downloadTimeoutMs);
   try {
-    const response = await fetchImpl(url, { redirect: "follow" });
+    const response = await fetchImpl(url, { redirect: "follow", signal: controller.signal });
     if (!response.ok || !response.body) {
       throw new Error(`Could not download ${url}: ${response.status}`);
     }
-    const result = await streamToFile(response.body, temporaryPath);
+    const result = await streamToFile(response.body, temporaryPath, controller.signal);
     if (result.digest !== expectedDigest) {
       throw new Error(
         `FFprobe checksum mismatch for ${url}: expected ${expectedDigest}, got ${result.digest}`,
@@ -214,7 +227,13 @@ async function downloadVerified({ url, destination, expectedDigest, executable, 
     if (executable) await chmod(temporaryPath, 0o755);
     await replaceFile(temporaryPath, destination);
     return result;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`FFprobe download timed out after ${downloadTimeoutMs} ms for ${url}.`, { cause: error });
+    }
+    throw error;
   } finally {
+    clearTimeout(timeout);
     await rm(temporaryPath, { force: true });
   }
 }
@@ -226,6 +245,7 @@ async function ensureVerifiedFile({
   executable,
   fetchImpl,
   hashFileImpl,
+  downloadTimeoutMs,
 }) {
   try {
     const result = await hashFileImpl(destination);
@@ -236,10 +256,10 @@ async function ensureVerifiedFile({
   } catch {
     // A missing or unreadable cache entry is replaced only after a verified download.
   }
-  await downloadVerified({ url, destination, expectedDigest, executable, fetchImpl });
+  await downloadVerified({ url, destination, expectedDigest, executable, fetchImpl, downloadTimeoutMs });
 }
 
-async function writeCompositeLicense({ sources, destination, releaseRoot, fetchImpl }) {
+async function writeCompositeLicense({ sources, destination, releaseRoot, fetchImpl, downloadTimeoutMs }) {
   const stagedSources = [];
   const outputTemporaryPath = `${destination}.download-${process.pid}-${randomUUID()}`;
   try {
@@ -252,6 +272,7 @@ async function writeCompositeLicense({ sources, destination, releaseRoot, fetchI
         expectedDigest: source.licenseSha256,
         executable: false,
         fetchImpl,
+        downloadTimeoutMs,
       });
     }
 
@@ -336,7 +357,11 @@ export async function prepareFfprobe({
   targets = FFMPEG_STATIC_TARGETS,
   fetchImpl = globalThis.fetch,
   hashFileImpl = streamFileSha256,
+  downloadTimeoutMs = DOWNLOAD_TIMEOUT_MS,
 } = {}) {
+  if (!Number.isSafeInteger(downloadTimeoutMs) || downloadTimeoutMs < 1 || downloadTimeoutMs > 2_147_483_647) {
+    throw new Error("FFprobe download timeout must be a positive integer within the timer range.");
+  }
   if (!Array.isArray(selectedTargets) || selectedTargets.length === 0) {
     throw new Error("At least one selected desktop FFprobe target is required.");
   }
@@ -370,6 +395,7 @@ export async function prepareFfprobe({
       executable: !target.target.includes("windows"),
       fetchImpl,
       hashFileImpl,
+      downloadTimeoutMs,
     });
   }
 
@@ -386,6 +412,7 @@ export async function prepareFfprobe({
       executable: false,
       fetchImpl,
       hashFileImpl,
+      downloadTimeoutMs,
     });
   } else {
     await writeCompositeLicense({
@@ -393,6 +420,7 @@ export async function prepareFfprobe({
       destination: licenseDestination,
       releaseRoot,
       fetchImpl,
+      downloadTimeoutMs,
     });
   }
 

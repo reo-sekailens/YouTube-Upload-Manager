@@ -84,6 +84,7 @@ Useful local checks:
 ```sh
 npm run check
 npm run test
+npm run test:operations
 npm run build
 ```
 
@@ -122,6 +123,7 @@ recognize it correctly.
 - [Project home](docs/index.md)
 - [Privacy policy](docs/privacy.md)
 - [Terms of service](docs/terms.md)
+- [Local operations and verification](docs/operations.md)
 - [GitHub Wiki](../../wiki) (setup, operations, recovery, and security guides)
 - [Google OAuth for installed apps](https://developers.google.com/identity/protocols/oauth2/native-app)
 - [YouTube Data API](https://developers.google.com/youtube/v3)

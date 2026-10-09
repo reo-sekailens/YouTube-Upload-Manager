@@ -2,7 +2,12 @@
 
 ## Status
 
-completed
+superseded
+
+TASK141 temporarily restored managed copies. TASK142 subsequently restores
+original-file intake under the user's explicit storage constraint and amends
+AGENTS.md. TASK142 retains referenced legacy media needed for recovery; the
+aggressive legacy cleanup described below remains historical, not current policy.
 
 ## Objective
 

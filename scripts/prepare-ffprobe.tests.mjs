@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -270,4 +270,68 @@ test("checksum failure never replaces a prior artifact or writes a receipt", asy
 
   assert.equal(await readFile(destination, "utf8"), "prior invalid cache entry");
   await assert.rejects(access(join(outputDirectory, RECEIPT_FILENAME)));
+});
+
+test("a stalled download is aborted before headers and leaves no artifact or receipt", async () => {
+  const cwd = await fixtureDirectory();
+  const targets = fixtureTargets(Buffer.from("expected binary"), Buffer.from("fixture license"));
+  let aborted = false;
+
+  await assert.rejects(prepareFfprobe({
+    cwd,
+    selectedTargets: ["x86_64-pc-windows-msvc"],
+    releaseRoot: "https://fixture.invalid/release",
+    targets,
+    downloadTimeoutMs: 30,
+    fetchImpl: async (_url, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => {
+        aborted = true;
+        reject(signal.reason);
+      }, { once: true });
+    }),
+  }), /download timed out after 30 ms/);
+
+  assert.equal(aborted, true);
+  assert.deepEqual(await readdir(join(cwd, "src-tauri", "binaries")), []);
+});
+
+test("a stalled response body times out without replacing a prior artifact", async () => {
+  const cwd = await fixtureDirectory();
+  const binary = Buffer.from("expected binary");
+  const targets = fixtureTargets(binary, Buffer.from("fixture license"));
+  const outputDirectory = join(cwd, "src-tauri", "binaries");
+  const filename = "ffprobe-x86_64-pc-windows-msvc.exe";
+  await mkdir(outputDirectory, { recursive: true });
+  await writeFile(join(outputDirectory, filename), "prior cache entry");
+
+  await assert.rejects(prepareFfprobe({
+    cwd,
+    selectedTargets: ["x86_64-pc-windows-msvc"],
+    releaseRoot: "https://fixture.invalid/release",
+    targets,
+    downloadTimeoutMs: 30,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        start(controller) { controller.enqueue(binary.subarray(0, 2)); },
+      }),
+    }),
+  }), /download timed out after 30 ms/);
+
+  assert.equal(await readFile(join(outputDirectory, filename), "utf8"), "prior cache entry");
+  assert.deepEqual(await readdir(outputDirectory), [filename]);
+});
+
+test("invalid download deadlines fail before filesystem or network work", async () => {
+  const cwd = await fixtureDirectory();
+  for (const downloadTimeoutMs of [0, -1, 1.5, Number.NaN, 2_147_483_648]) {
+    await assert.rejects(prepareFfprobe({
+      cwd,
+      selectedTargets: ["x86_64-pc-windows-msvc"],
+      downloadTimeoutMs,
+      fetchImpl: async () => { throw new Error("unexpected network request"); },
+    }), /download timeout must be a positive integer/);
+  }
+  await assert.rejects(access(join(cwd, "src-tauri", "binaries")));
 });

@@ -2623,6 +2623,8 @@ struct PlaylistItemPosition {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PlaylistSortProgress {
+    channel_id: String,
+    playlist_id: String,
     completed: usize,
     total: usize,
     current_title: String,
@@ -2648,6 +2650,8 @@ fn ordered_playlist_items(
 
 fn emit_playlist_sort_progress(
     app: &AppHandle,
+    channel_id: &str,
+    playlist_id: &str,
     completed: usize,
     total: usize,
     current_title: &str,
@@ -2657,6 +2661,8 @@ fn emit_playlist_sort_progress(
     let _ = app.emit(
         "playlist-sort-progress",
         PlaylistSortProgress {
+            channel_id: channel_id.into(),
+            playlist_id: playlist_id.into(),
             completed,
             total,
             current_title: current_title.into(),
@@ -5915,8 +5921,7 @@ fn validate_youtube_upload_limits(path: &Path, size_bytes: u64) -> Result<(), St
     Ok(())
 }
 
-/// Opens an operator-owned source without following a final link. Uploads keep
-/// this original file as their only media copy.
+/// Opens a selected source or an owned upload copy without following a final link.
 fn open_reference_source(path: &Path) -> Result<File, String> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
@@ -6186,8 +6191,8 @@ fn monitored_files(folder: &Path) -> Result<Vec<MonitoredFile>, String> {
     Ok(files)
 }
 
-/// Validate a watched source through a no-follow handle and retain its path as
-/// the upload source. This intentionally creates no app-managed media copy.
+/// Validate a watched source through a no-follow handle and retain its path.
+/// New intake creates no app-managed media copy.
 fn reference_watched_source(
     source_path: &Path,
     expected_signature: &(u64, String),
@@ -6274,15 +6279,38 @@ fn queue_monitored_item(
             dispatch_item_id: None,
         });
     }
-    let status: String = connection
+    let (status, saved_channel_id, digest): (String, Option<String>, Option<String>) = connection
         .query_row(
-            "SELECT status FROM upload_items WHERE id = ?1",
+            "SELECT status, channel_id, digest FROM upload_items WHERE id = ?1",
             [item_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(user_error)?;
+    let channel_id = monitored_channel_id(connection, folder_path, channel_name)?;
+    if saved_channel_id.as_deref() != Some(channel_id.as_str()) {
+        return Err("This watched item belongs to a different reviewed YouTube channel.".into());
+    }
     if status == "draft" {
-        let channel_id = monitored_channel_id(connection, folder_path, channel_name)?;
+        if let Some(digest) = digest.as_deref() {
+            let duplicate = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM upload_items WHERE id != ?1 AND channel_id = ?2 AND digest = ?3 AND status = 'uploaded')",
+                params![item_id, channel_id, digest], |row| row.get::<_, bool>(0),
+            ).map_err(user_error)?;
+            if duplicate {
+                connection.execute("UPDATE upload_items SET status = 'cancelled', background_hash_status = 'duplicate', detail = 'Source digest matches an already-uploaded video in this channel; automatic upload was withheld.', updated_at = ?1 WHERE id = ?2 AND status = 'draft'", params![now(), item_id]).map_err(user_error)?;
+                connection.execute("UPDATE folder_monitor_observations SET state = 'duplicate', digest = ?1, updated_at = ?2 WHERE upload_item_id = ?3 AND channel_id = ?4", params![digest, now(), item_id, channel_id]).map_err(user_error)?;
+                audit(
+                    connection,
+                    item_id,
+                    "folder_monitor_hash_duplicate_stopped",
+                    "Exact channel-scoped BLAKE3 duplicate was withheld before provider dispatch",
+                )?;
+                return Ok(MonitorFileOutcome {
+                    disposition: MonitorDisposition::Skipped,
+                    dispatch_item_id: None,
+                });
+            }
+        }
         connection
             .execute(
                 "UPDATE upload_items SET channel_name = ?1, channel_id = ?2, visibility = ?3, status = 'queued', detail = ?4, updated_at = ?5 WHERE id = ?6",
@@ -6293,7 +6321,7 @@ fn queue_monitored_item(
             connection,
             item_id,
             "folder_monitor_queued",
-            &format!("Stable managed asset queued for automatic {visibility} upload"),
+            &format!("Stable source reference queued for automatic {visibility} upload"),
         )?;
         return Ok(MonitorFileOutcome {
             disposition: MonitorDisposition::Queued,
@@ -6506,7 +6534,7 @@ fn verify_watched_hash_in_background(state: &AppState, item_id: &str) -> Result<
     let connection = database(state)?;
     let duplicate = connection
         .query_row(
-            "SELECT id FROM upload_items WHERE id != ?1 AND digest = ?2 AND status = 'uploaded' AND (channel_id = ?3 OR channel_id IS NULL) ORDER BY created_at ASC LIMIT 1",
+            "SELECT id FROM upload_items WHERE id != ?1 AND digest = ?2 AND status = 'uploaded' AND channel_id = ?3 ORDER BY created_at ASC LIMIT 1",
             params![item_id, digest, channel_id],
             |row| row.get::<_, String>(0),
         )
@@ -6644,11 +6672,14 @@ fn recover_monitored_file(
         });
     };
     if status == "importing" {
-        return Err("This watched upload was created by an older managed-copy version and is being migrated during startup.".into());
+        return Err("This interrupted legacy import was retained for local reconciliation. No additional media copy will be created.".into());
     }
     let outcome =
         queue_monitored_item(connection, &item_id, folder_path, channel_name, visibility)?;
-    let state_name = if matches!(outcome.disposition, MonitorDisposition::Paused) {
+    let duplicate = connection.query_row("SELECT background_hash_status IN ('duplicate', 'duplicate_after_upload') FROM upload_items WHERE id = ?1", [&item_id], |row| row.get::<_, bool>(0)).map_err(user_error)?;
+    let state_name = if duplicate {
+        "duplicate"
+    } else if matches!(outcome.disposition, MonitorDisposition::Paused) {
         "paused"
     } else if outcome.dispatch_item_id.is_some() {
         "queued"
@@ -7899,10 +7930,8 @@ fn legacy_managed_file_id(path: &Path) -> Option<String> {
     Uuid::parse_str(stem).ok().map(|_| stem.to_string())
 }
 
-/// One-way local migration for releases that created `.media` copies. It runs
-/// after the safe shell boundary and only removes regular UUID-named files
-/// owned by this app. Queued legacy work is switched to its original source or
-/// made non-dispatchable when that source no longer exists.
+/// Reclaim only unreferenced UUID-named files. Every saved item retains its
+/// upload copy and partial checkpoint, including cancelled or failed work.
 fn cleanup_legacy_managed_media(state: &AppState) -> Result<(), String> {
     let media_directory = match state.media_directory.canonicalize() {
         Ok(path) => path,
@@ -7920,92 +7949,41 @@ fn cleanup_legacy_managed_media(state: &AppState) -> Result<(), String> {
             legacy_paths.push(path);
         }
     }
-    // Modern workspaces keep only operator-selected source references here.
-    // If no UUID-named legacy copy exists, the row walk below cannot migrate
-    // anything, so avoid opening SQLite and scanning the entire upload table.
+    // An empty media directory needs neither SQLite nor a queue walk.
     if legacy_paths.is_empty() {
         return Ok(());
     }
     let connection = database(state)?;
     let rows = connection
-        .prepare("SELECT id, source_path, workspace_path, partial_path, status FROM upload_items")
+        .prepare("SELECT workspace_path, partial_path FROM upload_items")
         .map_err(user_error)?
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, String>(4)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })
         .map_err(user_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(user_error)?;
-    let mut owned_paths = HashSet::<PathBuf>::new();
-    let mut migrated = 0_usize;
-    let mut failed = 0_usize;
-    for (id, source_path, workspace_path, partial_path, _status) in rows {
-        let workspace = PathBuf::from(&workspace_path);
-        let owned_workspace = workspace.canonicalize().ok().is_some_and(|path| {
-            path.starts_with(&media_directory)
-                && legacy_managed_file_id(&path).as_deref() == Some(id.as_str())
-        });
-        let owned_partial = partial_path
-            .as_deref()
-            .and_then(|path| Path::new(path).canonicalize().ok())
-            .filter(|path| path.starts_with(&media_directory))
-            .filter(|path| legacy_managed_file_id(path).as_deref() == Some(id.as_str()));
-        if !owned_workspace && owned_partial.is_none() {
-            continue;
+    let mut referenced_paths = HashSet::<PathBuf>::new();
+    for (workspace_path, partial_path) in rows {
+        for saved in std::iter::once(workspace_path).chain(partial_path) {
+            let path = PathBuf::from(saved);
+            referenced_paths.insert(path.canonicalize().unwrap_or(path));
         }
-        if owned_workspace {
-            owned_paths.insert(workspace);
-        }
-        if let Some(partial) = owned_partial {
-            owned_paths.insert(partial);
-        }
-        let source = source_path.filter(|path| Path::new(path).is_file());
-        if let Some(source) = source {
-            connection.execute(
-                "UPDATE upload_items SET workspace_path = ?1, partial_path = NULL, status = CASE WHEN status = 'importing' THEN 'failed' ELSE status END, detail = CASE WHEN status = 'importing' THEN 'Legacy managed import was removed; reselect the original source to continue.' ELSE 'Legacy managed copy removed; the original source is used directly.' END, updated_at = ?2 WHERE id = ?3",
-                params![source, now(), id],
-            ).map_err(user_error)?;
-            audit(
-                &connection,
-                &id,
-                "legacy_managed_media_removed",
-                "Legacy managed media was removed; upload now references the original source",
-            )?;
-            migrated += 1;
-        } else {
-            connection.execute(
-                "UPDATE upload_items SET status = CASE WHEN status = 'uploaded' THEN status ELSE 'failed' END, partial_path = NULL, detail = CASE WHEN status = 'uploaded' THEN detail ELSE 'Legacy managed media was removed and the original source is unavailable; reselect the source to upload again.' END, updated_at = ?1 WHERE id = ?2",
-                params![now(), id],
-            ).map_err(user_error)?;
-            audit(
-                &connection,
-                &id,
-                "legacy_managed_media_removed",
-                "Legacy managed media was removed; no original source remains for this upload",
-            )?;
-            failed += 1;
-        }
-    }
-    for path in legacy_paths {
-        owned_paths.insert(path);
     }
     let mut removed = 0_usize;
-    for path in owned_paths {
-        if path.starts_with(&media_directory) && fs::remove_file(&path).is_ok() {
+    for path in legacy_paths {
+        if !referenced_paths.contains(&path)
+            && path.starts_with(&media_directory)
+            && fs::remove_file(&path).is_ok()
+        {
             removed += 1;
         }
     }
-    if removed > 0 || migrated > 0 || failed > 0 {
+    if removed > 0 {
         audit_global(
             &connection,
             "legacy_managed_media_cleanup",
-            &format!("Removed {removed} legacy managed-media file(s); migrated {migrated} source reference(s); marked {failed} unavailable upload(s) for repair"),
+            &format!("Removed {removed} unreferenced managed-media file(s); all saved upload copies and checkpoints were retained"),
         )?;
     }
     Ok(())
@@ -9053,25 +9031,25 @@ async fn sort_playlist_items_by_title(
         }
         let items = ordered_playlist_items(load_playlist_item_positions(&state, &token, &playlist_id)?, &direction);
         let total = items.len();
-        emit_playlist_sort_progress(&app, 0, total, "", "running", format!("Loaded {total} playlist video(s)."));
+        emit_playlist_sort_progress(&app, channel_id, &playlist_id, 0, total, "", "running", format!("Loaded {total} playlist video(s)."));
         for (position, item) in items.iter().enumerate() {
-            emit_playlist_sort_progress(&app, position, total, &item.title, "running", format!("Placing video {} of {total}.", position + 1));
+            emit_playlist_sort_progress(&app, channel_id, &playlist_id, position, total, &item.title, "running", format!("Placing video {} of {total}.", position + 1));
             if let Err(error) = update_playlist_item_position(&state, &token, &playlist_id, item, position) {
-                emit_playlist_sort_progress(&app, position, total, &item.title, "error", error.clone());
+                emit_playlist_sort_progress(&app, channel_id, &playlist_id, position, total, &item.title, "error", error.clone());
                 return Err(error);
             }
-            emit_playlist_sort_progress(&app, position + 1, total, &item.title, "running", format!("Placed video {} of {total}.", position + 1));
+            emit_playlist_sort_progress(&app, channel_id, &playlist_id, position + 1, total, &item.title, "running", format!("Placed video {} of {total}.", position + 1));
         }
         let retained = load_playlist_item_positions(&state, &token, &playlist_id)?;
         let expected_ids = items.iter().map(|item| &item.id).collect::<Vec<_>>();
         let retained_ids = retained.iter().map(|item| &item.id).collect::<Vec<_>>();
         if expected_ids != retained_ids {
             let detail = "YouTube accepted the update but the playlist did not retain the requested order. Open the playlist settings in YouTube Studio, set order to Manual, then retry.".to_string();
-            emit_playlist_sort_progress(&app, total, total, "", "error", detail.clone());
+            emit_playlist_sort_progress(&app, channel_id, &playlist_id, total, total, "", "error", detail.clone());
             return Err(detail);
         }
         audit_global(&connection, "youtube_playlist_custom_ordered", &format!("Applied {direction} title order to {} playlist item(s).", items.len()))?;
-        emit_playlist_sort_progress(&app, total, total, "", "completed", format!("Verified {direction} title order for {total} playlist video(s)."));
+        emit_playlist_sort_progress(&app, channel_id, &playlist_id, total, total, "", "completed", format!("Verified {direction} title order for {total} playlist video(s)."));
         Ok(items.len())
     }).await.map_err(|_| "Playlist ordering stopped unexpectedly.".to_string())?
 }
@@ -9821,11 +9799,12 @@ fn import_asset_impl(
     let title_keys = title_matching::keys(&title);
     let timestamp = now();
     let connection = database(state)?;
+    let scope = connection_settings(&connection)?;
 
     connection
         .execute(
-            "INSERT INTO upload_items (id, title, normalized_title, canonical_title, has_copy_marker, numeric_title_key, title_keys_version, file_name, source_path, workspace_path, size_bytes, digest, background_hash_status, source_modified_key, imported_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, NULL, 'pending', ?11, ?10, 'draft', ?10, ?12, ?13, ?14, ?15, ?16, ?17, ?17, 'Source queued immediately; deep BLAKE3 verification continues in the background.')",
-            params![id, title, title_keys.normalized, title_keys.canonical, title_keys.has_copy_marker as i64, title_keys.numeric, title_matching::TITLE_KEYS_VERSION, file_name, path, signature.0 as i64, signature.1, visibility, settings.made_for_kids as i64, settings.delete_source_after_upload as i64, playlist_id, playlist_title, timestamp],
+            "INSERT INTO upload_items (id, title, normalized_title, canonical_title, has_copy_marker, numeric_title_key, title_keys_version, file_name, source_path, workspace_path, size_bytes, digest, background_hash_status, source_modified_key, imported_bytes, status, total_bytes, visibility, made_for_kids, delete_source_after_upload, playlist_id, playlist_title, channel_name, channel_id, created_at, updated_at, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, NULL, 'pending', ?11, ?10, 'draft', ?10, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?19, 'Original source referenced without a video copy; keep it available and unchanged while this upload is unfinished.')",
+            params![id, title, title_keys.normalized, title_keys.canonical, title_keys.has_copy_marker as i64, title_keys.numeric, title_matching::TITLE_KEYS_VERSION, file_name, path, signature.0 as i64, signature.1, visibility, settings.made_for_kids as i64, settings.delete_source_after_upload as i64, playlist_id, playlist_title, scope.active_channel, scope.active_channel_id, timestamp],
         )
         .map_err(user_error)?;
     audit(
@@ -10133,13 +10112,14 @@ fn queue_items_batch_impl(
     for item_id in item_ids {
         let validation = transaction
             .query_row(
-                "SELECT status, duplicate_decision, workspace_path FROM upload_items WHERE id = ?1",
+                "SELECT status, duplicate_decision, workspace_path, channel_id FROM upload_items WHERE id = ?1",
                 [item_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
@@ -10147,13 +10127,16 @@ fn queue_items_batch_impl(
             .map_err(user_error)?;
         let result = match validation {
             None => Err("This upload item no longer exists.".into()),
-            Some((status, _, _)) if status != "draft" && status != "failed" => {
+            Some((_, _, _, Some(saved_channel))) if !saved_channel.trim().is_empty() && saved_channel != channel_id => {
+                Err("Switch back to this item's reviewed YouTube channel before retrying or queueing it.".into())
+            }
+            Some((status, _, _, _)) if status != "draft" && status != "failed" => {
                 Err("Only a reviewed draft or recoverable failed item can be queued.".into())
             }
-            Some((_, Some(decision), _)) if decision == "pending" => Err(
+            Some((_, Some(decision), _, _)) if decision == "pending" => Err(
                 "A matching uploaded title needs a decision before this file can be queued.".into(),
             ),
-            Some((_, _, workspace_path)) if !Path::new(&workspace_path).is_file() => Err(
+            Some((_, _, workspace_path, _)) if !Path::new(&workspace_path).is_file() => Err(
                 "This item has not finished its device-local import; repair it before queueing."
                     .into(),
             ),
@@ -10176,6 +10159,22 @@ fn queue_items_batch_impl(
 
 fn queue_item_impl(state: &AppState, id: &str) -> Result<UploadItem, String> {
     let connection = database(state)?;
+    let active_channel_id = connection_settings(&connection)?.active_channel_id;
+    let saved_channel_id: Option<String> = connection
+        .query_row(
+            "SELECT channel_id FROM upload_items WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .map_err(user_error)?;
+    if saved_channel_id.as_deref().is_some_and(|saved| {
+        !saved.trim().is_empty() && Some(saved) != active_channel_id.as_deref()
+    }) {
+        return Err(
+            "Switch back to this item's reviewed YouTube channel before retrying or queueing it."
+                .into(),
+        );
+    }
     let item = find_item(&connection, &id)?;
     if item.status != "draft" && item.status != "failed" {
         return Err("Only a reviewed draft or recoverable failed item can be queued.".into());
@@ -10219,12 +10218,15 @@ fn queue_item_impl(state: &AppState, id: &str) -> Result<UploadItem, String> {
         .ok_or_else(|| {
             "The active YouTube connection has no immutable channel identity.".to_string()
         })?;
-    connection
+    let changed = connection
         .execute(
-            "UPDATE upload_items SET channel_name = ?1, channel_id = ?2, status = 'queued', detail = 'Saved in local queue for the reviewed YouTube channel.', updated_at = ?3 WHERE id = ?4",
+            "UPDATE upload_items SET channel_name = ?1, channel_id = ?2, status = 'queued', detail = 'Saved in local queue for the reviewed YouTube channel.', updated_at = ?3 WHERE id = ?4 AND status IN ('draft', 'failed') AND (channel_id IS NULL OR channel_id = '' OR channel_id = ?2)",
             params![channel_name, channel_id, now(), id],
         )
         .map_err(user_error)?;
+    if changed == 0 {
+        return Err("This item changed or its reviewed YouTube channel is no longer active. Refresh the queue before retrying.".into());
+    }
     audit(&connection, &id, "item_queued", "Queue state saved locally")?;
     find_item(&connection, id)
 }
@@ -10339,12 +10341,20 @@ fn reconcile_queue_impl(state: &AppState) -> Result<Vec<UploadItem>, String> {
             continue;
         }
         if status == "importing" {
-            let detail = "Interrupted managed-copy import cannot resume in no-copy mode; restore and reselect the original source.";
+            let detail = "Interrupted legacy import was retained for local review. No additional media copy was created; verify the original source before retrying.";
             connection.execute("UPDATE upload_items SET status = 'failed', detail = ?1, updated_at = ?2 WHERE id = ?3", params![detail, now(), id]).map_err(user_error)?;
             audit(&connection, &id, "restart_reconciliation", detail)?;
             continue;
         }
-        let (next_status, detail) = if stored_upload_session(&id)?.is_some() {
+        let has_channel = connection
+            .query_row(
+                "SELECT channel_id FROM upload_items WHERE id = ?1",
+                [&id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(user_error)?
+            .is_some_and(|channel| !channel.trim().is_empty());
+        let (next_status, detail) = if has_channel && stored_upload_session(&id)?.is_some() {
             (
                 "queued",
                 "Recovered interrupted upload; its saved YouTube resumable session will resume from the provider-confirmed range.",
@@ -12687,7 +12697,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_legacy_media_cleanup_switches_to_original_and_removes_owned_files() {
+    fn startup_media_cleanup_retains_every_referenced_copy_and_removes_only_orphans() {
         let root = std::env::temp_dir().join(format!("youtube-uploader-test-{}", Uuid::new_v4()));
         let media = root.join("media");
         fs::create_dir_all(&media).unwrap();
@@ -12698,6 +12708,8 @@ mod tests {
         let partial = media.join(format!("{id}.partial"));
         fs::write(&workspace, b"legacy-copy").unwrap();
         fs::write(&partial, b"legacy-partial").unwrap();
+        let orphan = media.join(format!("{}.media", Uuid::new_v4()));
+        fs::write(&orphan, b"unreferenced-copy").unwrap();
         let state = AppState {
             database_path: root.join("queue.sqlite3"),
             media_directory: media.clone(),
@@ -12711,10 +12723,12 @@ mod tests {
         ).unwrap();
         drop(connection);
 
+        fs::remove_file(&source).unwrap();
         cleanup_legacy_managed_media(&state).unwrap();
 
-        assert!(!workspace.exists());
-        assert!(!partial.exists());
+        assert!(workspace.exists());
+        assert!(partial.exists());
+        assert!(!orphan.exists());
         let connection = database(&state).unwrap();
         let (saved_workspace, saved_partial, status): (String, Option<String>, String) = connection
             .query_row(
@@ -12723,8 +12737,11 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(saved_workspace, source.to_string_lossy());
-        assert!(saved_partial.is_none());
+        assert_eq!(saved_workspace, workspace.to_string_lossy());
+        assert_eq!(
+            saved_partial.as_deref(),
+            Some(partial.to_string_lossy().as_ref())
+        );
         assert_eq!(status, "queued");
         drop(connection);
         fs::remove_dir_all(root).unwrap();
@@ -14762,7 +14779,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_import_defers_blake3_until_after_the_item_is_available() {
+    fn manual_import_references_original_without_copy_and_defers_blake3() {
         let root =
             std::env::temp_dir().join(format!("youtube-uploader-manual-intake-{}", Uuid::new_v4()));
         let state = AppState {
@@ -14789,17 +14806,199 @@ mod tests {
         .unwrap();
 
         let connection = database(&state).unwrap();
-        let (digest, hash_status, source_modified_key): (Option<String>, String, Option<String>) =
+        let (digest, hash_status, source_modified_key, workspace_path, partial_path): (Option<String>, String, Option<String>, String, Option<String>) =
             connection
                 .query_row(
-                    "SELECT digest, background_hash_status, source_modified_key FROM upload_items WHERE id = ?1",
+                    "SELECT digest, background_hash_status, source_modified_key, workspace_path, partial_path FROM upload_items WHERE id = ?1",
                     [&item.id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
                 )
                 .unwrap();
         assert!(digest.is_none());
         assert_eq!(hash_status, "pending");
         assert!(source_modified_key.is_some());
+        assert_eq!(workspace_path, source.to_string_lossy());
+        assert!(partial_path.is_none());
+        assert!(fs::read_dir(&state.media_directory)
+            .unwrap()
+            .next()
+            .is_none());
+        assert_eq!(fs::read(&source).unwrap(), b"manual intake fixture");
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn queue_retry_preserves_the_reviewed_channel_and_confirmed_checkpoint() {
+        let root = std::env::temp_dir().join(format!("youtube-uploader-retry-{}", Uuid::new_v4()));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let workspace = state.media_directory.join("retained.media");
+        fs::write(&workspace, b"saved-upload").unwrap();
+        let connection = database(&state).unwrap();
+        connection.execute("INSERT INTO connection_settings(singleton, active_channel, active_channel_id, updated_at) VALUES(1, 'Channel B', 'channel-b', ?1)", [now()]).unwrap();
+        connection.execute("INSERT INTO upload_items(id, title, file_name, channel_name, channel_id, workspace_path, size_bytes, digest, status, confirmed_bytes, total_bytes, created_at, updated_at) VALUES('failed-a', 'Reviewed A', 'a.mp4', 'Channel A', 'channel-a', ?1, 12, 'saved-digest', 'failed', 8, 12, ?2, ?2)", params![workspace.to_string_lossy(), now()]).unwrap();
+
+        assert!(queue_item_impl(&state, "failed-a")
+            .err()
+            .unwrap()
+            .contains("reviewed YouTube channel"));
+        let batch = queue_items_batch_impl(&state, &["failed-a".into()]).unwrap();
+        assert!(batch[0].1.is_err());
+        let retained: (String, String, i64, String) = connection.query_row("SELECT channel_id, status, confirmed_bytes, digest FROM upload_items WHERE id = 'failed-a'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+        assert_eq!(
+            retained,
+            (
+                "channel-a".into(),
+                "failed".into(),
+                8,
+                "saved-digest".into()
+            )
+        );
+        connection.execute("UPDATE connection_settings SET active_channel = 'Channel A', active_channel_id = 'channel-a' WHERE singleton = 1", []).unwrap();
+        let retried = queue_item_impl(&state, "failed-a").unwrap();
+        assert_eq!(retried.status, "queued");
+        assert_eq!(retried.confirmed_bytes, 8);
+        assert_eq!(retried.digest.as_deref(), Some("saved-digest"));
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_reference_retry_preserves_identity_and_checkpoint_without_a_copy() {
+        let root = std::env::temp_dir().join(format!(
+            "youtube-uploader-reference-retry-{}",
+            Uuid::new_v4()
+        ));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let source = root.join("old-reference.mp4");
+        let contents = b"old-reference-content";
+        fs::write(&source, contents).unwrap();
+        let item_id = Uuid::new_v4().to_string();
+        let digest = blake3::hash(contents).to_hex().to_string();
+        let signature = monitored_file_signature(&fs::metadata(&source).unwrap()).unwrap();
+        let connection = database(&state).unwrap();
+        connection.execute("INSERT INTO connection_settings(singleton, active_channel, active_channel_id, updated_at) VALUES(1, 'Channel A', 'channel-a', ?1)", [now()]).unwrap();
+        connection.execute("INSERT INTO upload_items(id, title, file_name, channel_name, channel_id, source_path, workspace_path, size_bytes, source_modified_key, digest, status, confirmed_bytes, total_bytes, created_at, updated_at) VALUES(?1, 'Old', 'old-reference.mp4', 'Channel A', 'channel-a', ?2, ?2, ?3, ?4, ?5, 'failed', 8, ?3, ?6, ?6)", params![item_id, source.to_string_lossy(), contents.len() as i64, signature.1, digest, now()]).unwrap();
+        let queued = queue_item_impl(&state, &item_id).unwrap();
+        assert_eq!(queued.id, item_id);
+        assert_eq!(queued.status, "queued");
+        assert_eq!(queued.confirmed_bytes, 8);
+        assert_eq!(queued.digest.as_deref(), Some(digest.as_str()));
+        let workspace: String = connection
+            .query_row(
+                "SELECT workspace_path FROM upload_items WHERE id = ?1",
+                [&item_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(workspace, source.to_string_lossy());
+        assert_eq!(fs::read(&workspace).unwrap(), contents);
+        assert!(fs::read_dir(&state.media_directory)
+            .unwrap()
+            .next()
+            .is_none());
+        fs::rename(&source, root.join("moved-original.mp4")).unwrap();
+        connection
+            .execute(
+                "UPDATE upload_items SET status = 'dispatching' WHERE id = ?1",
+                [&item_id],
+            )
+            .unwrap();
+        assert!(!upload_item(&state, &item_id).unwrap());
+        let retained: (String, String, i64, String) = connection
+            .query_row(
+                "SELECT id, channel_id, confirmed_bytes, digest FROM upload_items WHERE id = ?1",
+                [&item_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(retained, (item_id, "channel-a".into(), 8, digest));
+        assert!(fs::read_dir(&state.media_directory)
+            .unwrap()
+            .next()
+            .is_none());
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn playlist_sort_progress_serializes_immutable_channel_and_playlist_context() {
+        let progress = PlaylistSortProgress {
+            channel_id: "reviewed-channel".into(),
+            playlist_id: "reviewed-playlist".into(),
+            completed: 1,
+            total: 2,
+            current_title: "First".into(),
+            status: "running".into(),
+            detail: "Placed one video.".into(),
+        };
+        let payload = serde_json::to_value(progress).unwrap();
+        assert_eq!(payload["channelId"], "reviewed-channel");
+        assert_eq!(payload["playlistId"], "reviewed-playlist");
+    }
+
+    #[test]
+    fn startup_reference_queue_recovery_retains_ids_sources_and_checkpoints_without_copy() {
+        let root = std::env::temp_dir().join(format!(
+            "youtube-uploader-reference-recovery-{}",
+            Uuid::new_v4()
+        ));
+        let state = AppState {
+            database_path: root.join("queue.sqlite3"),
+            media_directory: root.join("media"),
+            folder_monitor_lock: Arc::new(Mutex::new(())),
+            oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        };
+        fs::create_dir_all(&state.media_directory).unwrap();
+        let source = root.join("original.mp4");
+        let contents = b"original-reference-content";
+        fs::write(&source, contents).unwrap();
+        let digest = blake3::hash(contents).to_hex().to_string();
+        let connection = database(&state).unwrap();
+        connection.execute("INSERT INTO connection_settings(singleton, active_channel, active_channel_id, updated_at) VALUES(1, 'Channel A', 'channel-a', ?1)", [now()]).unwrap();
+        let before_network_id = Uuid::new_v4().to_string();
+        let interrupted_transfer_id = Uuid::new_v4().to_string();
+        for (item_id, status) in [
+            (&before_network_id, "dispatching"),
+            (&interrupted_transfer_id, "uploading"),
+        ] {
+            connection.execute("INSERT INTO upload_items(id, title, file_name, channel_name, channel_id, source_path, workspace_path, size_bytes, digest, status, confirmed_bytes, total_bytes, resumable_session_uri, created_at, updated_at) VALUES(?1, 'Original', 'original.mp4', 'Channel A', 'channel-a', ?2, ?2, ?3, ?4, ?5, 8, ?3, 'fixture-protected-checkpoint-reference', ?6, ?6)", params![item_id, source.to_string_lossy(), contents.len() as i64, digest, status, now()]).unwrap();
+        }
+        fs::rename(&source, root.join("moved-original.mp4")).unwrap();
+        let recovered = reconcile_queue_impl(&state).unwrap();
+        let statuses = recovered
+            .iter()
+            .map(|item| (item.id.as_str(), item.status.as_str()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(statuses[before_network_id.as_str()], "queued");
+        assert_eq!(
+            statuses[interrupted_transfer_id.as_str()],
+            "needs_reconciliation"
+        );
+        for item_id in [&before_network_id, &interrupted_transfer_id] {
+            let retained: (String, String, i64, String, String) = connection.query_row("SELECT source_path, workspace_path, confirmed_bytes, digest, resumable_session_uri FROM upload_items WHERE id = ?1", [item_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).unwrap();
+            assert_eq!(retained.0, source.to_string_lossy());
+            assert_eq!(retained.1, retained.0);
+            assert_eq!(retained.2, 8);
+            assert_eq!(retained.3, digest);
+            assert_eq!(retained.4, "fixture-protected-checkpoint-reference");
+        }
+        assert!(fs::read_dir(&state.media_directory)
+            .unwrap()
+            .next()
+            .is_none());
         drop(connection);
         fs::remove_dir_all(root).unwrap();
     }

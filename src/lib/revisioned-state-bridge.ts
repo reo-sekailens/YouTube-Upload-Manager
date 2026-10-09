@@ -99,7 +99,7 @@ export function installRevisionedStateBridge([
       loadSnapshot(),
       loadConnectionSettings(),
     ]);
-    if (!active) return;
+    if (!active || channelIdRef.current !== channelId) return;
     if (nextConnection.activeChannelId !== channelId) {
       updateConnection(nextConnection);
       return;
@@ -150,11 +150,11 @@ export function installRevisionedStateBridge([
     batch: StateChangeBatch,
     recoverGap: boolean,
   ): Promise<void> => {
-    if (!active) return;
+    if (!active || channelIdRef.current !== channelId) return;
     if (batch.changes.some((change) => change.surface === "connection")) {
       void loadConnectionSettings()
         .then((settings) => {
-          if (active) updateConnection(settings);
+          if (active && channelIdRef.current === channelId) updateConnection(settings);
         })
         .catch(() => undefined);
     }

@@ -13,6 +13,7 @@ An operator can use one locally installed desktop or mobile application to conne
 - The operator stays in control: uploads require deliberate review and an explicit submission action.
 - Each source video has one canonical upload record; retries and status updates attach to it rather than creating duplicate uploads.
 - All app state, source-media references, audit records, and OAuth tokens stay on the device. The native command layer, not the webview, calls YouTube APIs; tokens use OS-protected secure storage.
+- Videos remain at their original operator-selected locations. Intake and retry must not create another full video copy, hard link, reflink, or clone; resumability depends on the original remaining available and unchanged. The app saves queue/checkpoint evidence rather than duplicating media.
 - Batch work is resumable, idempotent where the provider allows it, rate-limit aware, and auditable.
 - Duplicate detection is evidence-based and human-reviewed; permanent deletion is never automatic.
 

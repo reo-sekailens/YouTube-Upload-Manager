@@ -95,12 +95,16 @@ export function evaluateNativeConfiguration(sources) {
   };
 }
 
-function runCargoGate(testName) {
+export function runCargoGate(testName, {
+  spawnImpl = spawnSync,
+  writeOutput = (output) => process.stdout.write(output),
+} = {}) {
   const cargo = process.platform === "win32" ? "cargo.exe" : "cargo";
-  const result = spawnSync(
+  const result = spawnImpl(
     cargo,
     [
       "test",
+      "--locked",
       "--manifest-path",
       "src-tauri/Cargo.toml",
       "--features",
@@ -111,11 +115,28 @@ function runCargoGate(testName) {
       "--exact",
       "--test-threads=1",
     ],
-    { stdio: "inherit" },
+    {
+      stdio: ["ignore", "pipe", "inherit"],
+      encoding: "utf8",
+      maxBuffer: 8 * 1024 * 1024,
+      windowsHide: true,
+    },
   );
+  if (result.stdout) writeOutput(result.stdout);
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(`Native performance gate ${testName} failed with exit code ${result.status}.`);
+  }
+  // Cargo exits successfully when an exact filter matches no test. Require
+  // both the named success and one executed, non-ignored test before accepting
+  // the gate, so a renamed or cfg-disabled fixture cannot silently pass.
+  const outputLines = (result.stdout ?? "").split(/\r?\n/);
+  const summary = result.stdout?.match(
+    /^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;/m,
+  );
+  if (!outputLines.includes(`test ${testName} ... ok`) ||
+      !summary || summary[1] !== "1" || summary[2] !== "0" || summary[3] !== "0") {
+    throw new Error(`Native performance gate ${testName} did not execute exactly one passing test.`);
   }
 }
 

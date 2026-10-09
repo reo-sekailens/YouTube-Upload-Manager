@@ -4,8 +4,8 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @source "./App.tsx";
+@source "./components/AppWorkspaceParts.tsx";
 @source "./performance-interactions.tsx";
-@source "./components/ConnectionPanel.tsx";
 @source "./components/CrashBoundary.tsx";
 @source "./components/CrashRecoveryScreen.tsx";
 @source "./components/DedupeActivityPanel.tsx";
@@ -15,7 +15,6 @@
 @source "./components/PaginationControls.tsx";
 @source "./components/QueueTable.tsx";
 @source "./components/StatusPill.tsx";
-@source "./components/TransferPanel.tsx";
 @source "./components/UploadIntakeReview.tsx";
 @source "./components/UploadProgressSummary.tsx";
 @source "./components/UploadTitleDuplicateReview.tsx";
