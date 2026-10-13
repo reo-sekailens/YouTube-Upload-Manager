@@ -231,26 +231,83 @@ impl ProviderTransport {
         bytes: u64,
         total_bytes: u64,
     ) -> Result<Response, String> {
+        self.put_upload_chunk_with_client_and_controls(
+            client,
+            session_uri,
+            path,
+            offset,
+            bytes,
+            total_bytes,
+            None,
+            std::sync::Arc::new(|| false),
+        )
+    }
+
+    /// Keep the native source proof and the provider byte range unchanged while
+    /// pacing the owned request buffer. Control-plane requests use another client.
+    pub(crate) fn put_upload_chunk_with_client_and_controls(
+        &self,
+        client: &Client,
+        session_uri: &str,
+        path: &Path,
+        offset: u64,
+        bytes: u64,
+        total_bytes: u64,
+        expected_signature: Option<&(u64, String)>,
+        cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<Response, String> {
         if bytes == 0 || offset.saturating_add(bytes) > total_bytes {
             return Err("The resumable upload chunk range is invalid.".into());
         }
-        let mut source = File::open(path).map_err(|error| error.to_string())?;
+        if cancelled() {
+            return Err(super::UPLOAD_CANCELLED_MARKER.into());
+        }
+        if super::has_link_or_reparse_component(path).unwrap_or(true) {
+            return Err("The upload source became linked; its saved session was retained.".into());
+        }
+        let mut source = super::open_reference_source(path)?;
+        let signature =
+            super::monitored_file_signature(&source.metadata().map_err(super::user_error)?)?;
+        if signature.0 < offset + bytes
+            || expected_signature
+                .is_some_and(|expected| expected != &signature || signature.0 != total_bytes)
+        {
+            return Err(
+                "The upload source changed before its next range; the saved session was retained."
+                    .into(),
+            );
+        }
         source
             .seek(SeekFrom::Start(offset))
             .map_err(|error| error.to_string())?;
         let mut body = vec![0_u8; bytes as usize];
         source.read_exact(&mut body).map_err(|_| {
-            "Managed local media ended before the expected upload range.".to_string()
+            "Original upload media ended before the expected range; the saved session was retained.".to_string()
         })?;
+        if super::monitored_file_signature(&source.metadata().map_err(super::user_error)?)?
+            != signature
+        {
+            return Err("The upload source changed while its next range was read; the saved session was retained.".into());
+        }
+        if cancelled() {
+            return Err(super::UPLOAD_CANCELLED_MARKER.into());
+        }
         let end = offset + bytes - 1;
+        let reader = super::upload_controls::UploadBudgetReader::new(
+            std::io::Cursor::new(body),
+            cancelled.clone(),
+        );
         client
             .put(session_uri)
             .header(CONTENT_LENGTH, bytes)
             .header(CONTENT_TYPE, "application/octet-stream")
             .header(CONTENT_RANGE, format!("bytes {offset}-{end}/{total_bytes}"))
-            .body(body)
+            .body(reqwest::blocking::Body::sized(reader, bytes))
             .send()
             .map_err(|_| {
+                if cancelled() {
+                    return super::UPLOAD_CANCELLED_MARKER.to_string();
+                }
                 "Upload connection interrupted; the saved session will be reconciled on retry."
                     .to_string()
             })

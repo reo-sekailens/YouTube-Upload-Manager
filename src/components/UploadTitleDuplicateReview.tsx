@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import type { UploadTitleDuplicate, UploadTitleDuplicateDecision } from "../lib/types";
+
+const DuplicateMediaPreview = lazy(() => import("./DuplicateMediaPreview").then((module) => ({ default: module.DuplicateMediaPreview })));
 
 type UploadTitleDuplicateReviewProps = {
   candidates: UploadTitleDuplicate[];
+  activeChannelId?: string;
   busy?: boolean;
   onResolve: (itemIds: string[], decision: UploadTitleDuplicateDecision) => void | Promise<void>;
 };
@@ -11,10 +14,13 @@ type UploadTitleDuplicateReviewProps = {
  * Holds matching titles at a deliberate decision point. The active item advances
  * one at a time unless the operator elects to apply the same decision to all.
  */
-export function UploadTitleDuplicateReview({ candidates, busy = false, onResolve }: UploadTitleDuplicateReviewProps) {
+export function UploadTitleDuplicateReview({ candidates, activeChannelId, busy = false, onResolve }: UploadTitleDuplicateReviewProps) {
   const [activeItemId, setActiveItemId] = useState<string | undefined>(candidates[0]?.itemId);
   const [decision, setDecision] = useState<UploadTitleDuplicateDecision>("skip");
   const [applyToAll, setApplyToAll] = useState(false);
+  const [previewItemId, setPreviewItemId] = useState<string>();
+
+  useEffect(() => setPreviewItemId(undefined), [activeChannelId]);
 
   useEffect(() => {
     setActiveItemId((current) => candidates.some((candidate) => candidate.itemId === current) ? current : candidates[0]?.itemId);
@@ -61,6 +67,7 @@ export function UploadTitleDuplicateReview({ candidates, busy = false, onResolve
         <h3 className="my-2 wrap-anywhere text-[0.98rem] text-[#3d3420]">{activeCandidate.title}</h3>
         <p className="mt-1 mb-0 text-[0.78rem] leading-relaxed text-[#6c5a27]">Matching title{activeCandidate.matchedTitles.length === 1 ? "" : "s"} in {matchScopeLabel}:</p>
         <ul className="mt-1 mb-0 pl-5 text-[0.78rem] leading-relaxed text-[#6c5a27]">{activeCandidate.matchedTitles.map((title, index) => <li key={`${title}-${index}`}>{title}</li>)}</ul>
+        <button className="mt-3 cursor-pointer rounded-md border border-line bg-control px-3 py-2 text-[0.79rem] font-semibold text-ink hover:bg-control-hover focus-visible:outline-3 focus-visible:outline-focus-ring" onClick={() => setPreviewItemId(activeCandidate.itemId)} type="button">Compare videos</button>
       </div>
 
       <fieldset className="mt-4 mb-3 grid gap-2.5 border-0 p-0" disabled={busy}>
@@ -74,6 +81,11 @@ export function UploadTitleDuplicateReview({ candidates, busy = false, onResolve
       <footer className="mt-4 flex flex-wrap justify-end gap-2 max-sm:flex-col-reverse">
         <button className={applyToAll && !isIgnore ? "rounded-md border border-[#cbd3df] bg-white px-3 py-2 text-[0.79rem] font-[680] text-[#34405a] hover:bg-[#f0f3f7] disabled:cursor-not-allowed disabled:opacity-50 max-sm:w-full" : "rounded-md border border-[#2463df] bg-[#2463df] px-3 py-2 text-[0.79rem] font-[680] text-white hover:border-[#1b54c6] hover:bg-[#1b54c6] disabled:cursor-not-allowed disabled:opacity-50 max-sm:w-full"} disabled={busy} onClick={submit} type="button">{submitLabel}</button>
       </footer>
+      {previewItemId && candidates.some((candidate) => candidate.itemId === previewItemId) && (
+        <Suspense fallback={<p role="status">Opening video comparison…</p>}>
+          <DuplicateMediaPreview expectedChannelId={activeChannelId} onClose={() => setPreviewItemId(undefined)} target={{ kind: "upload", itemId: previewItemId }} />
+        </Suspense>
+      )}
     </section>
   );
 }

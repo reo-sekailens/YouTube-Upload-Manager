@@ -68,6 +68,7 @@ export function WorkspaceHeader({ channel, dark, busy, onTheme, onRefresh, onImp
 }
 
 type DialogProps = {
+  activeChannelId?: string;
   setupOpen: boolean;
   exitOpen: boolean;
   importPaths?: string[];
@@ -103,7 +104,7 @@ export function AppDialogs(props: DialogProps) {
     {props.importPaths && <>
       <div aria-hidden="true" className="ui-backdrop z-[9] bg-slate-950/30" />
       <Suspense fallback={<p role="status">Loading import review…</p>}>
-        <UploadIntakeReview paths={props.importPaths} onCancel={props.onCancelImport} onConfirm={props.onConfirmImport} />
+        <UploadIntakeReview activeChannelId={props.activeChannelId} paths={props.importPaths} onCancel={props.onCancelImport} onConfirm={props.onConfirmImport} />
       </Suspense>
     </>}
   </>;

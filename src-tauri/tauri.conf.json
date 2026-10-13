@@ -4,14 +4,14 @@
   "version": "1.0.2-nightly.17",
   "identifier": "com.sekailens.youtube-upload-manager",
   "build": {
-    "beforeDevCommand": "npm run prepare:ffprobe && npm run dev",
+    "beforeDevCommand": "npm run prepare:ffprobe && npm run prepare:perceptual-decoder && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build && npm run prepare:ffprobe",
+    "beforeBuildCommand": "npm run build && npm run prepare:ffprobe && npm run prepare:perceptual-decoder",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [{ "title": "YouTube Upload Manager", "width": 1280, "height": 800, "minWidth": 390, "minHeight": 640 }],
-    "security": { "csp": "default-src 'self'; connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com; frame-src https://www.youtube.com; img-src 'self' asset: https: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" }
+    "security": { "csp": "default-src 'self'; connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com; frame-src https://www.youtube.com; media-src 'self' media-preview: http://media-preview.localhost https://media-preview.localhost; img-src 'self' asset: https: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" }
   },
   "bundle": {
     "active": true,
@@ -23,7 +23,7 @@
       }
     },
     "icon": ["icons/icon.ico", "icons/icon.icns", "icons/128x128.png"],
-    "externalBin": ["binaries/ffprobe"],
-    "resources": ["binaries/ffprobe-license.txt"]
+    "externalBin": ["binaries/ffprobe", "binaries/ffmpeg"],
+    "resources": ["binaries/ffprobe-license.txt", "binaries/ffmpeg-license.txt", "binaries/ffmpeg-source-notice.txt"]
   }
 }

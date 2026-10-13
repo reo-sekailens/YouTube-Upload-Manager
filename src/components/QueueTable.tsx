@@ -12,11 +12,13 @@ import type { QueueStatusFilter } from "../lib/queue-presentation";
 import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
 import { PaginationControls } from "./PaginationControls";
 import { StatusPill } from "./StatusPill";
+import { uploadRetryIssueKey } from "../lib/upload-retry";
 
 interface QueueTableProps {
   items: UploadItem[];
   busy: boolean;
   onQueue: (item: UploadItem) => void;
+  onRetryMatching?: (item: UploadItem) => void;
   onCancel: (item: UploadItem) => void;
   onVisibilityChange: (item: UploadItem, visibility: UploadVisibility) => void;
   onDeleteSourceAfterUploadChange: (item: UploadItem, enabled: boolean) => void;
@@ -63,10 +65,29 @@ function sourceDeleteStatusLabel(status: NonNullable<UploadItem["sourceDeleteSta
   }
 }
 
+/** Filters choose which issues are offered; each action reviews the whole saved issue. */
+export function uploadRetryGroups(items: UploadItem[], matchingItems: UploadItem[] = items) {
+  const groups = new Map<string, { key: string; count: number; anchor: UploadItem }>();
+  for (const item of items) {
+    const key = uploadRetryIssueKey(item);
+    if (!key) continue;
+    const group = groups.get(key);
+    if (group) group.count += 1;
+    else groups.set(key, { key, count: 1, anchor: item });
+  }
+  const visibleGroups = new Map<string, UploadItem>();
+  for (const item of matchingItems) {
+    const key = uploadRetryIssueKey(item);
+    if (key && !visibleGroups.has(key)) visibleGroups.set(key, item);
+  }
+  return Array.from(groups.values()).filter((group) => group.count > 1 && visibleGroups.has(group.key)).map((group) => ({ ...group, anchor: visibleGroups.get(group.key)! }));
+}
+
 export function QueueTable({
   items,
   busy,
   onQueue,
+  onRetryMatching,
   onCancel,
   onVisibilityChange,
   onDeleteSourceAfterUploadChange,
@@ -84,6 +105,7 @@ export function QueueTable({
   const [page, setPage] = useRetainedWorkspaceState("batch.queue-page", 1);
   const [pendingSourceDelete, setPendingSourceDelete] = useState<UploadItem>();
   const [sourceDeleteConfirmation, setSourceDeleteConfirmation] = useState("");
+  const [retryIssue, setRetryIssue] = useState("");
   const sourceDeleteTrigger = useRef<HTMLButtonElement | null>(null);
 
   const closeSourceDelete = () => {
@@ -112,6 +134,8 @@ export function QueueTable({
     () => windowItems(matchingItems, page),
     [matchingItems, page],
   );
+  const retryGroups = useMemo(() => uploadRetryGroups(items, matchingItems), [items, matchingItems]);
+  const selectedRetryGroup = retryGroups.find((group) => group.key === retryIssue) || retryGroups[0];
 
   if (items.length === 0) {
     return (
@@ -175,6 +199,13 @@ export function QueueTable({
           </button>
         ))}
       </div>
+      {onRetryMatching && selectedRetryGroup ? <section aria-label="Bulk retry matching upload failures" className="mb-3 grid gap-2 rounded-lg border border-[#dfe6f2] bg-[#fbfcff] p-3" data-upload-retry-bulk>
+        <div className="flex flex-wrap items-end justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
+          {retryGroups.length > 1 ? <label className="grid min-w-0 flex-1 gap-1.5 text-[0.74rem] font-bold text-[#465775] max-sm:w-full">Upload issue to retry<select className="min-h-9 w-full min-w-0 rounded-md border border-[#cbd5e3] bg-white px-2.5 py-2 text-[0.74rem] font-medium text-[#27344a] focus:border-[#2463df] focus:outline-3 focus:outline-[#2d68e824]" disabled={busy} value={selectedRetryGroup.key} onChange={(event) => setRetryIssue(event.target.value)}>{retryGroups.map((group) => <option key={group.key} value={group.key}>{group.anchor.title} · {group.count} uploads with this issue</option>)}</select></label> : <strong className="min-w-0 flex-1 text-[0.74rem] font-bold text-[#465775]">{selectedRetryGroup.count} uploads have the same issue</strong>}
+          <button aria-label={`Retry all with same issue (${selectedRetryGroup.count})`} className={`${secondaryButtonClass} min-h-9 max-sm:w-full`} disabled={busy || titleQuery !== deferredTitleQuery} onClick={() => onRetryMatching(selectedRetryGroup.anchor)} type="button">Retry all with same issue ({selectedRetryGroup.count})</button>
+        </div>
+        <p className="m-0 break-words text-[0.72rem] leading-relaxed text-[#5f6c80]">{selectedRetryGroup.anchor.detail || "Upload setup needs attention."} All {selectedRetryGroup.count} saved uploads with this issue are included in the review.</p>
+      </section> : null}
       <p aria-live="polite" className="m-0 text-[0.72rem] leading-relaxed text-[#5f6c80]">{matchingItems.length} of {items.length} saved video{items.length === 1 ? "" : "s"}{titleQuery !== deferredTitleQuery ? " · Updating search…" : ""}</p>
       <table aria-label="Saved upload queue" className="w-full min-w-[860px] border-separate border-spacing-y-2.5 max-sm:min-w-0 max-sm:[&_tbody]:block max-sm:[&_tr]:block max-sm:[&_tr]:w-full max-sm:[&_tr]:border-b max-sm:[&_tr]:border-[#e4e8ee] max-sm:[&_tr]:py-3 max-sm:[&_thead]:hidden" >
         <thead>
@@ -188,6 +219,7 @@ export function QueueTable({
         </thead>
         <tbody>
           {visibleItems.items.map((item) => {
+            const issue = uploadRetryIssueKey(item);
             const progress = item.totalBytes
               ? Math.min(100, Math.max(0, Math.round((item.confirmedBytes / item.totalBytes) * 100)))
               : 0;
@@ -227,6 +259,9 @@ export function QueueTable({
                   </div>
                   {item.status === "uploading" ? <span className="mt-1 block text-[0.72rem] text-[#66748a]">{formatEta(item)}</span> : null}
                   {item.detail ? <span className="mt-1 block max-w-xs break-words text-[0.72rem] text-[#5f6c80]">{item.detail}</span> : null}
+                  {(item.status === "failed" && !item.videoId) || (item.status === "needs_reconciliation" && issue) ? <div className="mt-2 flex flex-wrap gap-1.5">
+                    <button aria-label={`Retry upload: ${item.title}`} className={secondaryButtonClass} disabled={busy} onClick={() => onQueue(item)} type="button">Retry upload</button>
+                  </div> : null}
                 </td>
                 <td className={dataCellClass} data-label="Status">
                   <div className="flex flex-col items-start gap-2">
@@ -234,15 +269,15 @@ export function QueueTable({
                     <div className="flex flex-wrap justify-end gap-1.5 max-sm:mt-1 max-sm:justify-start">
                       {item.status === "draft" || item.status === "failed" ? (
                         <>
-                          <button
-                            aria-label={`${item.status === "failed" ? "Retry upload" : "Add to queue"}: ${item.title}`}
+                          {item.status === "draft" ? <button
+                            aria-label={`Add to queue: ${item.title}`}
                             className={secondaryButtonClass}
                             disabled={busy}
                             onClick={() => onQueue(item)}
                             type="button"
                           >
-                            {item.status === "failed" ? "Retry upload" : "Add to queue"}
-                          </button>
+                            Add to queue
+                          </button> : null}
                           <button aria-label={`Remove from queue: ${item.title}`} className={dangerButtonClass} disabled={busy} onClick={() => onCancel(item)} type="button">Remove</button>
                         </>
                       ) : item.status === "uploaded" && !item.deleteSourceAfterUpload && !item.sourceDeleteStatus ? (

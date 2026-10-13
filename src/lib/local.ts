@@ -3,10 +3,6 @@ import type {
   ConnectionSettings,
   DashboardSnapshot,
   DeletionRequest,
-  FolderMonitorSettings,
-  FolderMonitorOverview,
-  FolderMonitorVisibility,
-  ManualUploadDefaults,
   ManualUploadSettings,
   BatchImportReceipt,
   PortableArchiveReceipt,
@@ -22,7 +18,10 @@ import type {
   YouTubeConnectionStart,
   YouTubePlaylist,
   PlaylistPrivacy,
-  FolderMonitorLocalDeleteResult,
+  PlaylistAddReceipt,
+  UploadLimitStatus,
+  OAuthClientReplacementReview,
+  OAuthClientReplacementStatus,
 } from "./types";
 
 // Use Tauri's public runtime detector. Internal bridge properties are not an
@@ -242,18 +241,18 @@ export async function listYouTubePlaylists(): Promise<YouTubePlaylist[]> {
   return invoke<YouTubePlaylist[]>("list_youtube_playlists");
 }
 
-/** Creates a private playlist for the currently connected YouTube channel. */
-export async function createYouTubePlaylist(title: string, privacyStatus: PlaylistPrivacy = "private"): Promise<YouTubePlaylist> {
+/** Creates an explicitly reviewed playlist in the bound YouTube channel. */
+export async function createYouTubePlaylist(title: string, privacyStatus: PlaylistPrivacy = "private", expectedChannelId?: string): Promise<YouTubePlaylist> {
   if (!isTauri)
     throw new Error("Playlist creation is available only in the signed desktop app.");
-  return invoke<YouTubePlaylist>("create_youtube_playlist", { title, privacyStatus });
+  return invoke<YouTubePlaylist>("create_youtube_playlist", { title, privacyStatus, ...(expectedChannelId ? { expectedChannelId } : {}) });
 }
 
 /** Adds an explicitly selected saved active-channel video set to a playlist. */
-export async function addRemoteVideosToPlaylist(playlistId: string, videoIds: string[]): Promise<number> {
+export async function addRemoteVideosToPlaylist(playlistId: string, videoIds: string[], expectedChannelId?: string, requestId?: string): Promise<PlaylistAddReceipt> {
   if (!isTauri)
     throw new Error("Playlist management is available only in the signed desktop app.");
-  return invoke<number>("add_remote_videos_to_playlist", { playlistId, videoIds });
+  return invoke<PlaylistAddReceipt>("add_remote_videos_to_playlist", { playlistId, videoIds, ...(expectedChannelId ? { expectedChannelId } : {}), ...(requestId ? { requestId } : {}) });
 }
 
 export async function sortPlaylistItemsByTitle(playlistId: string, direction: "ascending" | "descending"): Promise<number> {
@@ -261,18 +260,7 @@ export async function sortPlaylistItemsByTitle(playlistId: string, direction: "a
   return invoke<number>("sort_playlist_items_by_title", { playlistId, direction });
 }
 
-export async function loadManualUploadDefaults(): Promise<ManualUploadDefaults> {
-  if (!isTauri) return { madeForKids: false };
-  return invoke<ManualUploadDefaults>("load_manual_upload_defaults");
-}
-
-export async function saveManualUploadDefaults(
-  madeForKids: boolean,
-): Promise<ManualUploadDefaults> {
-  return invoke<ManualUploadDefaults>("save_manual_upload_defaults", {
-    madeForKids,
-  });
-}
+export { loadManualUploadDefaults, saveManualUploadDefaults } from "./manual-upload-defaults";
 
 export async function queueItem(id: string): Promise<UploadItem> {
   return invoke<UploadItem>("queue_item", { id });
@@ -450,73 +438,7 @@ export async function resumeQueuedUploads(): Promise<number> {
   return invoke<number>("resume_queued_uploads");
 }
 
-export async function loadFolderMonitorSettings(): Promise<FolderMonitorSettings> {
-  if (!isTauri) {
-    return {
-      enabled: false,
-      visibility: "private",
-      madeForKids: false,
-      deleteSourceAfterUpload: false,
-      status: "disabled",
-      detail: "Folder monitoring is available only in the signed desktop app.",
-    };
-  }
-  return invoke<FolderMonitorSettings>("load_folder_monitor_settings");
-}
-
-export async function loadFolderMonitorOverview(): Promise<FolderMonitorOverview> {
-  if (!isTauri) {
-    return {
-      settings: await loadFolderMonitorSettings(),
-      files: [],
-      logs: [],
-    };
-  }
-  return invoke<FolderMonitorOverview>("load_folder_monitor_overview");
-}
-
-export async function enableFolderMonitor(
-  path: string,
-  visibility: FolderMonitorVisibility,
-  madeForKids: boolean,
-  deleteSourceAfterUpload: boolean,
-  playlistId?: string,
-  playlistTitle?: string,
-): Promise<FolderMonitorSettings> {
-  return invoke<FolderMonitorSettings>("enable_folder_monitor", {
-    path,
-    visibility,
-    madeForKids,
-    deleteSourceAfterUpload,
-    playlistId,
-    playlistTitle,
-  });
-}
-
-export async function disableFolderMonitor(): Promise<FolderMonitorSettings> {
-  return invoke<FolderMonitorSettings>("disable_folder_monitor");
-}
-
-export async function scanFolderMonitorNow(): Promise<FolderMonitorSettings> {
-  return invoke<FolderMonitorSettings>("scan_folder_monitor_now");
-}
-
-/** Explicitly moves the current monitored-folder baseline through normal safe intake. */
-export async function processExistingFolderFiles(): Promise<FolderMonitorSettings> {
-  return invoke<FolderMonitorSettings>("process_existing_folder_files");
-}
-
-/** Restores eligible operator-cancelled watched-folder uploads and wakes automatic dispatch. */
-export async function requeueCancelledFolderMonitorFiles(
-  itemIds: string[] = [],
-): Promise<number> {
-  return invoke<number>("requeue_cancelled_folder_monitor_files", { itemIds });
-}
-
-/** Rechecks ambiguous watched uploads against YouTube before safely retrying absent IDs. */
-export async function reconcileFolderMonitorUploads(): Promise<number> {
-  return invoke<number>("reconcile_folder_monitor_uploads");
-}
+export { loadFolderMonitors, loadFolderMonitorSettings, loadFolderMonitorOverview, enableFolderMonitor, disableFolderMonitor, removeFolderMonitor, scanFolderMonitorNow, processExistingFolderFiles, requeueCancelledFolderMonitorFiles, reconcileFolderMonitorUploads, deleteFolderMonitorUploadedSource, deleteFolderMonitorUploadedSources } from "./folder-monitor";
 
 export async function loadConnectionSettings(): Promise<ConnectionSettings> {
   if (!isTauri) return { connected: false };
@@ -528,6 +450,28 @@ export async function importDesktopOAuthClient(
   path: string,
 ): Promise<ConnectionSettings> {
   return invoke<ConnectionSettings>("import_desktop_oauth_client", { path });
+}
+
+export async function loadUploadLimitStatus(expectedChannelId?: string): Promise<UploadLimitStatus> {
+  if (!isTauri) return { kind: "none" };
+  return invoke<UploadLimitStatus>("load_upload_limit_status", { expectedChannelId });
+}
+
+/** Rust stages and parses the file; only an opaque review reaches the webview. */
+export async function prepareOAuthClientReplacement(path: string, expectedChannelId: string): Promise<OAuthClientReplacementReview> {
+  return invoke<OAuthClientReplacementReview>("prepare_oauth_client_replacement", { path, expectedChannelId });
+}
+
+export async function beginOAuthClientReplacement(reviewId: string, expectedChannelId: string): Promise<YouTubeConnectionStart> {
+  return invoke<YouTubeConnectionStart>("begin_oauth_client_replacement", { reviewId, expectedChannelId });
+}
+
+export async function loadOAuthClientReplacementStatus(reviewId: string): Promise<OAuthClientReplacementStatus> {
+  return invoke<OAuthClientReplacementStatus>("load_oauth_client_replacement_status", { reviewId });
+}
+
+export async function cancelOAuthClientReplacement(reviewId: string): Promise<ConnectionSettings> {
+  return invoke<ConnectionSettings>("cancel_oauth_client_replacement", { reviewId });
 }
 
 export async function beginYoutubeConnection(): Promise<YouTubeConnectionStart> {
@@ -563,24 +507,6 @@ export async function requestVideoDeletion(
   });
 }
 
-/** Permanently removes one exact local watched source after YouTube confirmation. */
-export async function deleteFolderMonitorUploadedSource(
-  itemId: string,
-  confirmation: string,
-): Promise<FolderMonitorLocalDeleteResult> {
-  return invoke<FolderMonitorLocalDeleteResult>("delete_folder_monitor_uploaded_source", {
-    itemId,
-    confirmation,
-  });
-}
-
-/** Deletes a reviewed batch of local watched sources after one exact bulk phrase. */
-export async function deleteFolderMonitorUploadedSources(
-  itemIds: string[],
-  confirmation: string,
-): Promise<FolderMonitorLocalDeleteResult[]> {
-  return invoke<FolderMonitorLocalDeleteResult[]>("delete_folder_monitor_uploaded_sources", { itemIds, confirmation });
-}
 
 export async function cancelDeletionRequest(id: string): Promise<void> {
   return invoke<void>("cancel_deletion_request", { id });

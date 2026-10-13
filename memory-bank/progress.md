@@ -1,5 +1,248 @@
 # Progress
 
+## 2026-10-13 — Guided workflows final local handoff
+
+- TASK149–160 and TASK161 are complete for local source implementation. All
+  twelve workflows use native scoped authority and lazy guided UI. Prospective
+  attachments/calendar/metadata resolve in one plan; jobs and exact ordinal
+  mappings commit with their upload identity. Long asset reads happen before
+  SQLite write gates. Native batch reports include all retained statuses and
+  preserve scope through paging/refresh/export.
+- Passed 417 native tests, 480 frontend tests, production native check/fmt,
+  strict TypeScript, Tailwind, whitespace and unchanged bundle budgets
+  (223.20/69.97 KiB raw/gzip JavaScript, 39.40 KiB CSS). Six native checks are
+  explicitly ignored in the ordinary suite; the real decoder fixture passes
+  separately. Operation scripts: 40 pass/one Windows platform skip.
+- Merged browser QA: 189 checks, zero console errors/warnings. Retry-specific
+  QA: 73 checks; advanced planning: 32; prospective assets: 27; batch reports:
+  20; final disconnect retained-profile notice: 11. Individual screenshot
+  directories and source/validation boundaries are linked in leaf records.
+- Quota/provider adapters and inventory read chains are scoped to captured
+  credentials. Stale inventory cannot reselect another account. OAuth final
+  promotion/cancellation share a short gate; disconnected UI correctly states
+  saved profiles/uploads remain. Single retries and one global same-issue bulk
+  button below filters preserve originals, IDs, holds and checkpoints.
+- No release, commit/push, live provider or personal credential/media action
+  occurred. Real OS tray/notification/login startup and packaged playback remain
+  unverified. Existing unavailable F: sidecar junction was preserved; native
+  resource overrides are local harness evidence. Perceptual review remains
+  experimental and gated for release on representative accuracy/performance
+  and exact distribution evidence.
+
+## 2026-10-13 — Guided workflows and retry integration snapshot
+
+- TASK149–160 implement all twelve researched source workflows in focused
+  parallel packets. Native account/source/checkpoint authority is retained;
+  lazy stepped dialogs expose normal and recovery paths without a cloud backend
+  or app-owned media copies. Leaf records now contain source boundaries,
+  screenshots and concrete evidence instead of planning placeholders.
+- TASK161 completes single retry beside upload errors and one matching-issue
+  bulk control below filters and above the table. Multiple groups use one issue
+  selector; rows never repeat bulk controls. Twelve native retry, 26 focused
+  frontend and 73 browser assertions pass, including partial outcomes,
+  unchanged-original proof, checkpoint retention and sanitized live projection.
+- Shared checks pass 395 native tests, 446 frontend tests, production native
+  check and unchanged bundle budgets. The real native decoder fixture also
+  passes on generated videos without altering originals or upload identities;
+  forty operation/portable packaging fixtures pass with one platform skip.
+  Final prospective plan assets, native batch report filtering and provider
+  quota/account-switch audit changes remain under integration and will receive
+  new shared checks before parent completion.
+- Cold startup retains its 110-statement budget by installing ordinary runtime
+  indexes atomically after the safe shell and before recovery/admission. DDL
+  rollback/retry and unchanged queue/checkpoints are covered. Notification
+  plugin compatibility explains the native dependency/lock/schema changes.
+- Merged actual component fixtures pass 118 browser checks without console
+  errors/warnings; desktop/mobile light/dark tools and global retry screenshots
+  are in `merged-workflow-20261013` and `task161-retry-20261013` under the thread
+  visualization directory. Live provider, OS behaviors and packaged playback
+  remain separate. The existing unavailable F: sidecar junction was preserved.
+- Perceptual matching remains experimental: generated fixtures expose a hue
+  false positive. Representative accuracy/performance and distribution evidence
+  are required before release. No commit, push, publication, personal credential
+  or personal media action occurred.
+
+## 2026-10-13 — Upload-tool research and proposed roadmap
+
+- TASK148 records a primary-source comparison of tokland/youtube-upload,
+  porjo/youtubeuploader, beveradb/youtube-bulk-upload, GRardT/Youtube-Uploader and
+  YouTube Studio, checked against current app source. It separates documented
+  parity from inferred documentation gaps; no competing runtime or universal
+  feature-absence claim is made.
+- Twelve proposed candidates have priorities, acceptance criteria, suggested
+  ownership/dependencies and validation boundaries. Recommended first slices are
+  verified source relocation, targeted post-upload repair and a whole-batch dry
+  run. Existing TASK142–147 capabilities are excluded from the missing-feature list.
+- Current official API references and quota-table body differ from older uploader
+  advice and a generated page summary. A quota planner must use dated method/
+  bucket evidence, expose unknown actual allowance and preserve independent
+  project/channel pauses. Recheck provider limits before implementation.
+- Research and task-file creation are complete; implementation remains proposed
+  with all checklist items unchecked. Only documentation changed; source, personal
+  credentials/media, schema, configuration and dependencies were untouched.
+
+## 2026-10-13 — Simultaneous folder monitoring
+
+- TASK147 supports multiple folders for the connected channel, with separate
+  visibility, audience, playlist, cleanup, status and activity. Every enabled
+  root continues discovery regardless of the selected UI folder; one shared
+  coordinator reuses the bounded original-source upload/hash/probe engine.
+  Existing and new supported direct-child videos enter after two unchanged scans.
+- Add/edit uses Folder → Upload choices → Review recurring approval. Cards have
+  independent pause/resume/edit/remove controls; removal has Folder → Review
+  steps and retains originals, queue, checkpoints and receipts. Playlist approval
+  verifies the native owner/title. Manual defaults remain independent.
+- Schema 7 assigns stable monitor ownership before rebuilding observation keys,
+  retaining same-path channel history and past roots without filesystem work at
+  migration/startup. All activity, recovery, reconciliation, cleanup and progress
+  are scoped by monitor/channel; duplicate physical roots are rejected at runtime.
+- Review caught remove/re-add reintake, paused legacy raw-path resume and a
+  worker shutdown/enable race. Reapproval reuses archived identity/observations,
+  preserves source locators and queued choices, and rejects truncated alias
+  uncertainty. Legacy keys repair only with same-root proof; worker handoff
+  rechecks admission. Pause/remove wait for scans away from the GUI thread.
+- Passed: 214 frontend tests, 218 integrated native tests (zero failed, five
+  release benchmarks ignored), 11 focused monitor cases plus one new migration
+  case, native offline/locked check/fmt, strict TypeScript, build, Tailwind and
+  whitespace. Startup budgets pass unchanged at 223.19 KiB raw JS, 69.88 KiB
+  gzip JS and 39.22 KiB raw CSS. Frozen native hashes match independent review
+  and the final validation receipt; no remaining concrete review findings.
+- Controlled Chrome/Playwright bridge fixtures passed 26 normal/scoped/failure
+  interactions in StrictMode, including two-folder setup, Back/approval, separate
+  controls, recovery, single/bulk cleanup, progress filtering, duplicate-root
+  errors, retry, Escape/focus and late cross-channel suppression. Desktop/mobile
+  light/dark screenshots and reachable mobile approval controls were inspected;
+  primary contrast is 5.28:1 and console errors/warnings are zero. External
+  `multi-folder-20261013` retains scripts, screenshots and receipts.
+- No personal profile was migrated, and browser fixtures performed no real
+  uploads or deletions. Packaged folder watching, live provider upload/playlist
+  reads and non-Windows runtime remain separate unverified gates. Application
+  rollback after schema migration requires a pre-migration database backup.
+
+## 2026-10-13 — Device-wide visibility and playlist defaults
+
+- TASK146 expands the existing upload-default card into three labelled controls:
+  Made for Kids, visibility and playlist, with direct local saves and refresh.
+  Audience/visibility are device-wide; playlist preferences belong to each
+  connected channel on that device, including No playlist and switch-back restore.
+- Native partial updates independently validate visibility and playlist owner/
+  title, recheck the channel and commit atomically. Schema 6 migration preserves
+  audience, credential pointers, quota pauses, queue and resumable checkpoints.
+  Default selection performs read-only provider operations, with no video or
+  playlist creation/update. Existing Folder Monitor configuration is independent.
+- Manual upload review loads the saved visibility and an available same-channel
+  playlist, keeps all choices visible, and retains explicit batch changes through
+  delayed reads/playlist refresh. Unavailable defaults are explained before import.
+  Changing batch choices does not change device preferences or existing uploads.
+- Passed: 194 frontend tests, 206 integrated native tests (zero failed, five
+  release benchmarks ignored), seven focused native default cases plus one
+  schema migration case, strict TypeScript, native offline/locked check/fmt,
+  production build, Tailwind ownership and whitespace. Startup budgets pass at
+  224.02 KiB raw JS, 70.00 KiB gzip JS and 39.22 KiB raw CSS. Default command
+  helpers were split into the lazy manual-upload surface after the initial build
+  exceeded the existing JS gzip budget; budget thresholds remain unchanged.
+- Browser fixtures in StrictMode verify save/reload, normal prefilled review and
+  confirmation, per-batch overrides, late reads, failed save retention, pending
+  guard, channel switch/restore, channel-only clear, missing playlist, provider
+  list/default retry, stale responses, and mobile light/dark containment. The
+  rendered controls and screenshots were visually inspected with zero console
+  errors/warnings. Screenshots/scripts/receipts stay outside the checkout.
+- Local SQLite/provider-resolver and controlled browser bridge fixtures prove
+  implementation behavior. Actual YouTube playlist reads, packaged persistence,
+  signed release and non-Windows/mobile runtime remain unverified gates.
+
+## 2026-10-13 — Account OAuth JSON replacement and upload limits
+
+- TASK145 adds Replace OAuth JSON to Connected account, using a lazy Choose
+  JSON → Review → Reconnect modal. Cloud quota appears first, with a separate
+  channel-limit explanation. Native staging holds admission, keeps the current
+  connection, and requires Google to verify the same channel before credential
+  promotion. Failure/cancellation/stale callbacks preserve queue and checkpoints.
+- Protected bundle promotion and schema 5 isolate candidate credentials from
+  the existing connection. Successful replacement clears cached access tokens
+  and separately granted management permission. Same/unknown project identity
+  preserves API pauses; a different established project uses its own scope while
+  retaining old records and every channel pause. Provider quota is not reset.
+- Structured reason classification recognizes documented 400/403/429 errors,
+  gives Cloud quota precedence, and persists mixed API/channel pauses atomically.
+  Pauses remain durable with the existing conservative 24-hour retry interval;
+  account updates use native events and authorization polling stops on close.
+- Passed: 182 frontend tests; 198 integrated native tests, zero failures and
+  five ignored release benchmarks, including 22 new classification/replacement/
+  migration cases; native check/fmt, strict TypeScript, production build, Tailwind
+  and unchanged budgets (223.99 KiB raw JS, 69.98 KiB gzip, 39.61 KiB raw CSS).
+  Final wording was also checked with the 12 focused modal tests.
+- Browser fixtures verify StrictMode, file-picker cancellation/validation,
+  review-before-consent, pending submission guard, same-channel completion,
+  wrong-channel retry, failed cancellation, Back cleanup, Escape/focus restoration,
+  Google browser failure/reopen, no closed-modal polling, stale-channel fencing,
+  primary contrast and desktop/mobile light/dark containment. Focus return after
+  removing parent inert was repaired. Screenshots and receipts remain external.
+- Verification used controlled frontend/native fixtures and existing isolated
+  toolchain/output directories. No real Google authorization, personal credential
+  replacement, provider quota reset, upload, packaged runtime, or non-Windows
+  behavior is claimed; those remain external certification gates.
+
+## 2026-10-13 — Playlist selection, additions and stepped creation
+
+- TASK144 adds search/visibility filters, select-page/select-matching shortcuts,
+  Shift-click/Shift-Space ranges across pages, selected-only review and hidden
+  counts. Selections survive filtering and are capped at 200 per addition.
+- Reviewed bulk writes preserve title display order, validate channel and
+  destination ownership, skip current membership, report scoped real progress,
+  and retain only unresolved videos for retry. The retry reads fresh membership
+  so confirmed/previously present videos are not blindly inserted again.
+- Creation is a lazy Name → Visibility → Review modal shared by Playlists and
+  upload intake, following the user's stepped-dialog preference. Back preserves
+  drafts, final submission alone writes, and success selects the new playlist
+  without losing videos or upload choices. Uncertain creation blocks immediate
+  repeat and directs the operator to check the playlist list.
+- Creation previously used upload/read credentials that lack playlist-write
+  scope. All playlist writes now require the existing protected management
+  credential and temporary mode; ordinary upload consent is unchanged. Review
+  provides permission status, explicit authorization/refresh/mode entry and
+  reauthorization. Closing the dialog refreshes only the parent's permission
+  state, preserving a newly created destination and its video selection.
+- Verification passes: 167 frontend tests, 15 focused native playlist tests,
+  176 integrated native tests (zero failed, five release benchmarks ignored),
+  ordinary native check/fmt, strict TypeScript, production build and Tailwind
+  guard. Browser fixtures at 1440x1000/390x844 verify all three selection
+  shortcuts, partial retry, wizard navigation/validation, permission handoff,
+  pending/uncertain outcomes, intake preservation/nested isolation, stale channel
+  results and light/dark responsive layouts with zero console errors/warnings.
+  Screenshots/scripts/receipts remain outside the checkout.
+- The unavailable normal dist/toolchain junctions were handled through existing
+  isolated validation directories and process-only output/sidecar settings.
+  Native mocks and browser bridge fixtures perform no real account writes.
+  Live YouTube consent/playlist writes, packaged runtime and non-Windows/mobile
+  behavior remain separate unverified certification gates.
+
+## 2026-10-12 — Duplicate video comparison modal
+
+- TASK143 adds Compare videos to upload holds, pre-ingest matches, and saved
+  duplicate candidates. The modal shows the suspected original alongside
+  affected YouTube embeds, with selectors for multiple files/matches, native
+  playback controls, close/Escape and restored trigger focus.
+- Native preview streams original files through opaque revocable grants without
+  copying media or exposing paths. Each bounded request checks channel, source
+  identity/signature and expiry. Missing originals and codec/provider playback
+  limits remain explicit; preview performs no upload or deletion.
+- Browser fixture checks at 1440x1000 and 390x844 passed all three entry points,
+  actual local fixture decoding/play/seek, source/video selection, Escape/focus,
+  player removal/token release, failed preparation/retry, light/dark rendering,
+  and player containment. The actual public YouTube sample embed loaded.
+  Browser plugin was unavailable; Playwright CLI with Chrome supplied QA.
+  The synthetic bridge/player fixture is not packaged native playback evidence.
+- All 134 frontend tests pass, including 12 modal tests. Production build,
+  Tailwind and unchanged startup-size budgets pass with a task-local output
+  folder because the normal dist junction is unavailable. Native checks pass:
+  7 focused preview tests, 161 integrated tests (5 release benchmarks ignored),
+  ordinary check, formatting and whitespace. The existing asynchronous requeue
+  test was isolated from its worker timing race without changing production
+  behavior. Screenshots, QA scripts and receipts remain outside the checkout.
+- Owner-private YouTube playback, native codec coverage, ordinary packaged
+  WebView streaming and non-Windows runtime certification remain unverified.
+
 ## 2026-10-09 — Original-file uploads restored under explicit storage constraint
 
 - TASK142 restores manual and watched intake from original files without new

@@ -11,7 +11,6 @@
 @source "./components/DedupeActivityPanel.tsx";
 @source "./components/DiagnosticsPanel.tsx";
 @source "./components/GoogleSetupWizard.tsx";
-@source "./components/ManualUploadDefaultsPanel.tsx";
 @source "./components/PaginationControls.tsx";
 @source "./components/QueueTable.tsx";
 @source "./components/StatusPill.tsx";

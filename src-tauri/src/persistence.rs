@@ -1,7 +1,7 @@
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::{collections::HashSet, time::Duration};
 
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 4;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 8;
 
 #[cfg(all(test, feature = "performance-harness"))]
 static TEST_DATABASE_TRACE: std::sync::Mutex<Option<(std::thread::ThreadId, Vec<String>)>> =
@@ -39,6 +39,9 @@ const CURRENT_TABLES_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS upload_items (
   id TEXT PRIMARY KEY NOT NULL,
   title TEXT NOT NULL,
+  upload_metadata_json TEXT NOT NULL DEFAULT '{}',
+  upload_batch_id TEXT,
+  upload_plan_id TEXT,
   normalized_title TEXT NOT NULL DEFAULT '',
   canonical_title TEXT NOT NULL DEFAULT '',
   has_copy_marker INTEGER NOT NULL DEFAULT 0,
@@ -47,6 +50,7 @@ CREATE TABLE IF NOT EXISTS upload_items (
   file_name TEXT NOT NULL,
   channel_name TEXT,
   channel_id TEXT,
+  folder_monitor_id TEXT,
   source_path TEXT,
   workspace_path TEXT NOT NULL,
   partial_path TEXT,
@@ -77,12 +81,15 @@ CREATE TABLE IF NOT EXISTS upload_items (
 CREATE TABLE IF NOT EXISTS connection_settings (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   oauth_client_id TEXT,
+  oauth_credential_id TEXT,
+  oauth_project_id TEXT,
   active_channel TEXT,
   active_channel_id TEXT,
   connection_detail TEXT,
   deletion_authorized INTEGER NOT NULL DEFAULT 0,
   deletion_sudo_until TEXT,
   manual_made_for_kids_default INTEGER NOT NULL DEFAULT 0,
+  manual_visibility_default TEXT NOT NULL DEFAULT 'private' CHECK(manual_visibility_default IN ('private', 'unlisted', 'public')),
   upload_quota_pause_until TEXT,
   updated_at TEXT NOT NULL
 );
@@ -99,6 +106,12 @@ CREATE TABLE IF NOT EXISTS remote_videos (
   duration TEXT,
   privacy_status TEXT,
   upload_status TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS manual_playlist_defaults (
+  channel_id TEXT PRIMARY KEY NOT NULL,
+  playlist_id TEXT NOT NULL,
+  playlist_title TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS remote_video_sync_staging (
@@ -176,6 +189,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
   item_id TEXT,
   channel_name TEXT,
   channel_id TEXT NOT NULL DEFAULT '',
+  folder_monitor_id TEXT,
   kind TEXT NOT NULL,
   detail TEXT,
   created_at TEXT NOT NULL,
@@ -205,6 +219,7 @@ CREATE TABLE IF NOT EXISTS folder_monitor_settings (
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS folder_monitor_observations (
+  monitor_id TEXT NOT NULL DEFAULT 'legacy-singleton',
   channel_id TEXT NOT NULL DEFAULT '',
   channel_name TEXT NOT NULL,
   file_path TEXT NOT NULL,
@@ -215,7 +230,26 @@ CREATE TABLE IF NOT EXISTS folder_monitor_observations (
   upload_item_id TEXT,
   first_seen_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  PRIMARY KEY(channel_id, file_path)
+  PRIMARY KEY(monitor_id, file_path)
+);
+CREATE TABLE IF NOT EXISTS folder_monitors (
+  id TEXT PRIMARY KEY NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  removed INTEGER NOT NULL DEFAULT 0,
+  folder_path TEXT,
+  folder_key TEXT NOT NULL DEFAULT '',
+  channel_name TEXT,
+  channel_id TEXT,
+  visibility TEXT NOT NULL DEFAULT 'private',
+  made_for_kids INTEGER NOT NULL DEFAULT 0,
+  playlist_id TEXT,
+  playlist_title TEXT,
+  delete_source_after_upload INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'disabled',
+  detail TEXT NOT NULL DEFAULT 'Folder monitoring is disabled.',
+  last_scan_at TEXT,
+  last_file_name TEXT,
+  updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS upload_disk_capabilities (
   volume_id TEXT PRIMARY KEY NOT NULL,
@@ -229,6 +263,12 @@ CREATE TABLE IF NOT EXISTS upload_connection_capability (
 );
 CREATE TABLE IF NOT EXISTS upload_quota_pauses (
   channel_id TEXT PRIMARY KEY NOT NULL,
+  pause_until TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS api_quota_pauses (
+  quota_scope TEXT PRIMARY KEY NOT NULL,
+  channel_id TEXT NOT NULL,
   pause_until TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -275,6 +315,7 @@ AFTER INSERT ON upload_items BEGIN
       'sizeBytes', NEW.size_bytes, 'digest', NEW.digest, 'status', NEW.status,
       'confirmedBytes', NEW.confirmed_bytes, 'totalBytes', NEW.total_bytes,
       'videoId', NEW.video_id, 'detail', NEW.detail, 'visibility', NEW.visibility,
+      'retryFailureKey', (SELECT failure_key FROM upload_retry_failures WHERE item_id=NEW.id AND channel_id=NEW.channel_id),
       'madeForKids', json(CASE WHEN NEW.made_for_kids != 0 THEN 'true' ELSE 'false' END),
       'playlistId', NEW.playlist_id, 'playlistTitle', NEW.playlist_title,
       'uploadStartedAt', NEW.upload_started_at,
@@ -301,6 +342,7 @@ AFTER UPDATE ON upload_items BEGIN
         'sizeBytes', NEW.size_bytes, 'digest', NEW.digest, 'status', NEW.status,
         'confirmedBytes', NEW.confirmed_bytes, 'totalBytes', NEW.total_bytes,
         'videoId', NEW.video_id, 'detail', NEW.detail, 'visibility', NEW.visibility,
+        'retryFailureKey', (SELECT failure_key FROM upload_retry_failures WHERE item_id=NEW.id AND channel_id=NEW.channel_id),
         'madeForKids', json(CASE WHEN NEW.made_for_kids != 0 THEN 'true' ELSE 'false' END),
         'playlistId', NEW.playlist_id, 'playlistTitle', NEW.playlist_title,
         'uploadStartedAt', NEW.upload_started_at,
@@ -423,6 +465,16 @@ AFTER INSERT ON folder_monitor_observations BEGIN
       'uploadItemId', NEW.upload_item_id, 'updatedAt', NEW.updated_at),
     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 END;
+CREATE TRIGGER IF NOT EXISTS state_monitors_insert
+AFTER INSERT ON folder_monitors BEGIN
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(COALESCE(NEW.channel_id, ''), 'folder_monitor', NEW.id, 'invalidate', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+END;
+CREATE TRIGGER IF NOT EXISTS state_monitors_update
+AFTER UPDATE ON folder_monitors BEGIN
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(COALESCE(NEW.channel_id, ''), 'folder_monitor', NEW.id, 'invalidate', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+END;
 CREATE TRIGGER IF NOT EXISTS state_folder_observation_update
 AFTER UPDATE ON folder_monitor_observations BEGIN
   INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
@@ -450,23 +502,69 @@ AFTER INSERT ON upload_quota_pauses BEGIN
   INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
   VALUES(NEW.channel_id, 'quota', NEW.channel_id, 'upsert',
     json_object('pauseUntil', NEW.pause_until), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(NEW.channel_id, 'connection', 'account', 'invalidate', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 END;
 CREATE TRIGGER IF NOT EXISTS state_quota_update
 AFTER UPDATE ON upload_quota_pauses BEGIN
   INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
   VALUES(NEW.channel_id, 'quota', NEW.channel_id, 'upsert',
     json_object('pauseUntil', NEW.pause_until), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(NEW.channel_id, 'connection', 'account', 'invalidate', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 END;
 CREATE TRIGGER IF NOT EXISTS state_quota_delete
 AFTER DELETE ON upload_quota_pauses BEGIN
   INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
   VALUES(OLD.channel_id, 'quota', OLD.channel_id, 'delete', '{}',
     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(OLD.channel_id, 'connection', 'account', 'invalidate', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 END;
 
 CREATE TRIGGER IF NOT EXISTS state_changes_prune
 AFTER INSERT ON state_changes WHEN (NEW.revision % 256) = 0 BEGIN
   DELETE FROM state_changes WHERE revision < NEW.revision - 8192;
+END;
+
+CREATE TRIGGER IF NOT EXISTS state_api_quota_insert
+AFTER INSERT ON api_quota_pauses BEGIN
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(NEW.channel_id, 'quota', NEW.channel_id, 'upsert',
+    json_object('pauseUntil', NEW.pause_until, 'kind', 'api_quota'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(NEW.channel_id, 'connection', 'account', 'invalidate', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+END;
+CREATE TRIGGER IF NOT EXISTS state_api_quota_update
+AFTER UPDATE ON api_quota_pauses BEGIN
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(NEW.channel_id, 'quota', NEW.channel_id, 'upsert',
+    json_object('pauseUntil', NEW.pause_until, 'kind', 'api_quota'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(NEW.channel_id, 'connection', 'account', 'invalidate', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+END;
+CREATE TRIGGER IF NOT EXISTS state_api_quota_delete
+AFTER DELETE ON api_quota_pauses BEGIN
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(OLD.channel_id, 'quota', OLD.channel_id, 'delete', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(OLD.channel_id, 'connection', 'account', 'invalidate', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+END;
+
+CREATE TRIGGER IF NOT EXISTS state_manual_playlist_default_insert
+AFTER INSERT ON manual_playlist_defaults BEGIN
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(NEW.channel_id, 'connection', 'account', 'invalidate', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+END;
+CREATE TRIGGER IF NOT EXISTS state_manual_playlist_default_update
+AFTER UPDATE ON manual_playlist_defaults BEGIN
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(NEW.channel_id, 'connection', 'account', 'invalidate', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+END;
+CREATE TRIGGER IF NOT EXISTS state_manual_playlist_default_delete
+AFTER DELETE ON manual_playlist_defaults BEGIN
+  INSERT INTO state_changes(channel_id, surface, entity_id, event_kind, payload_json, created_at)
+  VALUES(OLD.channel_id, 'connection', 'account', 'invalidate', '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 END;
 "#;
 
@@ -537,6 +635,16 @@ CREATE INDEX IF NOT EXISTS folder_monitor_observation_updated_idx
   ON folder_monitor_observations(channel_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS folder_monitor_observation_upload_idx
   ON folder_monitor_observations(upload_item_id, state);
+CREATE UNIQUE INDEX IF NOT EXISTS folder_monitors_live_root_idx
+  ON folder_monitors(folder_key) WHERE removed = 0 AND folder_key != '';
+CREATE INDEX IF NOT EXISTS folder_monitors_channel_idx
+  ON folder_monitors(channel_id, removed, enabled, id);
+CREATE INDEX IF NOT EXISTS folder_monitors_archived_root_idx
+  ON folder_monitors(channel_id, folder_key, removed, updated_at DESC);
+CREATE INDEX IF NOT EXISTS folder_monitor_id_activity_idx
+  ON folder_monitor_observations(monitor_id, channel_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS folder_monitor_audit_idx
+  ON audit_events(folder_monitor_id, channel_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS state_changes_channel_revision_idx
   ON state_changes(channel_id, revision);
 CREATE INDEX IF NOT EXISTS state_changes_surface_revision_idx
@@ -548,6 +656,12 @@ CREATE INDEX IF NOT EXISTS duplicate_candidate_projection_channel_idx
 "#;
 
 const COLUMN_MIGRATIONS: &[(&str, &str, &str)] = &[
+    ("upload_items", "upload_batch_id", "TEXT"),
+    ("upload_items", "upload_plan_id", "TEXT"),
+    ("upload_items", "upload_metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("upload_items", "folder_monitor_id", "TEXT"),
+    ("audit_events", "folder_monitor_id", "TEXT"),
+    ("folder_monitor_observations", "monitor_id", "TEXT NOT NULL DEFAULT 'legacy-singleton'"),
     ("upload_items", "partial_path", "TEXT"),
     (
         "upload_items",
@@ -614,6 +728,8 @@ const COLUMN_MIGRATIONS: &[(&str, &str, &str)] = &[
         "INTEGER NOT NULL DEFAULT 0",
     ),
     ("connection_settings", "connection_detail", "TEXT"),
+    ("connection_settings", "oauth_credential_id", "TEXT"),
+    ("connection_settings", "oauth_project_id", "TEXT"),
     (
         "connection_settings",
         "deletion_authorized",
@@ -624,6 +740,11 @@ const COLUMN_MIGRATIONS: &[(&str, &str, &str)] = &[
         "connection_settings",
         "manual_made_for_kids_default",
         "INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "connection_settings",
+        "manual_visibility_default",
+        "TEXT NOT NULL DEFAULT 'private' CHECK(manual_visibility_default IN ('private', 'unlisted', 'public'))",
     ),
     ("connection_settings", "upload_quota_pause_until", "TEXT"),
     ("connection_settings", "active_channel_id", "TEXT"),
@@ -848,6 +969,7 @@ fn rebuild_channel_scoped_folder_observations(transaction: &Transaction<'_>) -> 
         .execute_batch(
             "DROP TABLE IF EXISTS folder_monitor_observations_v2;
              CREATE TABLE folder_monitor_observations_v2 (
+               monitor_id TEXT NOT NULL DEFAULT 'legacy-singleton',
                channel_id TEXT NOT NULL DEFAULT '',
                channel_name TEXT NOT NULL,
                file_path TEXT NOT NULL,
@@ -858,13 +980,13 @@ fn rebuild_channel_scoped_folder_observations(transaction: &Transaction<'_>) -> 
                upload_item_id TEXT,
                first_seen_at TEXT NOT NULL,
                updated_at TEXT NOT NULL,
-               PRIMARY KEY(channel_id, file_path)
+               PRIMARY KEY(monitor_id, file_path)
              );
              INSERT OR REPLACE INTO folder_monitor_observations_v2(
-               channel_id, channel_name, file_path, size_bytes, modified_key,
+               monitor_id, channel_id, channel_name, file_path, size_bytes, modified_key,
                state, digest, upload_item_id, first_seen_at, updated_at
              )
-             SELECT channel_id, channel_name, file_path, size_bytes, modified_key,
+             SELECT monitor_id, channel_id, channel_name, file_path, size_bytes, modified_key,
                     state, digest, upload_item_id, first_seen_at, updated_at
              FROM folder_monitor_observations
              ORDER BY updated_at ASC;
@@ -874,11 +996,67 @@ fn rebuild_channel_scoped_folder_observations(transaction: &Transaction<'_>) -> 
         .map_err(|error| error.to_string())
 }
 
+fn migrate_monitor_configuration(transaction: &Transaction<'_>) -> Result<(), String> {
+    transaction.execute_batch(
+        "INSERT OR IGNORE INTO folder_monitors(id, enabled, removed, folder_path, channel_name, channel_id, visibility, made_for_kids, playlist_id, playlist_title, delete_source_after_upload, status, detail, last_scan_at, last_file_name, updated_at)
+         SELECT 'legacy-singleton', CASE WHEN channel_id IS NULL OR channel_id = '' THEN 0 ELSE enabled END,
+                CASE WHEN channel_id IS NULL OR channel_id = '' THEN 1 ELSE 0 END,
+                folder_path, channel_name, channel_id, visibility, made_for_kids, playlist_id, playlist_title,
+                delete_source_after_upload, status, detail, last_scan_at, last_file_name, updated_at
+         FROM folder_monitor_settings WHERE singleton = 1 AND folder_path IS NOT NULL;"
+    ).map_err(|error| error.to_string())?;
+    let configured: Vec<(String, Option<String>)> = transaction
+        .prepare("SELECT id, folder_path FROM folder_monitors WHERE folder_key = ''")
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|error| error.to_string())?;
+    for (id, path) in configured {
+        if let Some(path) = path {
+            transaction
+                .execute(
+                    "UPDATE folder_monitors SET folder_key = ?1 WHERE id = ?2",
+                    rusqlite::params![super::folder_monitors::root_key(&path), id],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    let observations: Vec<(String, String, String)> = transaction.prepare("SELECT channel_id, channel_name, file_path FROM folder_monitor_observations WHERE monitor_id = 'legacy-singleton' ORDER BY channel_id, file_path").map_err(|error| error.to_string())?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).map_err(|error| error.to_string())?
+        .collect::<Result<_, _>>().map_err(|error| error.to_string())?;
+    for (channel, name, path) in observations {
+        let root = std::path::Path::new(&path)
+            .parent()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let key = super::folder_monitors::root_key(&root);
+        let monitor_id = transaction.query_row("SELECT id FROM folder_monitors WHERE COALESCE(channel_id, '') = ?1 AND folder_key = ?2 ORDER BY removed ASC, id ASC LIMIT 1", rusqlite::params![channel, key], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())?;
+        let monitor_id = match monitor_id {
+            Some(id) => id,
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                transaction.execute("INSERT INTO folder_monitors(id, enabled, removed, folder_path, folder_key, channel_name, channel_id, status, detail, updated_at) VALUES(?1, 0, 1, ?2, ?3, ?4, ?5, 'removed', 'Historical watched-folder evidence retained from the earlier single-folder configuration.', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))", rusqlite::params![id, root, key, name, channel]).map_err(|error| error.to_string())?;
+                id
+            }
+        };
+        transaction.execute("UPDATE folder_monitor_observations SET monitor_id = ?1 WHERE monitor_id = 'legacy-singleton' AND channel_id = ?2 AND file_path = ?3", rusqlite::params![monitor_id, channel, path]).map_err(|error| error.to_string())?;
+    }
+    transaction.execute_batch(
+        "UPDATE upload_items SET folder_monitor_id = COALESCE((SELECT monitor_id FROM folder_monitor_observations WHERE upload_item_id = upload_items.id AND channel_id = COALESCE(upload_items.channel_id, '') AND file_path = COALESCE(upload_items.source_path, upload_items.workspace_path) LIMIT 1), (SELECT monitor_id FROM folder_monitor_observations WHERE upload_item_id = upload_items.id AND channel_id = COALESCE(upload_items.channel_id, '') LIMIT 1))
+         WHERE folder_monitor_id IS NULL AND EXISTS(SELECT 1 FROM folder_monitor_observations WHERE upload_item_id = upload_items.id AND channel_id = COALESCE(upload_items.channel_id, ''));
+         UPDATE audit_events SET folder_monitor_id = (SELECT folder_monitor_id FROM upload_items WHERE id = audit_events.item_id) WHERE folder_monitor_id IS NULL AND item_id IS NOT NULL;
+         UPDATE audit_events SET folder_monitor_id = 'legacy-singleton' WHERE folder_monitor_id IS NULL AND item_id IS NULL AND kind LIKE 'folder_monitor_%' AND EXISTS(SELECT 1 FROM folder_monitors WHERE id = 'legacy-singleton' AND COALESCE(channel_id, '') = audit_events.channel_id);"
+    ).map_err(|error| error.to_string())
+}
+
 fn install_revision_schema(transaction: &Transaction<'_>) -> Result<(), String> {
+    transaction.execute_batch("DROP TRIGGER IF EXISTS state_quota_insert; DROP TRIGGER IF EXISTS state_quota_update; DROP TRIGGER IF EXISTS state_quota_delete;").map_err(|error| error.to_string())?;
     transaction
         .execute_batch(CURRENT_TABLES_SQL)
         .map_err(|error| error.to_string())?;
     apply_column_migrations(transaction)?;
+    install_upload_workflow_schema(transaction)?;
 
     transaction
         .execute(
@@ -900,6 +1078,7 @@ fn install_revision_schema(transaction: &Transaction<'_>) -> Result<(), String> 
         .map_err(|error| error.to_string())?;
 
     rebuild_channel_scoped_ignored_candidates(transaction)?;
+    migrate_monitor_configuration(transaction)?;
     rebuild_channel_scoped_folder_observations(transaction)?;
     transaction
         .execute(
@@ -954,12 +1133,33 @@ fn install_current_schema_into_empty_database(transaction: &Transaction<'_>) -> 
     transaction
         .execute_batch(CURRENT_TABLES_SQL)
         .map_err(|error| error.to_string())?;
+    install_upload_workflow_schema(transaction)?;
     transaction
         .execute_batch(STATE_CHANGE_TRIGGERS_SQL)
         .map_err(|error| error.to_string())?;
+    // Keep the unique root invariant in the cold transaction. Secondary
+    // indexes are installed after the safe shell and before recovery/dispatch.
+    transaction.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS folder_monitors_live_root_idx ON folder_monitors(folder_key) WHERE removed=0 AND folder_key!='';").map_err(|error| error.to_string())
+}
+
+pub(crate) fn ensure_runtime_indexes(connection: &mut Connection) -> Result<bool, String> {
+    let ready = |connection: &Connection| -> Result<bool, String> {
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='duplicate_candidate_projection_channel_idx')", [], |row| row.get(0)).map_err(|error| error.to_string())
+    };
+    if ready(connection)? {
+        return Ok(false);
+    }
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    if ready(&transaction)? {
+        return Ok(false);
+    }
     transaction
         .execute_batch(CURRENT_INDEXES_SQL)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 fn migrate_one_to_two(transaction: &Transaction<'_>) -> Result<(), String> {
@@ -995,6 +1195,84 @@ fn migrate_three_to_four(transaction: &Transaction<'_>) -> Result<(), String> {
     transaction
         .execute_batch(CURRENT_INDEXES_SQL)
         .map_err(|error| error.to_string())
+}
+
+fn migrate_four_to_five(transaction: &Transaction<'_>) -> Result<(), String> {
+    // Add only metadata/pointers. Protected credentials and existing queued
+    // source/checkpoint records remain at their original locations.
+    install_revision_schema(transaction)?;
+    transaction
+        .execute_batch(CURRENT_INDEXES_SQL)
+        .map_err(|error| error.to_string())
+}
+
+fn migrate_five_to_six(transaction: &Transaction<'_>) -> Result<(), String> {
+    install_revision_schema(transaction)?;
+    transaction
+        .execute_batch(CURRENT_INDEXES_SQL)
+        .map_err(|error| error.to_string())
+}
+
+fn migrate_six_to_seven(transaction: &Transaction<'_>) -> Result<(), String> {
+    install_revision_schema(transaction)?;
+    transaction
+        .execute_batch(CURRENT_INDEXES_SQL)
+        .map_err(|error| error.to_string())
+}
+
+fn install_upload_workflow_schema(transaction: &Transaction<'_>) -> Result<(), String> {
+    transaction
+        .execute_batch(super::perceptual_review::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(super::channel_profiles::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(super::channel_profiles::STATE_TRIGGERS_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(super::upload_retry::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(super::publication_schedule::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(super::desktop_presence::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(super::upload_controls::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(super::video_assets::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(super::folder_rules::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(super::upload_plan_execution::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(super::quota_planner::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    super::quota_planner::install_cost_table(transaction)?;
+    transaction
+        .execute_batch(super::source_relink::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(super::upload_completion::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(super::upload_metadata::SCHEMA_SQL)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(UPLOAD_WORKFLOW_STATE_TRIGGERS_SQL)
+        .map_err(|error| error.to_string())
+}
+
+const UPLOAD_WORKFLOW_STATE_TRIGGERS_SQL: &str = "CREATE TRIGGER IF NOT EXISTS state_completion_insert AFTER INSERT ON upload_completion_checks BEGIN INSERT INTO state_changes(channel_id,surface,entity_id,event_kind,created_at) VALUES(NEW.channel_id,'completion',NEW.item_id,'invalidate',strftime('%Y-%m-%dT%H:%M:%fZ','now')); END; CREATE TRIGGER IF NOT EXISTS state_completion_update AFTER UPDATE ON upload_completion_checks BEGIN INSERT INTO state_changes(channel_id,surface,entity_id,event_kind,created_at) VALUES(NEW.channel_id,'completion',NEW.item_id,'invalidate',strftime('%Y-%m-%dT%H:%M:%fZ','now')); END;";
+
+fn migrate_seven_to_eight(transaction: &Transaction<'_>) -> Result<(), String> {
+    install_revision_schema(transaction)
 }
 
 /// Applies persistent database settings and all pending schema work exactly
@@ -1034,6 +1312,10 @@ pub(crate) fn migrate_database(connection: &mut Connection) -> Result<bool, Stri
         1 => migrate_one_to_two(&transaction)?,
         2 => migrate_two_to_three(&transaction)?,
         3 => migrate_three_to_four(&transaction)?,
+        4 => migrate_four_to_five(&transaction)?,
+        5 => migrate_five_to_six(&transaction)?,
+        6 => migrate_six_to_seven(&transaction)?,
+        7 => migrate_seven_to_eight(&transaction)?,
         DATABASE_SCHEMA_VERSION => {}
         other => {
             return Err(format!(
@@ -1052,6 +1334,313 @@ pub(crate) fn migrate_database(connection: &mut Connection) -> Result<bool, Stri
 mod tests {
     use super::*;
     use rusqlite::OptionalExtension;
+
+    #[test]
+    fn deferred_secondary_indexes_commit_before_worker_readiness_and_do_not_repeat() {
+        let (root, mut connection) = test_database("deferred-indexes");
+        migrate_database(&mut connection).unwrap();
+        let unique: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name='folder_monitors_live_root_idx'", [], |row| row.get(0)).unwrap();
+        assert_eq!(unique, 1);
+        assert!(ensure_runtime_indexes(&mut connection).unwrap());
+        let installed: std::collections::HashSet<String> = connection
+            .prepare("SELECT name FROM sqlite_schema WHERE type='index'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for declaration in CURRENT_INDEXES_SQL
+            .split(';')
+            .filter(|sql| sql.contains("CREATE INDEX") || sql.contains("CREATE UNIQUE INDEX"))
+        {
+            let words = declaration.split_whitespace().collect::<Vec<_>>();
+            let position = words.iter().position(|word| *word == "EXISTS").unwrap() + 1;
+            assert!(
+                installed.contains(words[position]),
+                "Required runtime index missing: {}",
+                words[position]
+            );
+        }
+        assert!(!ensure_runtime_indexes(&mut connection).unwrap());
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deferred_index_failure_rolls_back_and_can_resume_without_changing_queue_evidence() {
+        let (root, mut connection) = test_database("deferred-index-failure");
+        migrate_database(&mut connection).unwrap();
+        connection.execute("INSERT INTO upload_items(id,title,file_name,workspace_path,size_bytes,total_bytes,status,channel_id,confirmed_bytes,resumable_session_uri,created_at,updated_at) VALUES('saved','Clip','clip.mp4','original',10,10,'queued','channel-a',3,'protected-checkpoint','fixture','fixture')", []).unwrap();
+        connection
+            .execute_batch("CREATE TABLE upload_items_status_created_idx (fault INTEGER);")
+            .unwrap();
+        assert!(ensure_runtime_indexes(&mut connection).is_err());
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name='upload_items_status_idx'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        connection
+            .execute_batch("DROP TABLE upload_items_status_created_idx;")
+            .unwrap();
+        assert!(ensure_runtime_indexes(&mut connection).unwrap());
+        let saved: (String,String,i64,String) = connection.query_row("SELECT status,workspace_path,confirmed_bytes,resumable_session_uri FROM upload_items WHERE id='saved'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap();
+        assert_eq!(
+            saved,
+            (
+                "queued".into(),
+                "original".into(),
+                3,
+                "protected-checkpoint".into()
+            )
+        );
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_six_migration_keeps_same_path_channel_history_and_past_roots_without_filesystem_reads(
+    ) {
+        let (root, mut connection) = test_database("multi-folders-v7");
+        migrate_database(&mut connection).unwrap();
+        ensure_runtime_indexes(&mut connection).unwrap();
+        let first_root = root.join("nonexistent-original-root");
+        let same_path = first_root
+            .join("same-path.mp4")
+            .to_string_lossy()
+            .to_string();
+        let old_path = root
+            .join("nonexistent-past-root")
+            .join("past.mp4")
+            .to_string_lossy()
+            .to_string();
+        connection.execute_batch(
+            "DROP TABLE folder_monitors;
+             DROP TABLE folder_monitor_observations;
+             DROP INDEX folder_monitor_audit_idx;
+             ALTER TABLE upload_items DROP COLUMN folder_monitor_id;
+             ALTER TABLE audit_events DROP COLUMN folder_monitor_id;
+             CREATE TABLE folder_monitor_observations(channel_id TEXT NOT NULL DEFAULT '', channel_name TEXT NOT NULL, file_path TEXT NOT NULL, size_bytes INTEGER NOT NULL, modified_key TEXT NOT NULL, state TEXT NOT NULL, digest TEXT, upload_item_id TEXT, first_seen_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(channel_id, file_path));
+             INSERT INTO connection_settings(singleton, active_channel, active_channel_id, manual_made_for_kids_default, manual_visibility_default, updated_at) VALUES(1, 'Existing channel', 'channel-a', 1, 'unlisted', 'fixture');
+             PRAGMA user_version = 6;"
+        ).unwrap();
+        connection.execute("INSERT INTO folder_monitor_settings(singleton, enabled, folder_path, channel_name, channel_id, visibility, made_for_kids, playlist_id, playlist_title, status, detail, last_scan_at, last_file_name, updated_at) VALUES(1, 1, ?1, 'Existing channel', 'channel-a', 'unlisted', 1, 'saved-playlist', 'Saved playlist', 'watching', 'Original status', 'saved-scan', 'same-path.mp4', 'fixture')", [first_root.to_string_lossy().to_string()]).unwrap();
+        connection.execute("INSERT INTO upload_items(id, title, file_name, channel_name, channel_id, workspace_path, source_path, size_bytes, status, confirmed_bytes, total_bytes, resumable_session_uri, created_at, updated_at) VALUES('saved-item', 'Saved video', 'same-path.mp4', 'Existing channel', 'channel-a', ?1, ?1, 1000, 'queued', 400, 1000, 'legacy-protected-reference', 'fixture', 'fixture')", [&same_path]).unwrap();
+        for (channel, path, item) in [
+            ("channel-a", same_path.as_str(), Some("saved-item")),
+            ("channel-b", same_path.as_str(), None),
+            ("channel-a", old_path.as_str(), None),
+        ] {
+            connection.execute("INSERT INTO folder_monitor_observations(channel_id, channel_name, file_path, size_bytes, modified_key, state, upload_item_id, first_seen_at, updated_at) VALUES(?1, 'Existing channel', ?2, 1000, 'original-signature', 'queued', ?3, 'first-seen', 'fixture')", rusqlite::params![channel, path, item]).unwrap();
+        }
+        connection.execute("INSERT INTO audit_events(id, channel_id, kind, detail, created_at) VALUES('old-folder-log', 'channel-a', 'folder_monitor_enabled', 'Original audit detail', 'fixture')", []).unwrap();
+        assert!(!first_root.exists());
+        assert!(migrate_database(&mut connection).unwrap());
+        assert_eq!(
+            schema_version(&connection).unwrap(),
+            DATABASE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM folder_monitor_observations",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            3
+        );
+        let ids: Vec<String> = connection.prepare("SELECT monitor_id FROM folder_monitor_observations WHERE file_path = ?1 ORDER BY channel_id").unwrap().query_map([&same_path], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(ids[0], "legacy-singleton");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM folder_monitors WHERE removed = 1 AND enabled = 0",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2
+        );
+        let original: (bool, String, bool, String, String, String) = connection.query_row("SELECT enabled, visibility, made_for_kids, playlist_id, last_scan_at, last_file_name FROM folder_monitors WHERE id = 'legacy-singleton'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))).unwrap();
+        assert_eq!(
+            original,
+            (
+                true,
+                "unlisted".into(),
+                true,
+                "saved-playlist".into(),
+                "saved-scan".into(),
+                "same-path.mp4".into()
+            )
+        );
+        let queue: (String, i64, String, String) = connection.query_row("SELECT workspace_path, confirmed_bytes, resumable_session_uri, folder_monitor_id FROM upload_items WHERE id = 'saved-item'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+        assert_eq!(
+            queue,
+            (
+                same_path,
+                400,
+                "legacy-protected-reference".into(),
+                "legacy-singleton".into()
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT folder_monitor_id FROM audit_events WHERE id = 'old-folder-log'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "legacy-singleton"
+        );
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_five_migration_preserves_existing_defaults_credentials_and_upload_checkpoints() {
+        let (root, mut connection) = test_database("upload-defaults-v6");
+        migrate_database(&mut connection).unwrap();
+        connection.execute_batch(
+            "ALTER TABLE connection_settings DROP COLUMN manual_visibility_default;
+             DROP TABLE manual_playlist_defaults;
+             INSERT INTO connection_settings(singleton, oauth_client_id, oauth_credential_id, oauth_project_id, active_channel, active_channel_id, manual_made_for_kids_default, updated_at)
+             VALUES(1, 'existing.apps.googleusercontent.com', 'protected-pointer', 'existing-project', 'Existing channel', 'channel-a', 1, 'fixture');
+             INSERT INTO upload_items(id, title, file_name, workspace_path, channel_id, size_bytes, status, confirmed_bytes, total_bytes, resumable_session_uri, created_at, updated_at)
+             VALUES('saved', 'Saved video', 'original.mp4', 'original-source', 'channel-a', 1000, 'queued', 400, 1000, 'legacy-protected-reference', 'fixture', 'fixture');
+             INSERT INTO upload_quota_pauses(channel_id, pause_until, updated_at)
+             VALUES('channel-a', '2099-01-01T00:00:00+00:00', 'fixture');
+             INSERT INTO api_quota_pauses(quota_scope, channel_id, pause_until, updated_at)
+             VALUES('project:existing-project', 'channel-a', '2099-01-01T00:00:00+00:00', 'fixture');
+             PRAGMA user_version = 5;"
+        ).unwrap();
+        assert!(migrate_database(&mut connection).unwrap());
+        let defaults: (i64, String, String, String) = connection.query_row(
+            "SELECT manual_made_for_kids_default, manual_visibility_default, oauth_credential_id, oauth_project_id FROM connection_settings WHERE singleton = 1", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        ).unwrap();
+        assert_eq!(
+            defaults,
+            (
+                1,
+                "private".into(),
+                "protected-pointer".into(),
+                "existing-project".into()
+            )
+        );
+        assert_eq!(
+            schema_version(&connection).unwrap(),
+            DATABASE_SCHEMA_VERSION
+        );
+        let queue: (String, String, i64, String) = connection.query_row("SELECT status, workspace_path, confirmed_bytes, resumable_session_uri FROM upload_items WHERE id = 'saved'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+        assert_eq!(
+            queue,
+            (
+                "queued".into(),
+                "original-source".into(),
+                400,
+                "legacy-protected-reference".into()
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM manual_playlist_defaults", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM upload_quota_pauses", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM api_quota_pauses", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_four_migration_preserves_queue_and_channel_pause_while_adding_safe_credential_pointer(
+    ) {
+        let (root, mut connection) = test_database("oauth-pointer-v5");
+        migrate_database(&mut connection).unwrap();
+        connection.execute_batch(
+            "ALTER TABLE connection_settings DROP COLUMN oauth_credential_id;
+             ALTER TABLE connection_settings DROP COLUMN oauth_project_id;
+             DROP TABLE api_quota_pauses;
+             INSERT INTO connection_settings(singleton, oauth_client_id, active_channel, active_channel_id, updated_at)
+             VALUES(1, 'legacy.apps.googleusercontent.com', 'Existing channel', 'channel-a', 'fixture');
+             INSERT INTO upload_items(id, title, file_name, workspace_path, channel_id, size_bytes, status, confirmed_bytes, total_bytes, created_at, updated_at)
+             VALUES('saved', 'Saved video', 'original.mp4', 'original-source', 'channel-a', 1000, 'queued', 400, 1000, 'fixture', 'fixture');
+             INSERT INTO upload_quota_pauses(channel_id, pause_until, updated_at)
+             VALUES('channel-a', '2099-01-01T00:00:00+00:00', 'fixture');
+             PRAGMA user_version = 4;"
+        ).unwrap();
+        assert!(migrate_database(&mut connection).unwrap());
+        assert_eq!(
+            schema_version(&connection).unwrap(),
+            DATABASE_SCHEMA_VERSION
+        );
+        let settings: (String, String, Option<String>, Option<String>) = connection.query_row(
+            "SELECT oauth_client_id, active_channel_id, oauth_credential_id, oauth_project_id FROM connection_settings WHERE singleton = 1", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        ).unwrap();
+        assert_eq!(
+            settings,
+            (
+                "legacy.apps.googleusercontent.com".into(),
+                "channel-a".into(),
+                None,
+                None
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT confirmed_bytes FROM upload_items WHERE id = 'saved'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            400
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM upload_quota_pauses WHERE channel_id = 'channel-a'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM api_quota_pauses", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let cursor: i64 = connection
+            .query_row(
+                "SELECT COALESCE(MAX(revision), 0) FROM state_changes",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        connection.execute("UPDATE upload_quota_pauses SET pause_until = '2099-01-02T00:00:00+00:00' WHERE channel_id = 'channel-a'", []).unwrap();
+        assert!(connection.query_row("SELECT EXISTS(SELECT 1 FROM state_changes WHERE revision > ?1 AND channel_id = 'channel-a' AND surface = 'connection')", [cursor], |row| row.get::<_, bool>(0)).unwrap());
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn test_database(label: &str) -> (std::path::PathBuf, Connection) {
         let root = std::env::temp_dir().join(format!(
@@ -1107,7 +1696,11 @@ mod tests {
         assert!(migrate_database(&mut connection).unwrap());
         let statements = take_test_database_trace();
 
-        assert!(statements.len() <= 110, "{statements:#?}");
+        assert!(
+            statements.len() <= 110,
+            "{} schema statements; expected at most 110.\n{statements:#?}",
+            statements.len()
+        );
         assert!(!statements
             .iter()
             .any(|sql| sql.contains("PRAGMA table_info")));
@@ -1120,7 +1713,10 @@ mod tests {
         );
         let expected_state_triggers = STATE_CHANGE_TRIGGERS_SQL
             .matches("CREATE TRIGGER IF NOT EXISTS state_")
-            .count() as i64;
+            .count() as i64
+            + UPLOAD_WORKFLOW_STATE_TRIGGERS_SQL
+                .matches("CREATE TRIGGER IF NOT EXISTS state_")
+                .count() as i64;
         assert_eq!(
             connection
                 .query_row(
@@ -1204,6 +1800,75 @@ mod tests {
             .query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
             .unwrap();
         assert_eq!(schema_cookie_after, schema_cookie_before);
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_seven_workflow_migration_retains_queue_recovery_and_profile_evidence() {
+        let (root, mut connection) = test_database("workflow-v8");
+        migrate_database(&mut connection).unwrap();
+        connection.execute_batch(
+            "DROP TRIGGER state_completion_insert;
+             DROP TRIGGER state_completion_update;
+             DROP TABLE upload_completion_checks;
+             DROP TABLE source_relink_reviews;
+             DROP TABLE upload_metadata_presets;
+             ALTER TABLE upload_items DROP COLUMN upload_metadata_json;
+             INSERT INTO connection_settings(singleton, active_channel, active_channel_id, oauth_credential_id, oauth_project_id, manual_made_for_kids_default, manual_visibility_default, updated_at)
+             VALUES(1, 'Saved channel', 'channel-a', 'protected-pointer', 'saved-project', 1, 'unlisted', 'fixture');
+             INSERT INTO upload_items(id, title, file_name, source_path, workspace_path, channel_id, size_bytes, status, confirmed_bytes, total_bytes, resumable_session_uri, created_at, updated_at)
+             VALUES('saved', 'Approved title', 'original.mp4', 'unavailable-original', 'unavailable-original', 'channel-a', 1000, 'needs_reconciliation', 400, 1000, 'protected-checkpoint-reference', 'fixture', 'fixture');
+             INSERT INTO upload_quota_pauses(channel_id, pause_until, updated_at) VALUES('channel-a', '2099-01-01T00:00:00+00:00', 'fixture');
+             INSERT INTO folder_monitors(id, folder_key, folder_path, channel_id, enabled, updated_at) VALUES('saved-monitor', 'saved-root', 'unavailable-root', 'channel-a', 1, 'fixture');
+             INSERT INTO folder_monitor_observations(monitor_id, channel_id, channel_name, file_path, size_bytes, modified_key, state, upload_item_id, first_seen_at, updated_at)
+             VALUES('saved-monitor', 'channel-a', 'Saved channel', 'unavailable-original', 1000, 'saved-signature', 'queued', 'saved', 'first-seen', 'fixture');
+             PRAGMA user_version = 7;"
+        ).unwrap();
+        assert!(migrate_database(&mut connection).unwrap());
+        assert_eq!(
+            schema_version(&connection).unwrap(),
+            DATABASE_SCHEMA_VERSION
+        );
+        let retained: (String, String, String, i64, String, String) = connection.query_row("SELECT title, channel_id, source_path, confirmed_bytes, resumable_session_uri, upload_metadata_json FROM upload_items WHERE id='saved'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).unwrap();
+        assert_eq!(
+            retained,
+            (
+                "Approved title".into(),
+                "channel-a".into(),
+                "unavailable-original".into(),
+                400,
+                "protected-checkpoint-reference".into(),
+                "{}".into()
+            )
+        );
+        let profile: (String, String) = connection.query_row("SELECT oauth_credential_id, oauth_project_id FROM connection_settings WHERE singleton=1", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(
+            profile,
+            ("protected-pointer".into(), "saved-project".into())
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT manual_visibility_default FROM connection_settings WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "unlisted"
+        );
+        assert_eq!(connection.query_row("SELECT state FROM folder_monitor_observations WHERE monitor_id='saved-monitor' AND upload_item_id='saved'", [], |row| row.get::<_, String>(0)).unwrap(), "queued");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM upload_quota_pauses WHERE channel_id='channel-a'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert!(!root.join("unavailable-original").exists());
         drop(connection);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1328,6 +1993,7 @@ mod tests {
         let (root, mut connection) = test_database("plans");
         configure_connection(&connection, Duration::from_secs(30)).unwrap();
         migrate_database(&mut connection).unwrap();
+        ensure_runtime_indexes(&mut connection).unwrap();
         connection.execute_batch(
             "WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM n WHERE value < 10000)
              INSERT INTO upload_items (id, title, file_name, channel_id, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at)

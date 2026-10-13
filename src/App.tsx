@@ -74,17 +74,10 @@ const sectionHeadingClass = "ui-section-heading";
 const actionRowClass = "ui-action-row";
 
 const QueueToolbar = lazy(() => import("./components/QueueToolbar"));
+const DesktopRuntimeIntegration = lazy(() => import("./components/DesktopRuntimeIntegration"));
 
-const ConnectionPanel = lazy(() =>
-  import("./components/ConnectionPanel").then((module) => ({
-    default: module.ConnectionPanel,
-  })),
-);
-const CrashRecoveryScreen = lazy(() =>
-  import("./components/CrashRecoveryScreen").then((module) => ({
-    default: module.CrashRecoveryScreen,
-  })),
-);
+const ConnectionPanel = lazy(() => import("./components/ConnectionPanel"));
+const CrashRecoveryScreen = lazy(() => import("./components/CrashRecoveryScreen"));
 const AppDialogs = lazy(() => import("./components/AppWorkspaceParts").then((module) => ({ default: module.AppDialogs })));
 let prefetchedNavigation: typeof import("./components/AppWorkspaceParts")["WorkspaceNavigation"] | undefined;
 const loadBatchImportArea = () => import("./components/AppWorkspaceParts").then((module) => {
@@ -100,16 +93,11 @@ function WorkspaceNavigation(props: Parameters<NonNullable<typeof prefetchedNavi
   const Navigation = prefetchedNavigation ?? LazyWorkspaceNavigation;
   return <Navigation {...props} />;
 }
-const loadQueueTable = () =>
-  import("./components/QueueTable").then((module) => ({
-    default: module.QueueTable,
-  }));
+const loadQueueTable = () => import("./components/UploadQueueWorkspace");
 const QueueTable = lazy(loadQueueTable);
 const loadManualUploadDefaultsPanel = () =>
-  import("./components/ManualUploadDefaultsPanel").then((module) => ({
-    default: module.ManualUploadDefaultsPanel,
-  }));
-const ManualUploadDefaultsPanel = lazy(loadManualUploadDefaultsPanel);
+  import("./components/BatchPreparationPanel");
+const BatchPreparationPanel = lazy(loadManualUploadDefaultsPanel);
 const loadUploadProgressSummary = () =>
   import("./components/UploadProgressSummary").then((module) => ({
     default: module.UploadProgressSummary,
@@ -147,21 +135,9 @@ const DiagnosticsPanel = lazy(() =>
     default: module.DiagnosticsPanel,
   })),
 );
-const DuplicateReview = lazy(() =>
-  import("./components/DuplicateReview").then((module) => ({
-    default: module.DuplicateReview,
-  })),
-);
-const FolderMonitorPanel = lazy(() =>
-  import("./components/FolderMonitorPanel").then((module) => ({
-    default: module.FolderMonitorPanel,
-  })),
-);
-const PreIngestDuplicatePanel = lazy(() =>
-  import("./components/PreIngestDuplicatePanel").then((module) => ({
-    default: module.PreIngestDuplicatePanel,
-  })),
-);
+const DuplicateReview = lazy(() => import("./components/DuplicateReview"));
+const FolderMonitorPanel = lazy(() => import("./components/FolderMonitorPanel"));
+const PreIngestDuplicatePanel = lazy(() => import("./components/PreIngestDuplicatePanel"));
 const TransferPanel = lazy(() =>
   import("./components/TransferPanel").then((module) => ({
     default: module.TransferPanel,
@@ -749,34 +725,6 @@ export default function App({
     };
   }, [activeTab, reviewImport, runPreflightDuplicateCheck]);
 
-  useEffect(() => {
-    if (!isTauri) return;
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void import("@tauri-apps/api/window")
-      .then(({ getCurrentWindow }) =>
-        getCurrentWindow().onCloseRequested((event) => {
-        // Recovery is a safe holding screen. Do not trap the operator in it:
-        // closing leaves the persisted crash marker and all resumable work
-        // untouched for the next launch.
-        if (recoveryModeRef.current) return;
-        event.preventDefault();
-        setExitConfirmationOpen(true);
-        }),
-      )
-      .then((stop) => {
-        if (disposed) stop();
-        else unlisten = stop;
-      })
-      .catch(() => {
-        // Closing follows the operating system default when the native event is unavailable.
-      });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
   const confirmExit = useCallback(async () => {
     try {
       setExitConfirmationOpen(false);
@@ -1110,12 +1058,14 @@ export default function App({
         <span aria-hidden="true" className="ui-notice-dot" />
         {notice}
       </p>
+      <Suspense fallback={null}><DesktopRuntimeIntegration recoveryModeRef={recoveryModeRef} channelId={snapshot.activeChannelId} onExitRequest={() => setExitConfirmationOpen(true)} onShowAccount={() => setActiveTab("account")} onShowUploads={() => setActiveTab("batch")} onNotice={setNotice} onRefresh={refreshQueue} /></Suspense>
       {(exitConfirmationOpen || pendingImportPaths || (connectionSettings && !connectionSettings.oauthConfigured && !setupDismissed)) && (
         <Suspense fallback={<WorkspacePending />}>
           <AppDialogs
             setupOpen={Boolean(connectionSettings && !connectionSettings.oauthConfigured && !setupDismissed)}
             exitOpen={exitConfirmationOpen}
             importPaths={pendingImportPaths}
+            activeChannelId={snapshot.activeChannelId}
             onOpenAccount={() => { setSetupDismissed(true); setActiveTab("account"); }}
             onDismissSetup={() => setSetupDismissed(true)}
             onKeepOpen={() => setExitConfirmationOpen(false)}
@@ -1162,6 +1112,7 @@ export default function App({
           {activeTab === "batch" && (
             <>
             <UploadTitleDuplicateReview
+              activeChannelId={snapshot.activeChannelId}
               busy={busy}
               candidates={snapshot.pendingTitleDuplicates}
               onResolve={resolveTitleDuplicates}
@@ -1185,11 +1136,15 @@ export default function App({
                 </Suspense>
               </div>
               <UploadProgressSummary items={snapshot.items} />
-              <ManualUploadDefaultsPanel />
+              <BatchPreparationPanel items={snapshot.items} channelId={snapshot.activeChannelId} channelName={snapshot.activeChannel} busy={busy} onRefresh={refreshQueue} onNotice={setNotice} onConnectionChanged={(settings) => { if (settings) updateConnection(settings); }} />
               <BatchImportArea active={dropActive} busy={busy} onChoose={() => void addVideo()} />
               <QueueTable
                 items={snapshot.items}
                 busy={busy}
+                channelId={snapshot.activeChannelId}
+                channelName={snapshot.activeChannel}
+                onRefresh={refreshQueue}
+                onNotice={setNotice}
                 onQueue={queue}
                 onCancel={cancelUpload}
                 onVisibilityChange={changeVisibility}
@@ -1212,6 +1167,7 @@ export default function App({
           {activeTab === "dedupe" && (
             <>
             <PreIngestDuplicatePanel
+              activeChannelId={snapshot.activeChannelId}
               busy={preflightBusy}
               fileCount={preflightFileCount}
               dropActive={preflightDropActive}

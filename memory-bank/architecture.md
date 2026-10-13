@@ -15,6 +15,45 @@ Google LLC; other marks belong to their respective owners.
 
 ## Intended ownership boundaries
 
+TASK148 adds device-local native modules for verified source relocation,
+completion and targeted repair, immutable batch plans, metadata presets,
+thumbnail/caption jobs, publication schedules, aggregate transfer controls,
+quota observations, folder rules, desktop presence, protected profiles and
+experimental local perceptual candidates. Each has a lazy stepped webview
+dialog; `lib.rs` composes account fencing, intake transactions, workers and
+commands. TASK161 adds scoped single/matching-issue retries to those retained
+upload identities. A native failure snapshot and original-byte verification
+authorize retry; a webview error label alone cannot authorize uncertain work.
+
+Schema 8 retains original locators, signatures/digests, immutable channels,
+protected checkpoint references and existing approvals. New intake captures
+metadata and batch/plan identity. Plan execution is claimed durably once;
+repeated completion returns its receipt and interrupted claims cannot create
+another identity. Follow-up attachment/publication jobs belong to the existing
+video receipt and reconcile independently of uploading the video.
+
+The cold empty-database path creates canonical tables, workflow schemas,
+revision triggers and the live watched-root uniqueness invariant. Ordinary
+secondary runtime indexes are installed in one atomic deferred transaction
+after the safe shell and before recovery, discovery or dispatch. A final index
+sentinel is valid only because the full catalog commits atomically. Failed DDL
+retains the recovery plan and admission gate for a later retry; it never changes
+queue/checkpoint evidence. This preserves the existing 110-statement pre-shell
+budget instead of raising it. Migrated populated databases retain their indexes.
+
+Desktop notification/tray/login choices are independent, opt-in and explicitly
+approved. Only state-change inserts wake the bounded global activity worker;
+notice/cursor receipts remain quiet. Opaque routes retain channel scope and do
+not automatically switch accounts. Profile credentials stay in independent OS
+secure-store bundles; selected-profile mutation and provider read chains must
+serialize so an old token cannot be attributed to a new account.
+
+Perceptual matching is experimental local review, using pinned native decoder
+bytes and bounded aligned grayscale frames. It cannot establish a remote
+YouTube content hash and never automatically suppresses uploads or deletes
+media. Generated fixture evidence and the known hue-shift false positive do not
+meet the representative-media accuracy/performance release gate.
+
 | Area | Owns | Must not own |
 | --- | --- | --- |
 | React webview UI | File selection, metadata entry, review, progress display | OAuth tokens, unrestricted filesystem access, direct privileged API calls |
@@ -37,6 +76,50 @@ recovery, and database cancellation adapters. In particular, the media module
 cannot open SQLite or translate provider/product state, while the command layer
 cannot bypass its bounded read/process guards.
 
+`oauth_replacement` owns reviewed same-channel credential replacement and
+project-scoped API pauses. A candidate JSON is parsed/staged only in native code;
+PKCE consent verifies the original immutable channel before a SQLite transaction
+promotes an opaque OS-protected credential-bundle pointer. Cancellation, failure
+and stale callbacks keep the original connection. Dispatch/management/credential
+guards serialize admission and promotion; queued source references and protected
+resumable checkpoints are retained. Replacement invalidates token caches and
+separate management permission so the latter must be granted again.
+
+`youtube_limits` reads exact structured provider reasons. Cloud API quota takes
+precedence, while mixed errors persist both API and channel pauses atomically.
+Schema 5 adds credential/project metadata and API quota records without copying
+credentials or rewriting source/checkpoint records. Channel pauses survive every
+replacement. Same/unknown project identity retains the API pause; an established
+different project uses its own quota scope and retains the old project's record.
+Provider acceptance remains authoritative; no automatic credential cycling or
+quota-reset promise is implemented.
+
+`upload_defaults` owns device-local manual-review preferences. Audience and
+visibility are global on the device; playlist defaults are keyed by immutable
+channel ID. A playlist patch resolves the owner and current title through native
+read-only YouTube calls, then rechecks the connection and commits all provided
+fields atomically. Omitted fields preserve preferences, and an empty playlist
+clears only the connected channel. Schema 6 adds global visibility and scoped
+playlist preferences while retaining audience, credentials, queue and checkpoints.
+The UI loads these as visible review prefills, retains explicit batch overrides,
+and checks the playlist against the current channel list before selecting it.
+Existing Folder Monitor settings and queued uploads are independent.
+
+`folder_monitors` owns stable watched-root authorizations. Each root keeps its
+immutable channel binding, upload choices, status and observations; one shared
+worker checks every enabled folder belonging to the connected channel, regardless
+of the folder selected in React. Discovery failures remain local to a folder.
+Existing upload and media admission limits are shared across all roots.
+Schema 7 associates historical observations, queue items and audit receipts with
+monitor IDs before rebuilding observation keys. Migration performs database work
+only; runtime approval/scanning checks canonical roots and rejects duplicates.
+Pause and removal stop new discovery while retaining originals, existing queue
+items, checkpoints and history. Re-adding the same channel/root restores its
+retained monitor and observations instead of creating a second upload identity.
+Recovery, reconciliation and cleanup carry both
+monitor and channel scope. Adding/editing uses Folder → Upload choices → Review
+and requires explicit recurring approval.
+
 ## Canonical entities
 
 - **Account connection:** the authorized YouTube identity and its credential reference; scoped to an operator or tenant when multi-user support exists.
@@ -48,8 +131,8 @@ cannot bypass its bounded read/process guards.
 - **Inventory video:** an account-scoped projection of an operator-owned YouTube video and its last synchronization state.
 - **Duplicate candidate:** an explainable comparison between records with an evidence tier and an operator decision; never an automatic deletion instruction.
 - **Deletion request:** immutable selected video IDs, confirmation context, execution results, and audit receipt.
-- **Watched-folder authorization:** one operator-selected device-local directory, the channel scope approved to receive its new files, enabled state, scan receipts, and last result. Existing files form a baseline; only later additions or changed replacements can become candidates.
-- **Folder observation:** channel-scoped path, size, modification key, processing state, optional BLAKE3 digest, and canonical upload-item link used to make polling idempotent across restarts.
+- **Watched-folder authorization:** a stable device-local monitor ID, immutable channel, selected directory, independent upload choices, enabled/removed state and scan receipts. Every enabled root remains monitored; existing and newly added supported direct-child videos enter intake after two unchanged scans.
+- **Folder observation:** monitor- and channel-scoped path, size, modification key, processing state, optional BLAKE3 digest, and canonical upload-item link used to make polling idempotent across restarts.
 
 ## Lifecycle baseline
 
@@ -134,6 +217,28 @@ Duplicate detection remains an explicit operator action. **Run dedupe** first
 synchronizes the active channel's owner-authorized upload inventory, then
 rebuilds local BLAKE3 and uploaded-title candidates for review. It never
 creates or executes a deletion request.
+
+Duplicate review now offers a lazy **Compare videos** modal from upload title
+holds, pre-ingest results, and saved candidates. Rust resolves the selected
+record against the current channel and returns matched YouTube IDs plus opaque,
+revocable read-only local grants. The custom `media-preview` protocol serves
+original file ranges of at most 1 MiB, checks channel, source signature/handle
+identity, expiry and revocation on every request, and follows the existing media
+reader admission rules. Preparation never copies or rehashes whole videos.
+Closing the native dialog unloads both players and revokes local grants.
+Missing originals remain visible beside any usable matched video; local codec
+and private/disabled YouTube embedding support are platform/provider boundaries.
+
+Playlist selection is bounded to 200 videos per addition and retained across
+search, visibility filters and pages. Page/matching shortcuts and Shift ranges
+share one selection model. The native playlist bulk adapter preserves reviewed
+order, validates channel and playlist ownership, reads current membership and
+returns confirmed added/skipped IDs plus unresolved IDs. Progress is bound to
+channel, destination and request ID; retries re-read membership before writes.
+Creation is a lazy Name → Visibility → Review dialog shared by Playlists and
+upload intake. Every playlist write uses the protected management credential
+and temporary mode; ordinary upload/read scopes remain unchanged. Unknown
+creation outcomes require checking the playlist list before repeating a write.
 
 Inventory and title-dedupe work is generation based. Each staged remote page
 persists the versioned normalized, canonical-copy, and numeric-sequence keys

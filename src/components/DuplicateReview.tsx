@@ -5,6 +5,8 @@ import {
   useMemo,
   useRef,
   useState,
+  lazy,
+  Suspense,
 } from "react";
 import { Pause, Play, RotateCcw, RotateCw, X } from "lucide-react";
 import "./DuplicateReview.lazy.css";
@@ -31,6 +33,8 @@ import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
 import { subscribeLocalStateChanges } from "../lib/state-events";
 import type { DuplicateCandidate } from "../lib/types";
 import { PaginationControls } from "./PaginationControls";
+
+const DuplicateMediaPreview = lazy(() => import("./DuplicateMediaPreview").then((module) => ({ default: module.DuplicateMediaPreview })));
 
 function playerCommand(
   frame: HTMLIFrameElement | null,
@@ -737,6 +741,8 @@ export function DuplicateReview({
   onDeletionComplete,
   onBulkDeletionComplete,
 }: DuplicateReviewProps) {
+  const [previewCandidateId, setPreviewCandidateId] = useState<string>();
+  useEffect(() => setPreviewCandidateId(undefined), [activeChannelId]);
   const [selectedVideos, setSelectedVideos] =
     useRetainedWorkspaceState<Map<string, SelectedDuplicateVideo>>(
       "dedupe.selected-videos",
@@ -1232,6 +1238,7 @@ export function DuplicateReview({
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-[0.7rem] font-bold text-[#52617a]">{decision}</span>
+                    <button className={secondaryButtonClass} onClick={() => setPreviewCandidateId(candidate.id)} type="button">Compare videos</button>
                     <button
                       className={secondaryButtonClass}
                       onClick={() => void onIgnore(candidate.id)}
@@ -1292,6 +1299,13 @@ export function DuplicateReview({
         start={visibleCandidates.start}
         total={visibleCandidates.total}
       />
+      {previewCandidateId && candidates.some((candidate) => candidate.id === previewCandidateId) && (
+        <Suspense fallback={<p role="status">Opening video comparison…</p>}>
+          <DuplicateMediaPreview expectedChannelId={activeChannelId} onClose={() => setPreviewCandidateId(undefined)} target={{ kind: "candidate", candidateId: previewCandidateId }} />
+        </Suspense>
+      )}
     </div>
   );
 }
+
+export default DuplicateReview;

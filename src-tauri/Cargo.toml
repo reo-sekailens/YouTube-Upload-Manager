@@ -21,6 +21,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "=0.10.4"
 base64 = "0.22"
 blake3 = "1.8.6"
 dirs = "6"
@@ -31,7 +32,7 @@ rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 thiserror = "2"
@@ -39,3 +40,7 @@ url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 tauri-plugin-fs = "2"
 flate2 = "1"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-notification = "2.6"
+tauri-plugin-autostart = "2.7"

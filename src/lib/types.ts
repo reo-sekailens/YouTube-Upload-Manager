@@ -13,6 +13,25 @@ export type UploadStatus =
 export type UploadVisibility = "private" | "unlisted" | "public";
 export type FolderMonitorVisibility = "private" | "unlisted";
 
+/** Explicit native-validated metadata captured with one reviewed upload. */
+export type UploadMetadata = {
+  title?: string;
+  description?: string;
+  tags?: string[];
+  categoryId?: string;
+  language?: string;
+  defaultAudioLanguage?: string;
+  license?: "youtube" | "creativeCommon";
+  notifySubscribers?: boolean;
+  containsSyntheticMedia?: boolean;
+  publishAt?: string;
+};
+export type UploadMetadataPreset = { id: string; channelId: string; name: string; metadata: UploadMetadata; updatedAt?: string };
+export type UploadMetadataMapping = {
+  matches: Array<{ index: number; fileName: string; metadata: UploadMetadata; templateMetadata?: UploadMetadata }>;
+  issues: string[];
+};
+
 /** Required operator declaration collected before manual intake. */
 export type ManualUploadSettings = {
   madeForKids: boolean;
@@ -20,11 +39,29 @@ export type ManualUploadSettings = {
   playlistId?: string;
   playlistTitle?: string;
   deleteSourceAfterUpload: boolean;
+  metadata?: UploadMetadata;
+  /** Complete per-item overrides, keyed by the exact reviewed source selection. */
+  itemMetadata?: Record<string, UploadMetadata>;
+  expectedChannelId?: string;
+  publicationContexts?: Record<string, { timeZone: string; tzdbVersion: string }>;
 };
 
 /** Device-wide default used to prefill, never hide, the manual intake declaration. */
 export type ManualUploadDefaults = {
   madeForKids: boolean;
+  visibility: UploadVisibility;
+  /** The saved playlist belongs only to this connected channel on this device. */
+  playlistId?: string;
+  playlistTitle?: string;
+  playlistChannelId?: string;
+};
+
+export type ManualUploadDefaultsPatch = {
+  madeForKids?: boolean;
+  visibility?: UploadVisibility;
+  /** Empty clears the connected channel's default; omission preserves it. */
+  playlistId?: string;
+  expectedChannelId?: string;
 };
 
 /** Safe playlist metadata retrieved from the owner-authorized channel. */
@@ -34,6 +71,18 @@ export type YouTubePlaylist = {
 };
 
 export type PlaylistPrivacy = "private" | "unlisted" | "public";
+
+/** Confirmed bulk membership outcomes; unresolved IDs remain selected for review. */
+export type PlaylistAddReceipt = {
+  channelId: string;
+  playlistId: string;
+  requestedVideoIds: string[];
+  addedVideoIds: string[];
+  skippedVideoIds: string[];
+  remainingVideoIds: string[];
+  error?: string;
+  uncertain?: boolean;
+};
 
 export type UploadItem = {
   id: string;
@@ -65,6 +114,8 @@ export type UploadItem = {
     | "retained_youtube_upload_rejected";
   videoId?: string;
   detail?: string;
+  /** Native sanitized setup failure identity; no provider payload or secrets. */
+  retryFailureKey?: string;
   updatedAt: string;
 };
 
@@ -89,6 +140,19 @@ export type UploadTitleDuplicate = {
 };
 
 export type UploadTitleDuplicateDecision = "ignore" | "skip";
+
+/** Native-owned duplicate evidence; no filesystem paths are accepted by the player. */
+export type DuplicateMediaPreviewTarget =
+  | { kind: "upload"; itemId: string }
+  | { kind: "preflight"; jobId: string; ordinal: number }
+  | { kind: "candidate"; candidateId: string }
+  | { kind: "perceptual"; reviewId: string; candidateId: string };
+
+export type DuplicateMediaPreviewEvidence = {
+  unavailableLocalSources?: number;
+  localSources: Array<{ token: string; url: string; title: string; fileName: string }>;
+  youtubeVideos: Array<{ videoId: string; title: string }>;
+};
 
 /** A file checked locally before it is imported into the upload workspace. */
 export type PreIngestDuplicateFile = {
@@ -206,9 +270,12 @@ export type StartupReadiness = {
 
 /** Safe, device-local status for the operator-approved watched folder. */
 export type FolderMonitorSettings = {
+  /** Stable native identity; each configured folder has one independent record. */
+  id?: string;
   enabled: boolean;
   folderPath?: string;
   channelName?: string;
+  channelId?: string;
   visibility: FolderMonitorVisibility;
   madeForKids: boolean;
   deleteSourceAfterUpload?: boolean;
@@ -222,6 +289,7 @@ export type FolderMonitorSettings = {
 
 /** Safe, folder-scoped activity projection. Source paths never enter the webview. */
 export type FolderMonitorFileActivity = {
+  monitorId?: string;
   /** Opaque local identifier used only to requeue this already-authorized job. */
   itemId?: string;
   /** YouTube ID is present only for a watched item that completed an upload. */
@@ -262,6 +330,19 @@ export type FolderMonitorOverview = {
   settings: FolderMonitorSettings;
   files: FolderMonitorFileActivity[];
   logs: FolderMonitorLogEntry[];
+};
+
+export type FolderMonitorCollection = {
+  /** Only the connected channel's configured folders, including paused folders. */
+  monitors: FolderMonitorSettings[];
+};
+
+export type FolderMonitorLocalDeleteProgress = {
+  monitorId: string;
+  channelId: string;
+  completed: number;
+  total: number;
+  result: FolderMonitorLocalDeleteResult;
 };
 
 /** Safe-to-render metadata. OAuth tokens never enter the webview. */
@@ -310,6 +391,29 @@ export type StartupBootstrap = {
 export type YouTubeConnectionStart = {
   authorizationUrl: string;
   attemptId: string;
+};
+
+/** Provider limits contain no OAuth client identifiers or credential material. */
+export type UploadLimitStatus = {
+  kind: "none" | "api_quota" | "channel_upload";
+  resumesAt?: string;
+  channelResumesAt?: string;
+  detail?: string;
+};
+
+/** An opaque native review of a replacement Desktop OAuth JSON file. */
+export type OAuthClientReplacementReview = {
+  reviewId: string;
+  channelId: string;
+  channelName: string;
+  cloudQuotaPaused: boolean;
+  channelUploadPaused: boolean;
+};
+
+export type OAuthClientReplacementStatus = {
+  state: "ready" | "authorizing" | "completed" | "failed" | "cancelled";
+  detail?: string;
+  settings?: ConnectionSettings;
 };
 
 /** Safe receipt for a compact cross-device metadata archive. */

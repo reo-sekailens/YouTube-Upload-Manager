@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { windowItems } from "../lib/list-windowing";
 import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
 import type { PreIngestDuplicateScan } from "../lib/types";
 import { PaginationControls } from "./PaginationControls";
 import "./PreIngestDuplicatePanel.lazy.css";
 
+const DuplicateMediaPreview = lazy(() => import("./DuplicateMediaPreview").then((module) => ({ default: module.DuplicateMediaPreview })));
+
 type PreIngestDuplicatePanelProps = {
+  activeChannelId?: string;
   busy: boolean;
   fileCount: number;
   dropActive: boolean;
@@ -145,6 +148,7 @@ function FullMetadataDetails({
 }
 
 export function PreIngestDuplicatePanel({
+  activeChannelId,
   busy,
   fileCount,
   dropActive,
@@ -156,6 +160,8 @@ export function PreIngestDuplicatePanel({
   onLoadPage,
   onLoadMetadata,
 }: PreIngestDuplicatePanelProps) {
+  const [previewOrdinal, setPreviewOrdinal] = useState<number>();
+  useEffect(() => setPreviewOrdinal(undefined), [scan?.id, activeChannelId]);
   const [deleteTarget, setDeleteTarget] = useState<LocalDeleteTarget>();
   const [selectedOrdinals, setSelectedOrdinals] =
     useRetainedWorkspaceState<Set<number>>(
@@ -590,6 +596,9 @@ export function PreIngestDuplicatePanel({
                 </b>
               </header>
               {file.error && <p>{file.error}</p>}
+              {!file.error && verdict(file) !== "No match found" && (
+                <button className="mt-3 cursor-pointer rounded-md border border-line bg-control px-3 py-2 text-[0.79rem] font-semibold text-ink hover:bg-control-hover focus-visible:outline-3 focus-visible:outline-focus-ring disabled:cursor-not-allowed disabled:opacity-50" disabled={scan.status !== "complete"} onClick={() => setPreviewOrdinal(file.ordinal)} type="button">Compare videos</button>
+              )}
               {file.localMatches.length > 0 && (
                 <div
                   className="mt-2.5 grid grid-cols-2 gap-2 max-compact:grid-cols-1 [&>section]:grid [&>section]:min-w-0 [&>section]:gap-0.5 [&>section]:rounded-md [&>section]:border [&>section]:border-[#dce5f1] [&>section]:bg-white [&>section]:px-2.5 [&>section]:py-2 [&>section>span]:text-[0.64rem] [&>section>span]:font-bold [&>section>span]:uppercase [&>section>span]:tracking-[0.05em] [&>section>span]:text-[#66758b] [&>section>div+div]:mt-0.5 [&>section>div+div]:border-t [&>section>div+div]:border-[#e7edf5] [&>section>div+div]:pt-1"
@@ -881,6 +890,13 @@ export function PreIngestDuplicatePanel({
           </div>
         </section>
       )}
+      {previewOrdinal !== undefined && scan && (
+        <Suspense fallback={<p role="status">Opening video comparison…</p>}>
+          <DuplicateMediaPreview expectedChannelId={activeChannelId} onClose={() => setPreviewOrdinal(undefined)} target={{ kind: "preflight", jobId: scan.id, ordinal: previewOrdinal }} />
+        </Suspense>
+      )}
     </section>
   );
 }
+
+export default PreIngestDuplicatePanel;

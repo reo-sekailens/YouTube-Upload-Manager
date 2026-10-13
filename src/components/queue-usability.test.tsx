@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { filterQueueItems, formatQueueSize, matchesQueueStatus, summarizeQueueTransfers } from "../lib/queue-presentation";
 import type { UploadItem, UploadStatus } from "../lib/types";
-import { QueueTable } from "./QueueTable";
+import { QueueTable, uploadRetryGroups } from "./QueueTable";
 import QueueToolbar from "./QueueToolbar";
 import { UploadProgressSummary } from "./UploadProgressSummary";
 
@@ -22,7 +22,7 @@ function item(overrides: Partial<UploadItem> = {}): UploadItem {
   };
 }
 
-function renderQueue(items: UploadItem[], busy = false) {
+function renderQueue(items: UploadItem[], busy = false, matching = false) {
   return renderToStaticMarkup(<QueueTable
     busy={busy}
     items={items}
@@ -30,6 +30,7 @@ function renderQueue(items: UploadItem[], busy = false) {
     onDeleteSourceAfterUploadChange={() => undefined}
     onDeleteUploadedSource={() => undefined}
     onQueue={() => undefined}
+    onRetryMatching={matching ? () => undefined : undefined}
     onVisibilityChange={() => undefined}
   />);
 }
@@ -72,6 +73,44 @@ describe("queue navigation and upload feedback", () => {
     expect(failed).toContain('aria-label="Remove from queue: Cebu video"');
     expect(renderQueue([item({ status: "needs_reconciliation" })])).not.toContain("Retry upload");
     expect(renderQueue([item({ status: "failed" })], true)).toMatch(/aria-label="Retry upload: Cebu video"[^>]*disabled=""/);
+  });
+
+  it("places a visible retry beside the transfer error and groups only the same failure", () => {
+    const detail = "YouTube rejected the upload setup request.";
+    const rows = [item({ id: "first", status: "failed", detail }), item({ id: "second", status: "failed", detail }), item({ id: "different", status: "failed", detail: "A different error." }), item({ id: "confirmed", status: "failed", detail, videoId: "video-a" }), item({ id: "uncertain", status: "needs_reconciliation", detail: "A transfer outcome is uncertain." })];
+    const markup = renderQueue(rows, false, true);
+    expect(markup).toContain("Retry all with same issue (2)"); expect(markup).not.toContain("Retry all with same issue (3)");
+    expect(markup.indexOf("Retry upload: Cebu video")).toBeGreaterThan(markup.indexOf('data-label="Transfer"'));
+    expect(markup.match(/aria-label="Retry all with same issue \(2\)"/g)).toHaveLength(1);
+    expect(markup.indexOf("Bulk retry matching upload failures")).toBeGreaterThan(markup.indexOf("Filter queue by upload status"));
+    expect(markup.indexOf("Bulk retry matching upload failures")).toBeLessThan(markup.indexOf('aria-label="Saved upload queue"'));
+    expect(renderQueue([rows[0]], false, true)).not.toContain("Retry all with same issue");
+    expect(renderQueue(rows)).not.toContain("Retry all with same issue");
+    expect(renderQueue(rows, true, true)).toMatch(/aria-label="Retry all with same issue \(2\)"[^>]*disabled=""/);
+    expect(renderQueue([item({ status: "needs_reconciliation", detail })])).toContain('aria-label="Retry upload: Cebu video"');
+    expect(renderQueue([item({ status: "needs_reconciliation", detail, confirmedBytes: 1 })])).not.toContain("Retry upload");
+  });
+
+  it("offers one bulk action with an issue selector when different failure groups are present", () => {
+    const rows = [
+      item({ id: "first-a", title: "Camera A", status: "failed", retryFailureKey: "setup:400:invalidTitle" }),
+      item({ id: "first-b", title: "Camera B", status: "failed", retryFailureKey: "setup:400:invalidTitle" }),
+      item({ id: "second-a", title: "Hall A", status: "failed", retryFailureKey: "setup:400:invalidCategory" }),
+      item({ id: "second-b", title: "Hall B", status: "failed", retryFailureKey: "setup:400:invalidCategory" }),
+    ];
+    const markup = renderQueue(rows, false, true);
+    expect(markup).toContain("Upload issue to retry"); expect(markup).toContain("Camera A · 2 uploads with this issue"); expect(markup).toContain("Hall A · 2 uploads with this issue");
+    expect(markup.match(/aria-label="Retry all with same issue \(2\)"/g)).toHaveLength(1);
+  });
+
+  it("uses filters to offer relevant issues while preserving whole-group counts and a visible anchor", () => {
+    const detail = "YouTube rejected the upload setup request.";
+    const rows = [item({ id: "hidden", title: "Hidden video", status: "failed", detail }), item({ id: "visible", title: "Visible video", status: "failed", detail }), item({ id: "single", title: "Different", status: "failed", retryFailureKey: "setup:400:invalidTitle" })];
+    const filtered = filterQueueItems(rows, "visible", "attention");
+    expect(uploadRetryGroups(rows, filtered)).toEqual([{ key: "setup:legacy_unknown", count: 2, anchor: rows[1] }]);
+    expect(uploadRetryGroups(rows, filterQueueItems(rows, "", "uploaded"))).toEqual([]);
+    expect(uploadRetryGroups(rows, [rows[2]])).toEqual([]);
+    expect(uploadRetryGroups(rows, [])).toEqual([]);
   });
 
   it("offers upload guidance and hides unusable supporting controls when the queue is empty", () => {

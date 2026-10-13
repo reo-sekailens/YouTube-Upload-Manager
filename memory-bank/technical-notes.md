@@ -7,6 +7,79 @@
 
 ## Engineering constraints
 
+- TASK147 supports up to 64 active/paused configured roots on the device
+  with independent visibility, audience, playlist and cleanup choices. Selection
+  changes only the activity view. All enabled roots share one scan coordinator
+  and the existing bounded upload/hash/probe engine. Only direct-child supported
+  files are eligible, including existing files after two unchanged scans.
+- Native monitor IDs scope observations, uploads, audits, scan/retry/reconciliation
+  commands and cleanup progress. Mutations recheck the connected channel; omitted
+  IDs are accepted only for an unambiguous single-folder compatibility call.
+  Removed configurations retain queue/history and originals. Physical root aliases
+  are checked during approval/scanning, while schema 7 migration stays database-only.
+  Rollback requires a pre-migration database backup; no personal profile is migrated
+  by the controlled test fixtures. Playlist choices are verified against native
+  read-only provider ownership/title metadata before recurring approval commits.
+- Re-adding the same channel/root revives its retained monitor ID and observations
+  without replacing original source locators or the choices on queued items.
+  Exact archive-key lookup precedes bounded physical-alias checks; a truncated
+  unmatched alias search rejects approval rather than silently reintaking files.
+  Legacy path keys can be repaired only after same-root runtime proof. Worker
+  shutdown rechecks concurrent enablement, and pause/remove commands wait for
+  scan serialization outside the GUI thread.
+
+- TASK146 extends manual-upload defaults with Private/Unlisted/Public visibility
+  and a default playlist. Audience/visibility apply across channels on a device;
+  playlist choices follow the connected channel and are never exposed/applied to
+  another channel. Native partial patches use owned provider metadata and one
+  transaction; missing fields preserve values, empty playlist clears that channel.
+- Review waits for defaults/current playlists, preselects only an available owned
+  default, preserves explicit per-batch choices when reads finish/refresh, and
+  explains missing defaults. Preferences never modify existing queue entries or
+  Folder Monitor configuration. The expanded panel has lazy CSS ownership and
+  its command helpers load with manual-upload surfaces to retain startup budgets.
+- Schema 6 preserves existing Made for Kids values, OAuth bundle pointers, quota
+  pauses and source/checkpoint evidence. As with schema 5, application rollback
+  requires a pre-migration database backup; no personal profile was migrated
+  during fixture verification.
+
+- TASK145's account action uses Choose JSON → Review → Reconnect. Native staging
+  pauses account operations until review is completed/cancelled/expired, rejects
+  active uploads/conflicting consent, and only promotes after same-channel proof.
+  Tokens/secrets/JSON contents stay native and OS-protected. Queue records,
+  original sources and resumable checkpoints stay intact; management consent is
+  reset after successful replacement. Google consent still uses its approved
+  browser flow rather than collecting login credentials in the application.
+- Exact `error.errors[].reason` values distinguish `quotaExceeded` and
+  `dailyLimitExceeded` (Cloud API quota) from `uploadLimitExceeded` (channel cap).
+  Documented HTTP 400 channel limits are recognized alongside 403/429. Cloud
+  takes precedence and mixed results retain both pauses. New Cloud pauses use
+  project metadata, with a client fallback when unavailable; a same/unknown
+  project change carries the existing pause rather than assuming fresh quota.
+  Pause events invalidate the account view without settled-idle polling.
+- Schema 5 retains old credential compatibility through a nullable protected
+  bundle pointer. Migration is transactional; no personal credentials or live
+  profile were changed in local fixtures. Older apps reject a migrated schema;
+  reverting a deployed application requires its pre-migration database backup.
+
+- Prefer stepped dialogs for multi-stage in-app flows, per the user's
+  2026-10-13 instruction. Playlist creation uses Name, Visibility and final
+  Review with Back navigation; provider writes never occur during Next steps.
+- Playlist creation/addition use the separately protected management credential
+  and 15-minute mode. Ordinary upload/read consent lacks playlist-write scope
+  and must stay separate. Review exposes explicit permission actions; native
+  code rechecks scope before credentials or writes. Addition receipts/progress
+  bind channel, playlist and request; retries reread current membership.
+
+- TASK143's duplicate media modal resolves opaque upload/preflight/candidate IDs
+  through Rust. Source paths and credentials remain native-only. The preview
+  protocol grants only the main webview, GET/HEAD and single bounded byte ranges;
+  grants expire after 30 minutes and are revoked on close/stale acquisition.
+  Unsupported source URIs/codecs or unavailable originals are disclosed.
+  YouTube embeds retain native controls, have at least a 200px viewport height,
+  send the normal referrer policy, and perform no automatic playback. The modal
+  and its styles load only after the operator chooses Compare videos.
+
 - Do not add an application backend, cloud queue, database, object store, analytics service, or automatic media upload outside Google/YouTube.
 - Keep Google/YouTube refresh and access tokens out of source control, webview bundles, logs, and memory-bank files. Store them through platform secure storage accessed from Rust. An installed-app OAuth client ID is a public identifier, not a client secret.
 - Use PKCE for installed-app OAuth. Desktop may use loopback redirects; Android and iOS must use an approved platform-specific flow because mobile loopback redirects are deprecated.
@@ -338,6 +411,50 @@
   measured status p50/p95 3.629/4.966 ms and a bounded 48/48 page
   12.162/17.844 ms; its maximum serialized payload was 21,945 bytes against the
   262,144-byte budget.
+
+## 2026-10-13 implementation and validation boundaries
+
+- TASK149–161 record locally completed workflow contracts and screenshots. Final
+  checks pass 417 native cases (six ignored), 480 frontend cases, strict
+  TypeScript, production native check/fmt and unchanged bundle budgets:
+  223.20 KiB raw JavaScript, 69.97 KiB gzip JavaScript, 39.40 KiB raw CSS. The
+  separately invoked real decoder case passes in 15.57 seconds. Forty operation/
+  packaging fixtures pass, with one Unix check skipped on Windows; 189 merged
+  browser assertions pass without console errors/warnings. Direct default lazy
+  entry points preserve named component exports and reduce startup overhead.
+- `persistence::ensure_runtime_indexes` installs ordinary secondary indexes
+  atomically during deferred startup before recovery-plan consumption. Cold
+  tables/triggers and watched-root uniqueness remain pre-shell. Idempotence,
+  DDL rollback/retry, unchanged queue/checkpoints and populated hot query plans
+  are covered; the 110-statement cold budget remains unchanged.
+- Tauri tray support and desktop notification 2.6/autostart 2.7 are initialized
+  natively. Notification compatibility requires Tauri 2.12; Cargo.lock and
+  generated native ACL/schema updates reflect that dependency resolution.
+  No webview token grant or new JavaScript plugin dependency is introduced.
+- Publication captures UTC plus exact selected timezone and native pinned
+  `chrono-tz =0.10.4` TZDB 2025b. Private upload setup omits `publishAt`; a
+  separate owner-verified durable job applies the reviewed time after processing.
+- FFmpeg preparation uses exact per-target length/SHA256 and upstream notices;
+  actual binary versions differ by platform despite the upstream release tag.
+  Existing fully prepared redirected output is accepted read-only, after all
+  bytes/provenance are rechecked; incomplete or changed redirects fail without
+  repair. Normal fresh CI directories remain the packaging destination.
+- This checkout's existing `src-tauri/binaries` junction points to an unavailable
+  F: drive and was preserved. Native check/tests use an explicit local harness
+  resource override; that is not normal installer/sidecar packaging evidence.
+  The Windows portable workflow validates all six ZIP members, both decoder
+  hashes/PE architecture and nonempty license/source notices. Its fixtures do
+  not establish a GitHub publication or installed app.
+- Retry bulk review accepts at most 200 exact matching saved items and expires
+  after 15 minutes. Oversized groups reject without queueing or truncation.
+  Structured setup status/reasons are sanitized; secure-store failures are
+  distinct from a missing checkpoint. Unknown transfer/provider outcomes retain
+  reconciliation gates. A single global issue selector/button sits below queue
+  filters; individual rows contain only their own retry.
+- Real YouTube operations, personal account changes, OS toast/tray/login startup,
+  packaged playback and other-platform runtime behavior remain unverified.
+  Perceptual review needs representative camera/media accuracy/performance and
+  exact shipped-decoder distribution evidence before release.
 
 ## Conventions to establish with implementation
 

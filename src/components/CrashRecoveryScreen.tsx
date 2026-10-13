@@ -152,3 +152,5 @@ export function CrashRecoveryScreen({
     </main>
   );
 }
+
+export default CrashRecoveryScreen;

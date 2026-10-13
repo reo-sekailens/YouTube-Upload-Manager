@@ -3,13 +3,18 @@ use serde::Serialize;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{mpsc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
-use crate::{performance, persistence, spawn_worker, DATABASE_BUSY_TIMEOUT};
+use crate::{
+    desktop_presence, performance, persistence, spawn_worker, AppState, DATABASE_BUSY_TIMEOUT,
+};
 
 pub(crate) const STATE_CHANGE_EVENT: &str = "local-state-change";
 const STATE_CHANGE_BATCH_LIMIT: usize = 512;
@@ -53,9 +58,24 @@ impl StateEventRuntime {
     /// The receiver retries the durable revision read briefly, so it never
     /// publishes an uncommitted row and a rollback cannot create a fake delta.
     pub(crate) fn attach_commit_hook(&self, connection: &Connection) {
+        let revision_inserted = Arc::new(AtomicBool::new(false));
+        let inserted = Arc::clone(&revision_inserted);
+        connection.update_hook(Some(
+            move |action, _database: &str, table: &str, _row_id| {
+                if action == rusqlite::hooks::Action::SQLITE_INSERT && table == "state_changes" {
+                    inserted.store(true, Ordering::Release);
+                }
+            },
+        ));
+        let rolled_back = Arc::clone(&revision_inserted);
+        connection.rollback_hook(Some(move || {
+            rolled_back.store(false, Ordering::Release);
+        }));
         let wake_sender = self.wake_sender.clone();
         connection.commit_hook(Some(move || {
-            let _ = wake_sender.try_send(());
+            if revision_inserted.swap(false, Ordering::AcqRel) {
+                let _ = wake_sender.try_send(());
+            }
             false
         }));
     }
@@ -229,6 +249,73 @@ fn wait_for_committed_revision(database_path: &Path, after_revision: u64) -> Opt
     None
 }
 
+/// Native desktop notices use the durable device stream. The webview delta is
+/// intentionally channel scoped and cannot serve as a device-wide wake hint.
+/// This bounded read covers only a commit-driven revision range; the desktop
+/// module retains its own persisted cursor and decides which outcomes matter.
+fn load_device_change_hints(
+    connection: &Connection,
+    after_revision: u64,
+    through_revision: u64,
+) -> Result<Vec<StateChange>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT revision, channel_id, surface, entity_id, event_kind, payload_json
+             FROM state_changes
+             WHERE revision > ?1 AND revision <= ?2
+             ORDER BY revision ASC
+             LIMIT ?3",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(
+            params![
+                after_revision.min(i64::MAX as u64) as i64,
+                through_revision.min(i64::MAX as u64) as i64,
+                STATE_CHANGE_BATCH_LIMIT as i64
+            ],
+            |row| {
+                let payload_json = row.get::<_, String>(5)?;
+                Ok(StateChange {
+                    revision: row.get::<_, i64>(0)?.max(0) as u64,
+                    channel_id: row.get(1)?,
+                    surface: row.get(2)?,
+                    entity_id: row.get(3)?,
+                    event_kind: row.get(4)?,
+                    payload: serde_json::from_str(&payload_json).unwrap_or(serde_json::Value::Null),
+                })
+            },
+        )
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(rows)
+}
+
+fn dispatch_desktop_change_hints(
+    app: &AppHandle,
+    connection: &Connection,
+    after_revision: u64,
+    through_revision: u64,
+) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let mut cursor = after_revision;
+    while cursor < through_revision {
+        let Ok(changes) = load_device_change_hints(connection, cursor, through_revision) else {
+            break;
+        };
+        let Some(last) = changes.last() else {
+            break;
+        };
+        cursor = last.revision;
+        // A notice error cannot suppress the normal channel-scoped UI delta.
+        // Desktop recovery owns its durable cursor; a later change can retry it.
+        let _ = desktop_presence::on_changes(app, &state, &changes);
+    }
+}
+
 fn dispatch_loop(app: AppHandle, database_path: PathBuf, receiver: mpsc::Receiver<()>) {
     let mut emitted_revision = open_event_connection(&database_path)
         .and_then(|connection| current_revision(&connection))
@@ -267,6 +354,7 @@ fn dispatch_loop(app: AppHandle, database_path: PathBuf, receiver: mpsc::Receive
             if batch.to_revision <= emitted_revision {
                 break;
             }
+            dispatch_desktop_change_hints(&app, &connection, emitted_revision, batch.to_revision);
             emitted_revision = batch.to_revision;
             if !batch.changes.is_empty() || batch.reset_required {
                 performance::record_event_message();
@@ -339,6 +427,92 @@ mod tests {
     }
 
     #[test]
+    fn desktop_hints_include_inactive_channel_outcomes_without_widening_ui_scope() {
+        let (root, connection) = fixture();
+        let baseline = current_revision(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO upload_items(id, title, file_name, channel_id, workspace_path, size_bytes, status, total_bytes, created_at, updated_at)
+                 VALUES('inactive-failure', 'Other clip', 'other.mp4', 'channel-b', 'original', 10, 'failed', 10, 'fixture', 'one')",
+                [],
+            )
+            .unwrap();
+        record_invalidation(
+            &connection,
+            "channel-b",
+            "assets",
+            "inactive-failure",
+            "invalidate",
+        )
+        .unwrap();
+        let through = current_revision(&connection).unwrap();
+
+        let hints = load_device_change_hints(&connection, baseline, through).unwrap();
+        assert_eq!(hints.len(), 2);
+        assert!(hints.iter().all(|change| change.channel_id == "channel-b"));
+        assert_eq!(hints[0].surface, "upload");
+        assert_eq!(hints[0].payload["status"], "failed");
+        assert_eq!(hints[1].surface, "assets");
+        let ui_batch = load_state_changes(&connection, "channel-a", baseline).unwrap();
+        assert!(ui_batch.changes.is_empty());
+        assert_eq!(ui_batch.to_revision, through);
+
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn desktop_hints_page_one_committed_range_without_skipping_a_late_outcome() {
+        let (root, mut connection) = fixture();
+        let baseline = current_revision(&connection).unwrap();
+        let transaction = connection.transaction().unwrap();
+        for entity in 0..STATE_CHANGE_BATCH_LIMIT {
+            record_invalidation(
+                &transaction,
+                "channel-b",
+                "inventory",
+                &format!("inactive-{entity}"),
+                "invalidate",
+            )
+            .unwrap();
+        }
+        let final_revision = record_invalidation(
+            &transaction,
+            "channel-b",
+            "completion",
+            "final-outcome",
+            "invalidate",
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        record_invalidation(
+            &connection,
+            "channel-a",
+            "inventory",
+            "later-commit",
+            "invalidate",
+        )
+        .unwrap();
+
+        let first = load_device_change_hints(&connection, baseline, final_revision).unwrap();
+        assert_eq!(first.len(), STATE_CHANGE_BATCH_LIMIT);
+        let second =
+            load_device_change_hints(&connection, first.last().unwrap().revision, final_revision)
+                .unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].entity_id, "final-outcome");
+        assert_eq!(second[0].revision, final_revision);
+        assert!(
+            load_device_change_hints(&connection, final_revision, final_revision)
+                .unwrap()
+                .is_empty()
+        );
+
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn commit_hook_is_quiet_when_idle_and_wakes_after_a_durable_change() {
         let (root, connection) = fixture();
         let runtime = StateEventRuntime::new();
@@ -362,6 +536,57 @@ mod tests {
             receiver.recv_timeout(Duration::from_millis(25)),
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
+
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn non_state_commits_and_rolled_back_revisions_do_not_wake_the_dispatcher() {
+        let (root, connection) = fixture();
+        let runtime = StateEventRuntime::new();
+        runtime.attach_commit_hook(&connection);
+        let receiver = runtime.wake_receiver.lock().unwrap().take().unwrap();
+        connection
+            .execute_batch("CREATE TABLE event_quiet_fixture (id TEXT PRIMARY KEY)")
+            .unwrap();
+        connection
+            .execute("INSERT INTO event_quiet_fixture(id) VALUES('receipt')", [])
+            .unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(25)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        let before_rollback = current_revision(&connection).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        record_invalidation(
+            &connection,
+            "channel-b",
+            "completion",
+            "rolled-back",
+            "invalidate",
+        )
+        .unwrap();
+        connection.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(current_revision(&connection).unwrap(), before_rollback);
+        connection
+            .execute("INSERT INTO event_quiet_fixture(id) VALUES('cursor')", [])
+            .unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(25)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        connection
+            .execute(
+                "INSERT INTO upload_items(id, title, file_name, channel_id, workspace_path, size_bytes, status, total_bytes, created_at, updated_at)
+                 VALUES('trigger-outcome', 'Clip', 'clip.mp4', 'channel-b', 'original', 10, 'failed', 10, 'fixture', 'one')",
+                [],
+            )
+            .unwrap();
+        assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
+        assert!(current_revision(&connection).unwrap() > before_rollback);
 
         drop(connection);
         std::fs::remove_dir_all(root).unwrap();

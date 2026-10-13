@@ -108,8 +108,44 @@ jobs:
         run: |
           $ffprobe = 'src-tauri/binaries/ffprobe-x86_64-pc-windows-msvc.exe'
           $license = 'src-tauri/binaries/ffprobe-license.txt'
+          $decoder = 'src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe'
+          $decoderLicense = 'src-tauri/binaries/ffmpeg-license.txt'
+          $decoderSourceNotice = 'src-tauri/binaries/ffmpeg-source-notice.txt'
+          $decoderPinJson = & node --input-type=module -e "import { DECODER_TARGETS } from './scripts/prepare-perceptual-decoder.mjs'; console.log(JSON.stringify(DECODER_TARGETS['x86_64-pc-windows-msvc']));"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not load the pinned Windows decoder provenance.' }
+          $decoderPin = $decoderPinJson | ConvertFrom-Json
           if (-not (Test-Path -LiteralPath $ffprobe -PathType Leaf)) { throw 'Verified Windows x64 FFprobe sidecar is missing.' }
           if (-not (Test-Path -LiteralPath $license -PathType Leaf)) { throw 'FFprobe license is missing.' }
+          foreach ($requiredSource in @($decoder, $decoderLicense, $decoderSourceNotice)) {
+            if (-not (Test-Path -LiteralPath $requiredSource -PathType Leaf)) { throw "Required decoder file is missing: $requiredSource." }
+            if ((Get-Item -LiteralPath $requiredSource).Length -eq 0) { throw "Required decoder file is empty: $requiredSource." }
+          }
+          if ((Get-Item -LiteralPath $decoder).Length -ne $decoderPin.bytes) { throw 'Windows decoder byte length does not match its pinned artifact.' }
+          $decoderDigest = (Get-FileHash -LiteralPath $decoder -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($decoderDigest -ne $decoderPin.digest) { throw 'Windows decoder SHA-256 does not match its pinned artifact.' }
+          function Assert-WindowsX64Decoder([System.IO.Stream] $stream, [long] $length) {
+            $reader = [System.IO.BinaryReader]::new($stream, [System.Text.Encoding]::UTF8, $true)
+            try {
+              $header = $reader.ReadBytes(64)
+              if ($header.Length -ne 64 -or $header[0] -ne 0x4D -or $header[1] -ne 0x5A) { throw 'Decoder is not a Windows PE binary.' }
+              $decoderPeOffset = [BitConverter]::ToInt32($header, 0x3C)
+              if ($decoderPeOffset -lt 64 -or $decoderPeOffset -gt 1048576 -or $decoderPeOffset + 6 -gt $length) { throw 'Decoder has an invalid PE header offset.' }
+              $padding = $reader.ReadBytes($decoderPeOffset - 64)
+              if ($padding.Length -ne $decoderPeOffset - 64) { throw 'Decoder PE header is truncated.' }
+              $peHeader = $reader.ReadBytes(6)
+              if ($peHeader.Length -ne 6 -or $peHeader[0] -ne 0x50 -or $peHeader[1] -ne 0x45 -or $peHeader[2] -ne 0 -or $peHeader[3] -ne 0) { throw 'Decoder PE signature is invalid.' }
+              $decoderMachine = [BitConverter]::ToUInt16($peHeader, 4)
+              if ($decoderMachine -ne 0x8664) { throw "Decoder has machine 0x$($decoderMachine.ToString('X4')); expected Windows x64 (0x8664)." }
+            } finally {
+              $reader.Dispose()
+            }
+          }
+          $decoderStream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $decoder))
+          try {
+            Assert-WindowsX64Decoder $decoderStream $decoderStream.Length
+          } finally {
+            $decoderStream.Dispose()
+          }
           $binary = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $ffprobe))
           if ($binary.Length -lt 64 -or $binary[0] -ne 0x4D -or $binary[1] -ne 0x5A) { throw 'FFprobe is not a Windows PE binary.' }
           $peOffset = [BitConverter]::ToInt32($binary, 0x3C)
@@ -120,12 +156,48 @@ jobs:
           Copy-Item src-tauri/target/release/youtube-upload-manager.exe portable/YouTube-Upload-Manager.exe
           Copy-Item -LiteralPath $ffprobe portable/ffprobe.exe
           Copy-Item -LiteralPath $license portable/ffprobe-license.txt
-          Compress-Archive -Path portable/YouTube-Upload-Manager.exe,portable/ffprobe.exe,portable/ffprobe-license.txt -DestinationPath portable/YouTube-Upload-Manager-windows-x64-portable.zip
+          Copy-Item -LiteralPath $decoder portable/ffmpeg.exe
+          Copy-Item -LiteralPath $decoderLicense portable/ffmpeg-license.txt
+          Copy-Item -LiteralPath $decoderSourceNotice portable/ffmpeg-source-notice.txt
+          $packageSources = [ordered]@{
+            'YouTube-Upload-Manager.exe' = 'src-tauri/target/release/youtube-upload-manager.exe'
+            'ffprobe.exe' = $ffprobe
+            'ffprobe-license.txt' = $license
+            'ffmpeg.exe' = $decoder
+            'ffmpeg-license.txt' = $decoderLicense
+            'ffmpeg-source-notice.txt' = $decoderSourceNotice
+          }
+          $sourceDigests = @{}
+          foreach ($sourceName in $packageSources.Keys) {
+            $sourceDigests[$sourceName] = (Get-FileHash -LiteralPath $packageSources[$sourceName] -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          Compress-Archive -Path portable/YouTube-Upload-Manager.exe,portable/ffprobe.exe,portable/ffprobe-license.txt,portable/ffmpeg.exe,portable/ffmpeg-license.txt,portable/ffmpeg-source-notice.txt -DestinationPath portable/YouTube-Upload-Manager-windows-x64-portable.zip
           $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path 'portable/YouTube-Upload-Manager-windows-x64-portable.zip'))
           try {
-            $entries = @($zip.Entries | ForEach-Object FullName)
-            foreach ($required in @('YouTube-Upload-Manager.exe', 'ffprobe.exe', 'ffprobe-license.txt')) {
-              if ($entries -notcontains $required) { throw "Portable archive is missing $required." }
+            if ($zip.Entries.Count -ne $packageSources.Count) { throw 'Portable archive contains an unexpected entry count.' }
+            foreach ($required in $packageSources.Keys) {
+              $matchingEntries = @($zip.Entries | Where-Object FullName -EQ $required)
+              if ($matchingEntries.Count -ne 1) { throw "Portable archive must contain exactly one $required." }
+              $entry = $matchingEntries[0]
+              if ($entry.Length -eq 0) { throw "Portable archive contains an empty $required." }
+              $entryStream = $entry.Open()
+              $hasher = [System.Security.Cryptography.SHA256]::Create()
+              try {
+                $archivedDigest = [Convert]::ToHexString($hasher.ComputeHash($entryStream)).ToLowerInvariant()
+                if ($archivedDigest -ne $sourceDigests[$required]) { throw "Portable archive bytes differ from the prepared source for $required." }
+                if ($required -eq 'ffmpeg.exe' -and ($archivedDigest -ne $decoderPin.digest -or $entry.Length -ne $decoderPin.bytes)) { throw 'Archived decoder does not match the pinned Windows artifact.' }
+              } finally {
+                $hasher.Dispose()
+                $entryStream.Dispose()
+              }
+              if ($required -eq 'ffmpeg.exe') {
+                $archivedDecoderStream = $entry.Open()
+                try {
+                  Assert-WindowsX64Decoder $archivedDecoderStream $entry.Length
+                } finally {
+                  $archivedDecoderStream.Dispose()
+                }
+              }
             }
           } finally {
             $zip.Dispose()

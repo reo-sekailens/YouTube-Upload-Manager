@@ -106,6 +106,15 @@ impl MediaResourceScheduler {
         path: &Path,
         cancelled: &impl Fn() -> bool,
     ) -> Result<MediaResourcePermit<'_>, String> {
+        self.acquire_probe_with_upload_scope(path, cancelled, false)
+    }
+
+    fn acquire_probe_with_upload_scope(
+        &self,
+        path: &Path,
+        cancelled: &impl Fn() -> bool,
+        all_uploads: bool,
+    ) -> Result<MediaResourcePermit<'_>, String> {
         let volume_id = source_volume_id(path);
         let mut state = self
             .state
@@ -121,6 +130,8 @@ impl MediaResourceScheduler {
                 .copied()
                 .unwrap_or(0)
                 > 0;
+            let upload_active = upload_active
+                || (all_uploads && state.uploads_by_volume.values().any(|count| *count > 0));
             if state.ffprobe_processes < MAX_CONCURRENT_FFPROBE_PROCESSES && !upload_active {
                 state.ffprobe_processes += 1;
                 return Ok(MediaResourcePermit {
@@ -282,6 +293,21 @@ fn media_resource_scheduler() -> &'static MediaResourceScheduler {
 
 pub(crate) fn active_upload(path: &Path) -> Result<ActiveUploadGuard<'static>, String> {
     media_resource_scheduler().active_upload(path)
+}
+
+pub(crate) fn has_active_upload(_path: &Path) -> bool {
+    media_resource_scheduler()
+        .state
+        .lock()
+        .map(|state| state.uploads_by_volume.values().any(|count| *count > 0))
+        .unwrap_or(true)
+}
+
+pub(crate) fn acquire_background_decoder(
+    path: &Path,
+    cancelled: &impl Fn() -> bool,
+) -> Result<impl Drop, String> {
+    media_resource_scheduler().acquire_probe_with_upload_scope(path, cancelled, true)
 }
 
 pub(crate) fn acquire_reader(

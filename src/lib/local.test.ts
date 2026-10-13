@@ -2,10 +2,55 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 const invoke = vi.fn();
 const isTauri = vi.fn(() => false);
+const convertFileSrc = vi.fn((token: string, protocol: string) => `http://${protocol}.localhost/${token}`);
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke, isTauri }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke, isTauri, convertFileSrc }));
+
+describe("read-only duplicate video previews", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    convertFileSrc.mockClear();
+    isTauri.mockReturnValue(true);
+    vi.resetModules();
+  });
+  afterEach(() => {
+    isTauri.mockReturnValue(false);
+    vi.resetModules();
+  });
+
+  it("resolves an opaque item in its reviewed channel and converts only native tokens", async () => {
+    invoke.mockResolvedValue({ localSources: [{ token: "preview-token", title: "Clip", fileName: "clip.mp4" }], youtubeVideos: [{ videoId: "video-1", title: "Clip" }] });
+    const { prepareDuplicateMediaPreview } = await import("./duplicate-media-preview");
+    const target = { kind: "upload", itemId: "item-1" } as const;
+    const evidence = await prepareDuplicateMediaPreview(target, "channel-1");
+    expect(invoke).toHaveBeenCalledWith("prepare_duplicate_media_preview", { target, expectedChannelId: "channel-1" });
+    expect(convertFileSrc).toHaveBeenCalledWith("preview-token", "media-preview");
+    expect(evidence.localSources[0].url).toBe("http://media-preview.localhost/preview-token");
+    expect(evidence.youtubeVideos[0].videoId).toBe("video-1");
+  });
+
+  it("revokes all selected-source grants and avoids empty release calls", async () => {
+    const { releaseDuplicateMediaPreview } = await import("./duplicate-media-preview");
+    await releaseDuplicateMediaPreview(["one", "two"]);
+    await releaseDuplicateMediaPreview([]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("release_duplicate_media_preview", { tokens: ["one", "two"] });
+  });
+
+  it("does not grant filesystem preview access in browser mode", async () => {
+    isTauri.mockReturnValue(false);
+    vi.resetModules();
+    const { prepareDuplicateMediaPreview } = await import("./duplicate-media-preview");
+    await expect(prepareDuplicateMediaPreview({ kind: "preflight", jobId: "scan", ordinal: 0 })).rejects.toThrow("desktop app");
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
 
 describe("native OAuth client configuration", () => {
+  afterEach(() => {
+    isTauri.mockReturnValue(false);
+    vi.resetModules();
+  });
   beforeAll(() => {
     vi.stubGlobal("window", {});
   });
@@ -25,6 +70,33 @@ describe("native OAuth client configuration", () => {
     await importDesktopOAuthClient("C:\\Secrets\\desktop-client.json");
 
     expect(invoke).toHaveBeenCalledWith("import_desktop_oauth_client", { path: "C:\\Secrets\\desktop-client.json" });
+  });
+
+  it("keeps replacement review and consent bound to the reviewed channel", async () => {
+    const { prepareOAuthClientReplacement, beginOAuthClientReplacement, loadOAuthClientReplacementStatus, cancelOAuthClientReplacement } = await import("./local");
+    await prepareOAuthClientReplacement("C:/Fixture/client.json", "channel-a");
+    await beginOAuthClientReplacement("review-a", "channel-a");
+    await loadOAuthClientReplacementStatus("review-a");
+    await cancelOAuthClientReplacement("review-a");
+    expect(invoke.mock.calls).toEqual([
+      ["prepare_oauth_client_replacement", { path: "C:/Fixture/client.json", expectedChannelId: "channel-a" }],
+      ["begin_oauth_client_replacement", { reviewId: "review-a", expectedChannelId: "channel-a" }],
+      ["load_oauth_client_replacement_status", { reviewId: "review-a" }],
+      ["cancel_oauth_client_replacement", { reviewId: "review-a" }],
+    ]);
+  });
+
+  it("does not invent a provider pause outside the native app", async () => {
+    const { loadUploadLimitStatus } = await import("./local");
+    await expect(loadUploadLimitStatus("channel-a")).resolves.toEqual({ kind: "none" });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("requests native limit diagnosis with the active channel fence", async () => {
+    isTauri.mockReturnValue(true);
+    const { loadUploadLimitStatus } = await import("./local");
+    await loadUploadLimitStatus("channel-a");
+    expect(invoke).toHaveBeenCalledWith("load_upload_limit_status", { expectedChannelId: "channel-a" });
   });
 });
 
@@ -409,14 +481,60 @@ describe("manual upload intake settings", () => {
   });
 });
 
-describe("device-wide manual audience default", () => {
-  beforeEach(() => { invoke.mockReset(); });
+describe("scoped playlist commands", () => {
+  beforeEach(() => { invoke.mockReset(); isTauri.mockReturnValue(true); vi.resetModules(); });
+  afterEach(() => { isTauri.mockReturnValue(false); vi.resetModules(); });
+
+  it("binds creation to the reviewed channel and explicit visibility", async () => {
+    const { createYouTubePlaylist } = await import("./local");
+    await createYouTubePlaylist("Event highlights", "unlisted", "channel-a");
+    expect(invoke).toHaveBeenCalledWith("create_youtube_playlist", { title: "Event highlights", privacyStatus: "unlisted", expectedChannelId: "channel-a" });
+  });
+
+  it("preserves selected order and operation identity on bulk addition", async () => {
+    const receipt = { channelId: "channel-a", playlistId: "playlist-a", requestedVideoIds: ["video-z", "video-a"], addedVideoIds: ["video-z"], skippedVideoIds: ["video-a"], remainingVideoIds: [] };
+    invoke.mockResolvedValue(receipt);
+    const { addRemoteVideosToPlaylist } = await import("./local");
+    await expect(addRemoteVideosToPlaylist("playlist-a", ["video-z", "video-a"], "channel-a", "operation-a")).resolves.toEqual(receipt);
+    expect(invoke).toHaveBeenCalledWith("add_remote_videos_to_playlist", { playlistId: "playlist-a", videoIds: ["video-z", "video-a"], expectedChannelId: "channel-a", requestId: "operation-a" });
+  });
+
+  it("retains unresolved receipt IDs after a partial provider failure", async () => {
+    const receipt = { channelId: "channel-a", playlistId: "playlist-a", requestedVideoIds: ["first", "second"], addedVideoIds: ["first"], skippedVideoIds: [], remainingVideoIds: ["second"], error: "The second result is uncertain.", uncertain: true };
+    invoke.mockResolvedValue(receipt);
+    const { addRemoteVideosToPlaylist } = await import("./local");
+    await expect(addRemoteVideosToPlaylist("playlist-a", ["first", "second"], "channel-a", "job")).resolves.toEqual(receipt);
+  });
+});
+
+describe("device-wide manual upload defaults", () => {
+  beforeEach(() => { invoke.mockReset(); isTauri.mockReturnValue(false); vi.resetModules(); });
+  afterEach(() => { isTauri.mockReturnValue(false); vi.resetModules(); });
 
   it("keeps a safe preview fallback and saves the made-for-kids default through a native command", async () => {
     const { loadManualUploadDefaults, saveManualUploadDefaults } = await import("./local");
-    await expect(loadManualUploadDefaults()).resolves.toEqual({ madeForKids: false });
+    await expect(loadManualUploadDefaults()).resolves.toEqual({ madeForKids: false, visibility: "private" });
     await saveManualUploadDefaults(true);
 
     expect(invoke).toHaveBeenCalledWith("save_manual_upload_defaults", { madeForKids: true });
+  });
+
+  it("loads playlist defaults only for the reviewed connected channel", async () => {
+    isTauri.mockReturnValue(true);
+    const { loadManualUploadDefaults } = await import("./local");
+    await loadManualUploadDefaults("channel-a");
+    expect(invoke).toHaveBeenCalledWith("load_manual_upload_defaults", { expectedChannelId: "channel-a" });
+  });
+
+  it("keeps unspecified preferences out of a playlist or visibility patch", async () => {
+    const { saveManualUploadDefaults } = await import("./local");
+    await saveManualUploadDefaults({ visibility: "unlisted" });
+    await saveManualUploadDefaults({ playlistId: "playlist-a", expectedChannelId: "channel-a" });
+    await saveManualUploadDefaults({ playlistId: "", expectedChannelId: "channel-a" });
+    expect(invoke.mock.calls).toEqual([
+      ["save_manual_upload_defaults", { visibility: "unlisted" }],
+      ["save_manual_upload_defaults", { playlistId: "playlist-a", expectedChannelId: "channel-a" }],
+      ["save_manual_upload_defaults", { playlistId: "", expectedChannelId: "channel-a" }],
+    ]);
   });
 });
