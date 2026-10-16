@@ -19,6 +19,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Test Tauri core version alignment guard
+        run: node --test scripts/check-tauri-versions.tests.mjs
       - name: Gate production initial bundle budgets
         run: npm run performance:frontend:check
       - run: npm run test
@@ -36,6 +38,7 @@ jobs:
           components: rustfmt
       - run: npm run test:ffprobe
       - run: npm run prepare:ffprobe
+      - run: npm run prepare:perceptual-decoder
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Gate deterministic native worker configuration
         run: npm run performance:native:check -- --configuration-only

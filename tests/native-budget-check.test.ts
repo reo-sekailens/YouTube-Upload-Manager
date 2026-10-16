@@ -92,4 +92,63 @@ describe("deterministic native performance budgets", () => {
 
     expect(evaluateNativeConfiguration(source).budgets.passed).toBe(false);
   });
+
+  it("excludes named test modules before production setup and workers", () => {
+    const source = fixture();
+    source[0] = String.raw`
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) mod oauth_attempt_completion_tests {
+  fn nested<'a>(value: &'a str) {
+    let quoted = "escaped quote: \" and }";
+    let raw = r##" } \" } "# "##;
+    let character = '}';
+    let escaped_character = '\u{7d}';
+    /* } /* nested { comment */ } */
+    // }
+    thread::spawn(test_worker);
+  }
+}
+` + source[0];
+
+    const result = evaluateNativeConfiguration(source);
+
+    expect(result.budgets.passed).toBe(true);
+    expect(result.budgets.checks.map((check) => check.actual)).toEqual([4, 1, 1]);
+  });
+
+  it("still rejects a production thread after a named test module", () => {
+    const source = fixture();
+    source[0] += `
+#[cfg(test)] mod retry_tests { fn helper() { thread::spawn(test_worker); } }
+fn extra_production_worker() { thread::spawn(worker); }
+`;
+
+    const result = evaluateNativeConfiguration(source);
+
+    expect(result.budgets.passed).toBe(false);
+    expect(result.budgets.checks.at(-1)).toMatchObject({ actual: 2, maximum: 1, passed: false });
+  });
+
+  it("ignores fake module declarations and thread calls in comments and literals", () => {
+    const source = fixture();
+    source[0] = String.raw`
+// #[cfg(test)] mod fake { thread::spawn(fake_worker); }
+/* #[cfg(test)] mod fake { /* } */ thread::spawn(fake_worker); } */
+const EXAMPLE: &str = "#[cfg(test)] mod fake { thread::spawn(fake_worker); }";
+const RAW_EXAMPLE: &str = br#"#[cfg(test)] mod fake { thread::spawn(fake_worker); }"#;
+` + source[0];
+
+    expect(evaluateNativeConfiguration(source).budgets.passed).toBe(true);
+  });
+
+  it("does not hide later production threads behind an unclosed test module", () => {
+    const source = fixture();
+    source[0] += "\n#[cfg(test)] mod incomplete { thread::spawn(worker);";
+
+    const result = evaluateNativeConfiguration(source);
+
+    expect(result.budgets.passed).toBe(false);
+    expect(result.budgets.checks.at(-1)).toMatchObject({ actual: 2, passed: false });
+  });
 });

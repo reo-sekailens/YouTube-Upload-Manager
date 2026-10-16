@@ -189,27 +189,52 @@ describe("packaged Windows harness launcher", () => {
   });
 
   it("resolves Cargo target directories with Cargo environment semantics", () => {
+    const fixtureRoot = path.resolve(tmpdir(), "yum-cargo-path-fixture");
+    const repositoryRoot = path.join(fixtureRoot, "repo");
+    const workingDirectory = path.join(fixtureRoot, "build-work");
+    const absoluteTarget = path.join(fixtureRoot, "yum-target");
+
+    expect(path.isAbsolute(repositoryRoot)).toBe(true);
+    expect(path.isAbsolute(workingDirectory)).toBe(true);
+    expect(path.isAbsolute(absoluteTarget)).toBe(true);
     expect(
       resolveCargoTargetDirectory({
-        repositoryRoot: "C:\\repo",
-        workingDirectory: "C:\\repo",
+        repositoryRoot,
+        workingDirectory,
         environment: {},
       }),
-    ).toBe(path.join("C:\\repo", "src-tauri", "target"));
+    ).toBe(path.join(repositoryRoot, "src-tauri", "target"));
+    expect(
+      resolveCargoTargetDirectory({
+        repositoryRoot,
+        workingDirectory,
+        environment: { CARGO_TARGET_DIR: "cargo-target" },
+      }),
+    ).toBe(path.join(workingDirectory, "cargo-target"));
+    expect(
+      resolveCargoTargetDirectory({
+        repositoryRoot,
+        workingDirectory,
+        environment: { CARGO_TARGET_DIR: absoluteTarget },
+      }),
+    ).toBe(absoluteTarget);
+  });
+
+  it.runIf(process.platform === "win32")("resolves Windows Cargo targets across drives", () => {
     expect(
       resolveCargoTargetDirectory({
         repositoryRoot: "C:\\repo",
         workingDirectory: "D:\\build-work",
         environment: { CARGO_TARGET_DIR: "cargo-target" },
       }),
-    ).toBe(path.resolve("D:\\build-work", "cargo-target"));
+    ).toBe(path.win32.join("D:\\build-work", "cargo-target"));
     expect(
       resolveCargoTargetDirectory({
         repositoryRoot: "C:\\repo",
-        workingDirectory: "C:\\repo",
+        workingDirectory: "D:\\build-work",
         environment: { CARGO_TARGET_DIR: "F:\\yum-target" },
       }),
-    ).toBe(path.normalize("F:\\yum-target"));
+    ).toBe(path.win32.normalize("F:\\yum-target"));
   });
 
   it("renders before importing instrumentation and reports unavailable commit counts truthfully", async () => {

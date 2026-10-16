@@ -1,5 +1,24 @@
 # Technical Notes
 
+## Tauri dependency compatibility (TASK162, 2026-10-16)
+
+- Core JavaScript API and Rust Tauri must share major/minor releases. The API
+  now resolves to 2.12.4 (`~2.12.4`) and Rust remains at 2.12.2 (`~2.12.2`),
+  required by the notification integration. Patch differences are supported;
+  the independently released CLI remains 2.11.4 and plugins are unchanged.
+- `npm run check:tauri-versions` checks both manifests and lockfiles, rejects
+  broad ranges/minor drift and runs before production frontend builds. Run it
+  after dependency changes; update both core release lines together. Its
+  regression suite also runs in CI and `test:operations`. The Rust dependency
+  graph did not change in this repair.
+- The real Tauri CLI rejected the original locked 2.11.1/2.12.2 pair and passed
+  its version gate after alignment. The verification hook deliberately stops
+  before native packaging. Locked Cargo checks use the documented resource
+  override harness; complete installer and live-provider proof remain separate.
+- Native verification prepares both configured sidecars and decoder notices
+  before Cargo builds. Initial JS/CSS and native concurrency budgets are not
+  relaxed by this repair.
+
 ## Repository facts (verified 2026-10-09)
 
 - Before this scaffold, the repository contained only Git metadata and `.gitattributes`.

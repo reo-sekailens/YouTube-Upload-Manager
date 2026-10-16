@@ -1,5 +1,28 @@
 # Progress
 
+## 2026-10-16 — Tauri build compatibility and verification repair
+
+- TASK162 aligns locked JavaScript API 2.12.4 with existing Rust Tauri 2.12.2
+  and constrains both declarations to minor 2.12. The actual Tauri CLI now
+  passes the compatibility gate that reproduced the reported 2.11.1/2.12.2
+  failure. CLI/plugins and the Rust lockfile are unchanged. A manifest/lock
+  guard with 15 regression cases runs before production frontend builds and
+  in CI/operations checks.
+- Repaired two additional confirmed verification failures from the previous
+  main CI run: host-portable Cargo path fixtures and exclusion of named
+  test-only Rust modules without hiding subsequent production threads. Native
+  verification also prepares the already configured decoder sidecar/notices.
+  No runtime/UI source or performance limits change.
+- A fresh isolated `npm ci`, 485 frontend tests, 55 operation checks (one
+  platform skip), strict TypeScript, production Vite build, locked native check,
+  Rust formatting and whitespace checks pass. Unchanged initial budgets pass
+  at 223.25/70.00 KiB raw/gzip JavaScript and 39.40 KiB CSS; the native worker
+  guard passes 4/4 uploads, 1/1 resident workers and 1/1 direct thread spawns.
+- The CLI proof deliberately stops after the version gate. Native checks use
+  the existing resource override harness; the unavailable F: junction is
+  retained. No full installer, live-provider or personal-state proof is claimed.
+  Hosted verification and nightly packaging require the new pushed revision.
+
 ## 2026-10-13 — Guided workflows final local handoff
 
 - TASK149–160 and TASK161 are complete for local source implementation. All

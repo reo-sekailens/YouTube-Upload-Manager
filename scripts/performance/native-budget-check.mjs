@@ -25,14 +25,82 @@ function occurrenceCount(source, pattern) {
   return [...source.matchAll(pattern)].length;
 }
 
-function withoutCfgTestModule(source) {
-  const testModule = source.search(/#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+tests\s*\{/);
-  return testModule < 0 ? source : source.slice(0, testModule);
+function maskRustNonCode(source) {
+  const characters = source.split("");
+  const rawStringPrefix = /(?:b|c)?r(#{0,})"/y;
+  const characterLiteral = /'(?:\\(?:u\{[\da-fA-F_]+\}|x[\da-fA-F]{2}|[^\r\n])|[^'\\\r\n])'/uy;
+  let index = 0;
+  while (index < source.length) {
+    const start = index;
+    if (source.startsWith("//", index)) {
+      const newline = source.indexOf("\n", index + 2);
+      index = newline < 0 ? source.length : newline;
+    } else if (source.startsWith("/*", index)) {
+      let depth = 1;
+      index += 2;
+      while (index < source.length && depth > 0) {
+        if (source.startsWith("/*", index)) { depth += 1; index += 2; }
+        else if (source.startsWith("*/", index)) { depth -= 1; index += 2; }
+        else index += 1;
+      }
+    } else {
+      rawStringPrefix.lastIndex = index;
+      const rawString = /[rbc]/.test(source[index]) &&
+        (index === 0 || !/[\w]/.test(source[index - 1])) && rawStringPrefix.exec(source);
+      if (rawString) {
+        const terminator = `"${rawString[1]}`;
+        const end = source.indexOf(terminator, rawStringPrefix.lastIndex);
+        index = end < 0 ? source.length : end + terminator.length;
+      } else if (source[index] === '"') {
+        index += 1;
+        while (index < source.length) {
+          if (source[index] === "\\") index += 2;
+          else if (source[index++] === '"') break;
+        }
+      } else if (source[index] === "'") {
+        // A lifetime such as 'static is code, while a quoted character can
+        // contain a brace that must not affect module balancing.
+        characterLiteral.lastIndex = index;
+        const character = characterLiteral.exec(source);
+        if (character) index = characterLiteral.lastIndex;
+      }
+    }
+    if (index === start) { index += 1; continue; }
+    for (let masked = start; masked < index && masked < source.length; masked += 1) {
+      if (characters[masked] !== "\n" && characters[masked] !== "\r") characters[masked] = " ";
+    }
+  }
+  return characters.join("");
+}
+
+function withoutCfgTestModules(source) {
+  // Mask literals and comments before matching attributes or balancing braces.
+  // Keep source positions/newlines intact, including production declarations
+  // after a test module; test modules do not have to be named `tests` or be last.
+  const code = maskRustNonCode(source);
+  const testModule = /#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:#\s*\[[^\]]*\]\s*)*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(?:r#)?[A-Za-z_]\w*\s*\{/g;
+  const characters = code.split("");
+  for (let match = testModule.exec(code); match; match = testModule.exec(code)) {
+    let depth = 1;
+    let end = testModule.lastIndex;
+    while (end < code.length && depth > 0) {
+      if (code[end] === "{") depth += 1;
+      else if (code[end] === "}") depth -= 1;
+      end += 1;
+    }
+    // Malformed/unclosed modules cannot hide the remainder of production code.
+    if (depth !== 0) continue;
+    for (let index = match.index; index < end; index += 1) {
+      if (characters[index] !== "\n" && characters[index] !== "\r") characters[index] = " ";
+    }
+    testModule.lastIndex = end;
+  }
+  return characters.join("");
 }
 
 export function evaluateNativeConfiguration(sources) {
   const normalizedSources = Array.isArray(sources) ? sources : [sources];
-  const productionSources = normalizedSources.map(withoutCfgTestModule);
+  const productionSources = normalizedSources.map(withoutCfgTestModules);
   const source = productionSources.join("\n");
   const concurrencyMatch = source.match(
     /const\s+MAX_CONCURRENT_UPLOADS_PER_VOLUME\s*:\s*usize\s*=\s*(\d+)\s*;/,
