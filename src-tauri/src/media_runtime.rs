@@ -106,7 +106,7 @@ impl MediaResourceScheduler {
         path: &Path,
         cancelled: &impl Fn() -> bool,
     ) -> Result<MediaResourcePermit<'_>, String> {
-        self.acquire_probe_with_upload_scope(path, cancelled, false)
+        self.acquire_probe_with_upload_scope(path, cancelled, false, false)
     }
 
     fn acquire_probe_with_upload_scope(
@@ -114,6 +114,7 @@ impl MediaResourceScheduler {
         path: &Path,
         cancelled: &impl Fn() -> bool,
         all_uploads: bool,
+        allow_during_upload: bool,
     ) -> Result<MediaResourcePermit<'_>, String> {
         let volume_id = source_volume_id(path);
         let mut state = self
@@ -132,7 +133,9 @@ impl MediaResourceScheduler {
                 > 0;
             let upload_active = upload_active
                 || (all_uploads && state.uploads_by_volume.values().any(|count| *count > 0));
-            if state.ffprobe_processes < MAX_CONCURRENT_FFPROBE_PROCESSES && !upload_active {
+            if state.ffprobe_processes < MAX_CONCURRENT_FFPROBE_PROCESSES
+                && (allow_during_upload || !upload_active)
+            {
                 state.ffprobe_processes += 1;
                 return Ok(MediaResourcePermit {
                     scheduler: self,
@@ -307,7 +310,17 @@ pub(crate) fn acquire_background_decoder(
     path: &Path,
     cancelled: &impl Fn() -> bool,
 ) -> Result<impl Drop, String> {
-    media_resource_scheduler().acquire_probe_with_upload_scope(path, cancelled, true)
+    media_resource_scheduler().acquire_probe_with_upload_scope(path, cancelled, true, false)
+}
+
+/// User-requested comparison playback shares the two-process inspection cap,
+/// but may run during uploads. Its caller still acquires the per-volume reader
+/// and applies foreground upload yielding before a bounded decode segment.
+pub(crate) fn acquire_preview_decoder(
+    path: &Path,
+    cancelled: &impl Fn() -> bool,
+) -> Result<impl Drop, String> {
+    media_resource_scheduler().acquire_probe_with_upload_scope(path, cancelled, false, true)
 }
 
 pub(crate) fn acquire_reader(
@@ -1013,6 +1026,42 @@ mod tests {
         thread::sleep(Duration::from_millis(60));
         cancelled.store(true, Ordering::Release);
         assert!(worker.join().unwrap());
+        drop(upload);
+    }
+
+    #[test]
+    fn foreground_preview_runs_during_upload_and_shares_the_two_process_cap() {
+        let scheduler = Arc::new(MediaResourceScheduler::default());
+        let source = std::env::temp_dir().join(format!("preview-process-bound-{}", Uuid::new_v4()));
+        let upload = scheduler.active_upload(&source).unwrap();
+        let first = scheduler
+            .acquire_probe_with_upload_scope(&source, &|| false, false, true)
+            .unwrap();
+        let second = scheduler
+            .acquire_probe_with_upload_scope(&source, &|| false, false, true)
+            .unwrap();
+        assert_eq!(scheduler.state.lock().unwrap().ffprobe_processes, 2);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_scheduler = scheduler.clone();
+        let worker_source = source.clone();
+        let worker_cancelled = cancelled.clone();
+        let worker = thread::spawn(move || {
+            worker_scheduler
+                .acquire_probe_with_upload_scope(
+                    &worker_source,
+                    &|| worker_cancelled.load(Ordering::Acquire),
+                    false,
+                    true,
+                )
+                .is_err()
+        });
+        thread::sleep(Duration::from_millis(60));
+        cancelled.store(true, Ordering::Release);
+        assert!(worker.join().unwrap());
+        assert_eq!(scheduler.state.lock().unwrap().ffprobe_processes, 2);
+        drop(first);
+        drop(second);
+        assert_eq!(scheduler.state.lock().unwrap().ffprobe_processes, 0);
         drop(upload);
     }
 

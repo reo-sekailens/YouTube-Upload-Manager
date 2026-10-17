@@ -1,5 +1,31 @@
 # Technical Notes
 
+## Comparison playback and monitor refresh (TASK163, 2026-10-18)
+
+- Metadata alone is not video-picture evidence. A missing video dimension after
+  metadata or playback without decoded frames selects the compatibility player;
+  the operator can also choose it directly. Failures retain the duplicate
+  decision and offer retry without opening an external app.
+- Compatibility commands accept only an existing scoped preview token plus a
+  finite source time. Native code retains original/decoder identity checks,
+  revocation, expiry and channel authority. The pinned bundled decoder emits
+  at most six seconds/4 MiB of 640×360 baseline H264 with optional stereo AAC
+  per request, entirely in memory. Decode work is time bounded. Native raw IPC
+  transports the bytes; the application adds no HTTP server or media files.
+- The player serializes reads/appends, invalidates stale seek responses, keeps
+  a six-second trailing/eighteen-second leading window, and revokes MediaSource
+  URLs on teardown. AAC encoder padding can exceed the source duration; an
+  append window clips it instead of shrinking an already buffered duration,
+  which Chromium correctly rejects. Original duration is established once.
+- Manual preview shares the two-process inspection budget and yields its
+  original-file reader to active uploads. Background probes/perceptual work
+  retain their existing upload admission behavior. Closing or changing channel
+  cancels native preview work; source locators stay native-only.
+- Folder-monitor reads use a 250 ms first-event queue with one in-flight and
+  one trailing refresh. Ordinary events preserve mounted details and enabled
+  navigation. Request fences still reject late folder/channel results. Stable
+  activity keys and retained deletion-review/log wrappers preserve local state.
+
 ## Tauri dependency compatibility (TASK162, 2026-10-16)
 
 - Core JavaScript API and Rust Tauri must share major/minor releases. The API

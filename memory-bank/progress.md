@@ -1,5 +1,32 @@
 # Progress
 
+## 2026-10-18 — Local video picture and stable watched-folder view
+
+- TASK163 detects metadata/playback without a decoded picture and adds an
+  in-app compatibility action. Short H264/AAC fragments are decoded from the
+  scoped original through the pinned bundled decoder, sent over raw native
+  IPC and buffered in memory. No original copies or converted disk videos are
+  created. Source/channel/expiry/revocation checks, bounded duration probing,
+  the two-process cap and reader yielding remain authoritative.
+- Folder-monitor background invalidations are coalesced and serial instead of
+  restarting initial loading. The selected detail view, controls, scrolling,
+  focus, disclosure state and open review/dialogs remain mounted and usable;
+  late channel/folder results stay fenced.
+- Passed 517 frontend and 423 native tests (eight native ignores), strict
+  TypeScript, production native/build/format/ownership checks and unchanged
+  bundle/worker budgets. A separate real pinned-decoder case verifies generated
+  HEVC/AAC segments, source integrity and no app media files. Browser playback
+  checks use those exact segments and catch the AAC-padding duration edge case.
+- Browser QA passes 26 playback/recovery checks at desktop/mobile sizes and
+  410-event monitor storms with five serial refreshes, unchanged scroll/focus/
+  typed review/selection and no app console issues. Inspected screenshots and
+  receipts are under the thread visualization root's
+  `task163-playback-monitor-20261018` directory.
+- These are generated-media/source/browser fixtures. The operator's exact
+  file, installed WebView and packaged release playback remain separate.
+  YouTube is a clearly marked fixture pane in these screenshots. The existing
+  unavailable F: sidecar junction and all personal application state are retained.
+
 ## 2026-10-16 — Tauri build compatibility and verification repair
 
 - TASK162 aligns locked JavaScript API 2.12.4 with existing Rust Tauri 2.12.2

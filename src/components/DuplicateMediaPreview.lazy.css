@@ -1,3 +1,4 @@
 @reference "../styles.css";
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @source "./DuplicateMediaPreview.tsx";
+@source "./CompatibilityVideoPlayer.tsx";

@@ -45,6 +45,8 @@ describe("duplicate playback comparison", () => {
     expect(markup).toContain('referrerPolicy="strict-origin-when-cross-origin"');
     expect(markup).toContain("min-h-[200px]");
     expect(markup).toContain("md:grid-cols-2");
+    expect(markup).toContain("Use compatibility player");
+    expect(markup).toContain("If the picture stays black or only audio plays");
     expect(markup).not.toMatch(/autoplay/i);
     expect(markup).not.toContain("<a ");
   });

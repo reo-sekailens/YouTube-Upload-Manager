@@ -20,6 +20,23 @@ use tauri::http::{header, Method, Request, Response, StatusCode};
 use tauri_plugin_fs::FilePath;
 use uuid::Uuid;
 
+mod compatibility;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PreviewCompatibilityInfo {
+    duration_seconds: f64,
+    mime_type: &'static str,
+}
+
+pub(super) fn compatibility_info(token: &str) -> Result<PreviewCompatibilityInfo, String> {
+    compatibility::info(token)
+}
+
+pub(super) fn compatibility_segment(token: &str, start_seconds: f64) -> Result<Vec<u8>, String> {
+    compatibility::segment(token, start_seconds)
+}
+
 const MAX_PREVIEW_SOURCES: usize = 16;
 const MAX_PREVIEW_VIDEOS: usize = 32;
 const MAX_ACTIVE_GRANTS: usize = 64;
@@ -92,6 +109,7 @@ struct PreviewGrant {
     identity: FileIdentity,
     content_type: &'static str,
     created_at: Instant,
+    compatibility: compatibility::State,
 }
 
 struct PreviewEntry {
@@ -440,6 +458,7 @@ fn open_grant(
         identity,
         content_type: content_type(&reference.file_name),
         created_at: Instant::now(),
+        compatibility: compatibility::State::default(),
     })
 }
 
@@ -517,11 +536,23 @@ pub(super) fn prepare(
     let mut registry = grants()
         .lock()
         .map_err(|_| "The media preview could not be prepared.".to_string())?;
-    registry.retain(|_, grant| {
-        grant
-            .grant
-            .lock()
-            .is_ok_and(|grant| grant.created_at.elapsed() < GRANT_LIFETIME)
+    registry.retain(|_, entry| {
+        if entry.revoked.load(Ordering::Acquire) {
+            return false;
+        }
+        // A compatibility decode can hold this lock for up to 20 seconds.
+        // Never block the registry (and close/revoke) behind an active decode.
+        match entry.grant.try_lock() {
+            Ok(grant) => {
+                let live = grant.created_at.elapsed() < GRANT_LIFETIME;
+                if !live {
+                    entry.revoked.store(true, Ordering::Release);
+                }
+                live
+            }
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(_)) => false,
+        }
     });
     if registry.len() + prepared.len() > MAX_ACTIVE_GRANTS {
         return Err("Close another comparison before opening more video previews.".into());
@@ -860,6 +891,151 @@ mod tests {
             request = request.header(header::RANGE, range);
         }
         respond(request.body(Vec::new()).unwrap(), true)
+    }
+
+    #[test]
+    fn compatibility_preview_authority_rejects_release_change_expiry_and_channel_switch() {
+        let fixture = Fixture::new();
+        fixture.remote("remote", "Clip", "channel-a", "processed");
+        let source = fixture.upload("changed-compat", "draft", b"original");
+        let preview = fixture.preview_upload("changed-compat");
+        fs::write(source, b"changed-original").unwrap();
+        assert!(compatibility_info(&preview.local_sources[0].token).is_err());
+        assert!(compatibility_segment(&preview.local_sources[0].token, 0.0).is_err());
+        fixture.upload("released-compat", "draft", b"original");
+        let preview = fixture.preview_upload("released-compat");
+        let entry = grants()
+            .lock()
+            .unwrap()
+            .get(&preview.local_sources[0].token)
+            .cloned()
+            .unwrap();
+        let held = entry.grant.lock().unwrap();
+        release(&[preview.local_sources[0].token.clone()]).unwrap();
+        assert!(entry.revoked.load(Ordering::Acquire));
+        drop(held);
+        assert!(compatibility_info(&preview.local_sources[0].token).is_err());
+        fixture.upload("expired-compat", "draft", b"original");
+        let preview = fixture.preview_upload("expired-compat");
+        grants()
+            .lock()
+            .unwrap()
+            .get(&preview.local_sources[0].token)
+            .unwrap()
+            .grant
+            .lock()
+            .unwrap()
+            .created_at = Instant::now() - GRANT_LIFETIME;
+        assert!(compatibility_info(&preview.local_sources[0].token).is_err());
+        fixture.upload("channel-compat", "draft", b"original");
+        let preview = fixture.preview_upload("channel-compat");
+        database(&fixture.state)
+            .unwrap()
+            .execute(
+                "UPDATE connection_settings SET active_channel_id = 'channel-b'",
+                [],
+            )
+            .unwrap();
+        assert!(compatibility_info(&preview.local_sources[0].token).is_err());
+        assert!(compatibility_segment(&preview.local_sources[0].token, 0.0).is_err());
+        assert_eq!(
+            fs::read_dir(&fixture.state.media_directory)
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    #[ignore = "requires synthetic hevc-original.mp4 and the pinned decoder; never uses operator media"]
+    fn compatibility_generated_hevc_decodes_in_memory_without_media_copies() {
+        use std::{
+            io::Write,
+            process::{Command, Stdio},
+        };
+        let root = PathBuf::from(
+            std::env::var_os("YUM_PREVIEW_FIXTURE_DIR").expect("YUM_PREVIEW_FIXTURE_DIR"),
+        );
+        let decoder =
+            PathBuf::from(std::env::var_os("YUM_PREVIEW_DECODER").expect("YUM_PREVIEW_DECODER"));
+        let source = root.join("hevc-original.mp4");
+        let before = blake3::hash(&fs::read(&source).unwrap());
+        let signature = monitored_file_signature(&fs::metadata(&source).unwrap()).unwrap();
+        let fixture = Fixture::new();
+        database(&fixture.state).unwrap().execute(
+            "INSERT INTO upload_items(id, channel_id, title, file_name, workspace_path, size_bytes, source_modified_key, digest, status, duplicate_decision, total_bytes, created_at, updated_at) VALUES ('hevc', 'channel-a', 'Clip', 'hevc-preview.mp4', ?1, ?2, ?3, ?4, 'draft', 'pending', ?2, ?5, ?5)",
+            params![source.to_string_lossy(), signature.0 as i64, signature.1, before.to_hex().to_string(), super::super::now()],
+        ).unwrap();
+        fixture.remote("remote", "Clip", "channel-a", "processed");
+        let preview = fixture.preview_upload("hevc");
+        let token = &preview.local_sources[0].token;
+        {
+            let entry = grants().lock().unwrap().get(token).cloned().unwrap();
+            compatibility::install_test_decoder(&mut entry.grant.lock().unwrap(), &decoder);
+        }
+        let info = compatibility_info(token).unwrap();
+        assert!(info.duration_seconds >= 8.0);
+        assert!(info.mime_type.contains("avc1"));
+        for start in [0.0, 6.0, 12.0] {
+            let bytes = compatibility_segment(token, start).unwrap();
+            // This opt-in synthetic test exports its bounded outputs only so
+            // browser playback can be verified. Runtime segments stay in RAM.
+            fs::write(
+                root.join(format!("compatibility-{}.mp4", start as u32)),
+                &bytes,
+            )
+            .unwrap();
+            assert!(bytes.len() < 4 * 1024 * 1024);
+            for atom in [b"ftyp", b"moov", b"moof", b"avc1"] {
+                assert!(bytes.windows(4).any(|window| window == atom));
+            }
+            let mut command = Command::new(&decoder);
+            command
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-i",
+                    "pipe:0",
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "0:a:0?",
+                    "-f",
+                    "null",
+                    "-",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x0800_0000);
+            }
+            let mut child = command.spawn().unwrap();
+            child.stdin.take().unwrap().write_all(&bytes).unwrap();
+            let decoded = child.wait_with_output().unwrap();
+            assert!(
+                decoded.status.success(),
+                "{}",
+                String::from_utf8_lossy(&decoded.stderr)
+            );
+        }
+        assert_eq!(before, blake3::hash(&fs::read(&source).unwrap()));
+        assert_eq!(
+            signature,
+            monitored_file_signature(&fs::metadata(&source).unwrap()).unwrap()
+        );
+        assert_eq!(
+            fs::read_dir(&fixture.state.media_directory)
+                .unwrap()
+                .count(),
+            0
+        );
+        release(&[token.clone()]).unwrap();
+        assert!(compatibility_segment(token, 0.0).is_err());
     }
 
     #[test]

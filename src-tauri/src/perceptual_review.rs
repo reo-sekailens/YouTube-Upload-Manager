@@ -179,7 +179,7 @@ fn snapshot(connection: &Connection, channel: &str, id: &str) -> Result<Snapshot
     }
     Ok(snapshot)
 }
-fn decoder_path() -> Option<PathBuf> {
+pub(super) fn decoder_path() -> Option<PathBuf> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         None

@@ -12274,6 +12274,35 @@ fn release_duplicate_media_preview(tokens: Vec<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn inspect_duplicate_preview_compatibility(
+    window: tauri::WebviewWindow,
+    token: String,
+) -> Result<media_preview::PreviewCompatibilityInfo, String> {
+    if window.label() != "main" {
+        return Err("Local comparison is only available in the main application.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || media_preview::compatibility_info(&token))
+        .await
+        .map_err(|_| "The local compatibility player stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
+async fn read_duplicate_preview_segment(
+    window: tauri::WebviewWindow,
+    token: String,
+    start_seconds: f64,
+) -> Result<tauri::ipc::Response, String> {
+    if window.label() != "main" {
+        return Err("Local comparison is only available in the main application.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        media_preview::compatibility_segment(&token, start_seconds).map(tauri::ipc::Response::new)
+    })
+    .await
+    .map_err(|_| "The local compatibility player stopped unexpectedly.".to_string())?
+}
+
+#[tauri::command]
 async fn load_channel_profiles(
     state: State<'_, AppState>,
     expected_channel_id: Option<String>,
@@ -12500,6 +12529,8 @@ pub fn run() {
                     delete_preflight_duplicate_file,
                     prepare_duplicate_media_preview,
                     release_duplicate_media_preview,
+                    inspect_duplicate_preview_compatibility,
+                    read_duplicate_preview_segment,
                     resolve_upload_title_duplicates,
                     list_remote_videos,
                     rename_remote_videos,

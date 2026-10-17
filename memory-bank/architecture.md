@@ -229,6 +229,21 @@ Closing the native dialog unloads both players and revokes local grants.
 Missing originals remain visible beside any usable matched video; local codec
 and private/disabled YouTube embedding support are platform/provider boundaries.
 
+TASK163 adds a compatibility path when the local player has metadata but no
+decoded picture. The same opaque grant authorizes short memory-only H264/AAC
+segments from the original through the verified bundled decoder. The webview
+uses MediaSource with a bounded playback window, full source duration and
+seeking; no converted video is written to disk. Grant validation, cancellation,
+reader admission and the shared two-process inspection cap still apply. Manual
+preview can run during uploads with foreground reader yielding; background
+analysis admission is unchanged. Only media Blob URLs are added to CSP.
+
+Folder-monitor background invalidations are serialized and coalesced per
+channel/selection. They update mounted details without entering initial loading
+or disabling navigation. Explicit channel/folder changes retire the old reader
+and its queued updates; dialog, focus, disclosure and scroll state survive
+ordinary status refreshes.
+
 Playlist selection is bounded to 200 videos per addition and retained across
 search, visibility filters and pages. Page/matching shortcuts and Shift ranges
 share one selection model. The native playlist bulk adapter preserves reviewed

@@ -9,6 +9,7 @@ import {
 } from "../lib/folder-monitor";
 import type { FolderMonitorSettings, FolderMonitorFileActivity, FolderMonitorLogEntry, FolderMonitorLocalDeleteResult } from "../lib/types";
 import { subscribeLocalStateChanges } from "../lib/state-events";
+import { createFolderMonitorRefreshQueue } from "../lib/folder-monitor-refresh";
 import { useWorkspaceRequestFence, workspaceErrorMessage } from "../lib/workspace-requests";
 import { FolderMonitorSetupDialog } from "./FolderMonitorSetupDialog";
 import "./FolderMonitorPanel.lazy.css";
@@ -104,7 +105,7 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [revision, setRevision] = useState(0);
+  const requestRefresh = useRef<() => void>(() => undefined);
   const [setup, setSetup] = useState<{ channelId: string; monitor?: FolderMonitorSettings }>();
   const [confirmation, setConfirmation] = useState<{ channelId: string; monitor: FolderMonitorSettings }>();
   const [rulesReview, setRulesReview] = useState<{ channelId: string; monitor: FolderMonitorSettings }>();
@@ -124,7 +125,8 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
   const settings = detail && detail.channelId === activeChannelId && detail.monitorId === selectedId ? detail.settings : undefined;
   const files = settings ? detail!.files : [];
   const logs = settings ? detail!.logs : [];
-  const blocked = busy || deletionSubmitting || loading;
+  const blocked = busy || deletionSubmitting || (loading && catalog.channelId !== activeChannelId);
+  const loadedScope = useRef({ catalog, detail }); loadedScope.current = { catalog, detail };
   const visibleSetup = setup?.channelId === activeChannelId ? setup : undefined;
   const visibleConfirmation = confirmation?.channelId === activeChannelId ? confirmation : undefined;
   const visibleRules = rulesReview?.channelId === activeChannelId ? rulesReview : undefined;
@@ -133,18 +135,22 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
   useEffect(() => { setDeletionQueue([]); setDeletionResults([]); setDeletionConfirmation(""); deletionScope.current = undefined; }, [selectedId]);
 
   useEffect(() => {
-    if (!activeChannelId) { setLoading(false); setLoadError(""); return; }
+    if (!activeChannelId) { requestRefresh.current = () => undefined; setLoading(false); setLoadError(""); return; }
     let active = true;
-    setLoading(true);
+    const previous = loadedScope.current;
+    const hasDetail = previous.detail?.channelId === activeChannelId && previous.detail.monitorId === selectedId;
+    setLoading(previous.catalog.channelId !== activeChannelId || Boolean(selectedId && !hasDetail));
+    setLoadError("");
     const current = readFence.begin();
-    void (async () => {
+    const refresh = createFolderMonitorRefreshQueue(async () => {
+      let changingSelection = false;
       try {
         const loaded = await loadFolderMonitors(activeChannelId);
         if (!active || !current()) return;
         if (loaded.monitors.some((monitor) => monitor.channelId !== activeChannelId || !monitor.id)) throw new Error("The watched folder list did not match the connected channel.");
         setCatalog({ channelId: activeChannelId, monitors: loaded.monitors });
         const nextId = loaded.monitors.some((monitor) => monitor.id === selectedId) ? selectedId : loaded.monitors[0]?.id;
-        if (nextId !== selectedId) { setSelectedId(nextId); return; }
+        if (nextId !== selectedId) { changingSelection = true; setSelectedId(nextId); return; }
         if (nextId) {
           const overview = await loadFolderMonitorOverview(nextId, activeChannelId);
           if (!active || !current()) return;
@@ -153,21 +159,27 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
         } else setDetail(undefined);
         setLoadError("");
       } catch (failure) { if (active && current()) setLoadError(workspaceErrorMessage(failure, "Folder monitoring status could not be loaded from this device.")); }
-      finally { if (active && current()) setLoading(false); }
-    })();
-    return () => { active = false; };
-  }, [activeChannelId, selectedId, revision, readFence]);
+      finally { if (active && current() && !changingSelection) setLoading(false); }
+    }, (failure) => { if (active && current()) setLoadError(workspaceErrorMessage(failure, "Folder monitoring status could not be loaded from this device.")); });
+    const request = () => {
+      const known = loadedScope.current;
+      if (known.catalog.channelId !== activeChannelId || (selectedId && (known.detail?.channelId !== activeChannelId || known.detail.monitorId !== selectedId))) setLoading(true);
+      refresh.request();
+    };
+    requestRefresh.current = request;
+    refresh.start();
+    return () => { active = false; refresh.dispose(); if (requestRefresh.current === request) requestRefresh.current = () => undefined; };
+  }, [activeChannelId, selectedId, readFence]);
 
   useEffect(() => {
     if (!isTauri || !activeChannelId) return;
     let active = true;
     let stop: (() => void) | undefined;
-    let timer: number | undefined;
     void subscribeLocalStateChanges((batch) => {
-      if (!active || timer !== undefined || !batch.changes.some((change) => change.channelId === activeChannelId && ["folder_monitor", "monitor", "upload"].includes(change.surface))) return;
-      timer = window.setTimeout(() => { timer = undefined; if (active) setRevision((value) => value + 1); }, 75);
+      if (!active || (!batch.resetRequired && !batch.changes.some((change) => change.channelId === activeChannelId && ["folder_monitor", "monitor", "upload"].includes(change.surface)))) return;
+      requestRefresh.current();
     }).then((unsubscribe) => { if (active) stop = unsubscribe; else unsubscribe(); }).catch(() => undefined);
-    return () => { active = false; stop?.(); if (timer !== undefined) window.clearTimeout(timer); };
+    return () => { active = false; stop?.(); };
   }, [activeChannelId]);
 
   useEffect(() => {
@@ -192,7 +204,7 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
     try {
       await operation();
       if (!current()) return;
-      setRevision((value) => value + 1);
+      requestRefresh.current();
       onNotice(notice);
       if (refreshQueue) {
         try { await onQueueRefresh(); }
@@ -227,7 +239,7 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
     try {
       const results = deletionQueue.length > 1 ? await deleteFolderMonitorUploadedSources(itemIds, deletionConfirmation, monitorId, activeChannelId) : [await deleteFolderMonitorUploadedSource(target.itemId, deletionConfirmation, monitorId, activeChannelId)];
       if (!current()) return;
-      setDeletionResults(results); setDeletionProgress({ completed: results.length, total: results.length }); setDeletionQueue([]); setDeletionConfirmation(""); setRevision((value) => value + 1);
+      setDeletionResults(results); setDeletionProgress({ completed: results.length, total: results.length }); setDeletionQueue([]); setDeletionConfirmation(""); requestRefresh.current();
       onNotice("Local source deletion finished for this folder. See the deletion log for any retained file.");
     } catch (failure) { if (current()) onNotice(workspaceErrorMessage(failure, "The local watched file could not be deleted.")); }
     finally { pending.current = false; deletionScope.current = undefined; if (current()) setDeletionSubmitting(false); }
@@ -238,10 +250,10 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
   return <section aria-labelledby="folder-monitor-heading" className="rounded-xl border border-line bg-surface p-4 text-ink sm:p-5">
     <header className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0"><p className="mt-0 mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Opt-in automation</p><h2 className="m-0 text-lg font-bold tracking-tight" id="folder-monitor-heading">Watched folder uploads</h2><p className="mt-2 mb-0 max-w-2xl text-sm leading-relaxed text-muted">Monitor multiple local folders together while the app is running. Each folder keeps its own upload choices and activity.</p></div><button className={primaryButtonClass} disabled={!isTauri || !activeChannelId || blocked} onClick={() => activeChannelId && setSetup({ channelId: activeChannelId })} type="button"><Plus aria-hidden="true" size={18} />Add folder</button></header>
     {activeChannelId ? <p className="mt-4 mb-0 text-sm text-muted"><strong className="text-ink">{monitors.filter((monitor) => monitor.enabled).length} active</strong> · {monitors.length} {monitors.length === 1 ? "folder" : "folders"} · {activeChannel || "Connected channel"}</p> : <p className="mt-4 mb-0 rounded-lg bg-notice-surface p-4 text-sm text-notice-ink">Connect a YouTube channel before adding watched folders.</p>}
-    {loadError ? <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg bg-warning-surface p-4"><p className="m-0 flex-1 text-sm text-warning-ink" role="alert">{loadError}</p><button className={buttonClass} disabled={busy || deletionSubmitting} onClick={() => setRevision((value) => value + 1)} type="button">Retry loading folders</button></div> : null}
+    {loadError ? <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg bg-warning-surface p-4"><p className="m-0 flex-1 text-sm text-warning-ink" role="alert">{loadError}</p><button className={buttonClass} disabled={busy || deletionSubmitting} onClick={() => requestRefresh.current()} type="button">Retry loading folders</button></div> : null}
     {loading ? <p className="mt-4 mb-0 text-sm text-muted" role="status">Loading watched folders…</p> : null}
     {monitors.length ? <FolderMonitorCards busy={blocked} monitors={monitors} onEdit={(monitor) => activeChannelId && setSetup({ channelId: activeChannelId, monitor })} onRemove={(monitor) => activeChannelId && setConfirmation({ channelId: activeChannelId, monitor })} onSelect={setSelectedId} onToggle={toggle} selectedId={selectedId} /> : !loading && activeChannelId && !loadError ? <div className="mt-5 rounded-lg border border-dashed border-line bg-subtle-surface p-5"><h3 className="m-0 text-base font-semibold">No watched folders yet</h3><p className="mt-2 mb-0 max-w-xl text-sm leading-relaxed text-muted">Add a folder and approve its channel, visibility, audience and optional cleanup. Other folders can be added with different choices.</p></div> : null}
-    {settings && !loading ? <div aria-label="Selected folder details" className="mt-6 border-t border-line pt-5">
+    {settings ? <div aria-label="Selected folder details" className="mt-6 border-t border-line pt-5">
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="mt-0 mb-1 text-xs font-semibold text-muted">Selected folder</p><h3 className="m-0 break-words text-base font-bold">{folderName(settings.folderPath)}</h3></div><div className="flex flex-wrap items-center gap-3"><span className="rounded-full bg-subtle-surface px-3 py-1 text-sm font-semibold text-muted">{folderMonitorStatusLabel(settings)}</span><button className={buttonClass} disabled={blocked || !isTauri || !activeChannelId || !settings.id} onClick={() => activeChannelId && setRulesReview({ channelId: activeChannelId, monitor: settings })} type="button"><ListFilter aria-hidden="true" size={16} />Rules & readiness</button></div></div>
           <dl className="grid grid-cols-2 gap-2.5 m-0 max-sm:grid-cols-1">
             <div className="min-w-0 rounded-lg border border-[#e3e7ed] bg-[#fafbfc] px-3 py-2.5">
@@ -313,7 +325,7 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
                     {uploadingFiles.map((file) => {
                       const progress = fileProgress(file);
                       return (
-                        <li className="border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={`${file.fileName}-${file.updatedAt}`}>
+                        <li className="border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={file.itemId || file.fileName}>
                           <div className="flex items-baseline justify-between gap-2">
                             <strong className="min-w-0 truncate text-[0.72rem] text-[#2f4262]" title={file.fileName}>{file.fileName}</strong>
                             <span className="text-[0.66rem] text-[#4671a4] capitalize">{file.uploadStatus ?? file.observationState}</span>
@@ -333,7 +345,7 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
                 ) : (
                   <ul className="mt-2 grid max-h-56 list-none gap-1.5 overflow-auto p-0">
                     {queuedFiles.map((file) => (
-                      <li className="border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={`${file.fileName}-${file.updatedAt}`}>
+                      <li className="border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={file.itemId || file.fileName}>
                         <div className="flex items-baseline justify-between gap-2">
                           <strong className="min-w-0 truncate text-[0.72rem] text-[#2f4262]" title={file.fileName}>{file.fileName}</strong>
                           <span className="text-[0.66rem] text-[#4671a4] capitalize">{file.uploadStatus ?? file.observationState}</span>
@@ -376,7 +388,7 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
               <summary className="cursor-pointer text-[0.72rem] font-bold text-[#355776]">Recently observed files ({files.length})</summary>
               <ul className="mt-2 grid max-h-56 list-none gap-1.5 overflow-auto p-0">
                 {recentFiles.map((file) => (
-                  <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={`${file.fileName}-${file.updatedAt}`}>
+                  <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={file.itemId || file.fileName}>
                     <strong className="min-w-0 truncate text-[0.72rem] text-[#2f4262]">{file.fileName}</strong>
                     <span className="text-[0.64rem] text-[#6e7d91] whitespace-nowrap">{formatScanTime(file.updatedAt)}</span>
                     <p className="col-span-full mt-1 mb-0 text-[0.66rem] leading-snug text-[#68788e]">{file.uploadTitle ? `Queued as ${file.uploadTitle}` : `${formatBytes(file.sizeBytes)} · ${folderObservationLabel(file.observationState)}`}</p>
@@ -401,7 +413,7 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
                   </button>
                   <ul className="mt-2 grid max-h-56 list-none gap-1.5 overflow-auto p-0">
                     {cancelledFiles.map((file) => (
-                      <li className="flex items-center justify-between gap-2 border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={`${file.itemId}-${file.updatedAt}`}>
+                      <li className="flex items-center justify-between gap-2 border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={file.itemId || file.fileName}>
                         <div className="min-w-0">
                           <div className="flex items-baseline justify-between gap-2">
                             <strong className="min-w-0 truncate text-[0.72rem] text-[#2f4262]" title={file.fileName}>{file.fileName}</strong>
@@ -428,16 +440,14 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
               <p className="mt-2 mb-3 max-w-4xl text-[0.7rem] leading-relaxed text-[#68788e]">Only watched files whose completed upload still appears in the authenticated active-channel YouTube inventory are shown. Delete removes the local watched source only; the YouTube video is retained.</p>
               {uploadedFiles.length === 0 ? (
                 <p className="mt-2 mb-0 text-[0.7rem] leading-snug text-[#75849a]">No watched-folder uploads are currently confirmed by YouTube.</p>
-              ) : (
-                <>
-                  <button
+              ) : <button
                     className="rounded-md border border-[#e5c2c0] bg-white px-3 py-2 text-[0.79rem] font-[680] text-[#a4413b] transition-colors hover:border-[#d89d98] hover:bg-[#fff5f4] disabled:cursor-not-allowed disabled:opacity-50"
                     disabled={busy || deletionSubmitting}
                     onClick={() => openDeletionReview(uploadedFiles)}
                     type="button"
                   >
                     Delete ({uploadedFiles.length}) files…
-                  </button>
+                  </button>}
                   {deletionQueue[0] && (
                     <div className="mt-3 grid gap-3 rounded-lg border border-[#e5c2c0] bg-[#fff8f7] p-3.5" role="dialog" aria-label="Confirm local watched file deletion">
                       <div className="grid gap-1">
@@ -476,7 +486,7 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
                       </div>
                     </details>
                   )}
-                  <ul className="mt-3 grid max-h-64 list-none gap-2 overflow-auto p-0">
+                  {uploadedFiles.length > 0 && <ul className="mt-3 grid max-h-64 list-none gap-2 overflow-auto p-0">
                     {uploadedFiles.map((file) => (
                       <li className="flex items-center justify-between gap-3 border-t border-[#edf0f5] py-2 first:border-t-0 first:pt-0" key={`${file.itemId}-${file.videoId}`}>
                         <div className="min-w-0">
@@ -489,9 +499,7 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
                         <button className="shrink-0 rounded-md border border-[#e5c2c0] bg-white px-3 py-2.5 text-[0.79rem] font-[680] text-[#a4413b] disabled:cursor-not-allowed disabled:opacity-50" disabled={busy || deletionSubmitting} onClick={() => openDeletionReview([file])} type="button">Delete local file…</button>
                       </li>
                     ))}
-                  </ul>
-                </>
-              )}
+                  </ul>}
             </details>
           </section>
 
@@ -499,8 +507,8 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
     </div> : null}
     {!isTauri ? <p className="mt-4 mb-0 text-sm text-muted">Open the desktop app to monitor local folders.</p> : null}
     <p className="mt-5 mb-0 max-w-4xl border-t border-line pt-4 text-sm leading-relaxed text-muted">All enabled folders are checked while the app is running. Only direct child videos are monitored; each must stop changing before acceptance. The original file remains the transfer source. Duplicate checks, YouTube’s file limits and source integrity checks apply to every folder.</p>
-    {visibleSetup ? <FolderMonitorSetupDialog activeChannel={activeChannel} expectedChannelId={visibleSetup.channelId} monitor={visibleSetup.monitor} onClose={() => setSetup(undefined)} onSaved={(saved) => { setSelectedId(saved.id); setRevision((value) => value + 1); onNotice("This folder is monitoring with its approved upload choices. Other folders were not changed."); }} /> : null}
-    {visibleRules ? <Suspense fallback={<p className="mt-4 text-sm text-muted" role="status">Opening folder rule review…</p>}><FolderRulesDialog expectedChannelId={visibleRules.channelId} monitor={visibleRules.monitor} onClose={() => setRulesReview(undefined)} onSaved={() => { setRevision((value) => value + 1); onNotice("Rules were saved for this folder’s future discovery. Existing queue items and other folders were not changed."); }} /></Suspense> : null}
+    {visibleSetup ? <FolderMonitorSetupDialog activeChannel={activeChannel} expectedChannelId={visibleSetup.channelId} monitor={visibleSetup.monitor} onClose={() => setSetup(undefined)} onSaved={(saved) => { setSelectedId(saved.id); requestRefresh.current(); onNotice("This folder is monitoring with its approved upload choices. Other folders were not changed."); }} /> : null}
+    {visibleRules ? <Suspense fallback={<p className="mt-4 text-sm text-muted" role="status">Opening folder rule review…</p>}><FolderRulesDialog expectedChannelId={visibleRules.channelId} monitor={visibleRules.monitor} onClose={() => setRulesReview(undefined)} onSaved={() => { requestRefresh.current(); onNotice("Rules were saved for this folder’s future discovery. Existing queue items and other folders were not changed."); }} /></Suspense> : null}
     {visibleConfirmation ? <FolderMonitorConfirmationDialog key={visibleConfirmation.monitor.id} monitor={visibleConfirmation.monitor} onClose={() => setConfirmation(undefined)} onConfirm={() => perform(visibleConfirmation.monitor, () => removeFolderMonitor(visibleConfirmation.monitor.id!, visibleConfirmation.channelId), "This folder was removed from monitoring. Its original files, upload queue and receipts are retained.")} /> : null}
   </section>;
 }

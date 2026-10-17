@@ -6,6 +6,8 @@ import {
   prepareDuplicateMediaPreview,
   releaseDuplicateMediaPreview,
 } from "../lib/duplicate-media-preview";
+import { watchLocalVideoPicture } from "../lib/duplicate-playback-health";
+import CompatibilityVideoPlayer from "./CompatibilityVideoPlayer";
 import "./DuplicateMediaPreview.lazy.css";
 import type {
   DuplicateMediaPreviewEvidence,
@@ -57,22 +59,36 @@ function LocalVideoPlayer({
 }) {
   const player = useRef<HTMLVideoElement>(null);
   const [loading, setLoading] = useState(true);
-  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const [compatibility, setCompatibility] = useState<{ initialTime: number; resume: boolean }>();
+  const useCompatibility = useCallback(() => {
+    const video = player.current;
+    setCompatibility({ initialTime: video?.currentTime ?? 0, resume: video ? !video.paused : false });
+  }, []);
 
   useEffect(() => {
+    if (compatibility) return;
     const video = player.current;
+    if (!video) return;
+    const stopHealthCheck = watchLocalVideoPicture(video, useCompatibility);
     // StrictMode replays effects on the same node after its cleanup removed src.
     if (video && video.getAttribute("src") !== source.url) {
       video.src = source.url;
       video.load();
     }
     return () => {
+      stopHealthCheck();
       // Remove the source before revocation so no playback/request survives a switch.
       video?.pause();
       video?.removeAttribute("src");
       video?.load();
     };
-  }, []);
+  }, [source.url, compatibility, attempt, useCompatibility]);
+
+  if (compatibility) return <>
+    <CompatibilityVideoPlayer fileName={source.fileName} initialTime={compatibility.initialTime} resume={compatibility.resume} token={source.token} />
+    <button className={`${buttonClass} mt-3`} onClick={() => { setLoading(true); setAttempt((value) => value + 1); setCompatibility(undefined); }} type="button"><RefreshCw aria-hidden="true" size={16} /> Try original player</button>
+  </>;
 
   return (
     <>
@@ -81,22 +97,16 @@ function LocalVideoPlayer({
           aria-label={`Local video: ${source.fileName}`}
           className="absolute inset-0 h-full w-full object-contain"
           controls
-          onError={() => { setLoading(false); setFailed(true); }}
           onLoadedMetadata={() => setLoading(false)}
           playsInline
           preload="metadata"
           ref={player}
           src={source.url}
         />
-        {loading && !failed && <p className="pointer-events-none absolute inset-x-3 top-3 m-0 rounded-md bg-black/75 px-3 py-2 text-sm text-white" role="status">Loading local video…</p>}
+        {loading && <p className="pointer-events-none absolute inset-x-3 top-3 m-0 rounded-md bg-black/75 px-3 py-2 text-sm text-white" role="status">Loading local video…</p>}
       </div>
-      {failed ? (
-        <div className="mt-3 rounded-md bg-warning-surface p-3 text-sm leading-relaxed text-warning-ink" role="alert">
-          <p className="m-0 font-semibold">This file could not be played.</p>
-          <p className="mt-1 mb-3">The original may be unavailable, or this device may not support its video or audio codec. Playback failure does not mean the file is a duplicate.</p>
-          <button className={buttonClass} onClick={() => { setFailed(false); setLoading(true); player.current?.load(); }} type="button"><RefreshCw aria-hidden="true" size={16} /> Retry local player</button>
-        </div>
-      ) : <p className="mt-3 mb-0 text-sm leading-relaxed text-muted">Plays directly from the original file. Use the player controls to inspect the suspected duplicate.</p>}
+      <p className="mt-3 mb-0 text-sm leading-relaxed text-muted">Plays directly from the original file. If the picture stays black or only audio plays, use compatibility playback.</p>
+      <button className={`${buttonClass} mt-3`} onClick={useCompatibility} type="button">Use compatibility player</button>
     </>
   );
 }

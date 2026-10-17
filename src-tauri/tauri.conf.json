@@ -11,7 +11,7 @@
   },
   "app": {
     "windows": [{ "title": "YouTube Upload Manager", "width": 1280, "height": 800, "minWidth": 390, "minHeight": 640 }],
-    "security": { "csp": "default-src 'self'; connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com; frame-src https://www.youtube.com; media-src 'self' media-preview: http://media-preview.localhost https://media-preview.localhost; img-src 'self' asset: https: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" }
+    "security": { "csp": "default-src 'self'; connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com; frame-src https://www.youtube.com; media-src 'self' blob: media-preview: http://media-preview.localhost https://media-preview.localhost; img-src 'self' asset: https: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" }
   },
   "bundle": {
     "active": true,
