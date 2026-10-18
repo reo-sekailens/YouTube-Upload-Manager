@@ -21,6 +21,35 @@ use tauri_plugin_fs::FilePath;
 use uuid::Uuid;
 
 mod compatibility;
+mod remote;
+
+pub(super) use remote::{RemoteMediaPreview, RemotePreviewConfiguration};
+
+pub(super) fn remote_configuration(state: &AppState) -> Result<RemotePreviewConfiguration, String> {
+    remote::configuration(state)
+}
+
+pub(super) fn configure_remote(
+    state: &AppState,
+    tool_path: &str,
+    runtime_path: Option<&str>,
+) -> Result<RemotePreviewConfiguration, String> {
+    remote::configure(state, tool_path, runtime_path)
+}
+
+pub(super) fn prepare_remote(
+    state: &AppState,
+    target: DuplicatePreviewTarget,
+    expected_channel_id: Option<&str>,
+    video_id: &str,
+    request_id: &str,
+) -> Result<RemoteMediaPreview, String> {
+    remote::prepare(state, target, expected_channel_id, video_id, request_id)
+}
+
+pub(super) fn release_remote(tokens: &[String]) -> Result<(), String> {
+    remote::release(tokens)
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -472,33 +501,7 @@ pub(super) fn prepare(
     if expected_channel_id.is_some_and(|expected| expected != channel_id) {
         return Err("The active YouTube channel changed. Reopen duplicate review.".into());
     }
-    let (sources, mut videos) = match target {
-        DuplicatePreviewTarget::Upload { item_id } => {
-            resolve_upload(&connection, &item_id, &channel_id)?
-        }
-        DuplicatePreviewTarget::Preflight { job_id, ordinal } => {
-            resolve_preflight(&connection, &job_id, ordinal, &channel_id)?
-        }
-        DuplicatePreviewTarget::Candidate { candidate_id } => {
-            resolve_candidate(&connection, &candidate_id, &channel_id)?
-        }
-        DuplicatePreviewTarget::Perceptual {
-            review_id,
-            candidate_id,
-        } => {
-            let ids = super::perceptual_review::preview_member_ids(
-                &connection,
-                &channel_id,
-                &review_id,
-                &candidate_id,
-            )?;
-            let sources = ids
-                .iter()
-                .map(|id| local_upload_reference(&connection, id, &channel_id))
-                .collect::<Result<Vec<_>, _>>()?;
-            (sources, Vec::new())
-        }
-    };
+    let (sources, mut videos) = resolve_target(&connection, target, &channel_id)?;
     let mut seen_videos = HashSet::new();
     videos.retain(|video| {
         !video.video_id.is_empty()
@@ -577,6 +580,40 @@ pub(super) fn prepare(
         local_sources,
         youtube_videos: videos,
         unavailable_local_sources,
+    })
+}
+
+fn resolve_target(
+    connection: &Connection,
+    target: DuplicatePreviewTarget,
+    channel_id: &str,
+) -> Result<(Vec<LocalReference>, Vec<YouTubePreviewVideo>), String> {
+    Ok(match target {
+        DuplicatePreviewTarget::Upload { item_id } => {
+            resolve_upload(&connection, &item_id, &channel_id)?
+        }
+        DuplicatePreviewTarget::Preflight { job_id, ordinal } => {
+            resolve_preflight(&connection, &job_id, ordinal, &channel_id)?
+        }
+        DuplicatePreviewTarget::Candidate { candidate_id } => {
+            resolve_candidate(&connection, &candidate_id, &channel_id)?
+        }
+        DuplicatePreviewTarget::Perceptual {
+            review_id,
+            candidate_id,
+        } => {
+            let ids = super::perceptual_review::preview_member_ids(
+                &connection,
+                &channel_id,
+                &review_id,
+                &candidate_id,
+            )?;
+            let sources = ids
+                .iter()
+                .map(|id| local_upload_reference(&connection, id, &channel_id))
+                .collect::<Result<Vec<_>, _>>()?;
+            (sources, Vec::new())
+        }
     })
 }
 
@@ -726,6 +763,9 @@ pub(super) fn respond(request: Request<Vec<u8>>, main_webview: bool) -> Response
     {
         return empty_response(StatusCode::NOT_FOUND);
     }
+    if let Some(response) = remote::respond(&request, token) {
+        return response;
+    }
     let grant = grants()
         .lock()
         .ok()
@@ -823,13 +863,13 @@ mod tests {
     use super::*;
     use std::fs;
 
-    struct Fixture {
+    pub(super) struct Fixture {
         root: PathBuf,
-        state: AppState,
+        pub(super) state: AppState,
     }
 
     impl Fixture {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let root =
                 std::env::temp_dir().join(format!("youtube-preview-test-{}", Uuid::new_v4()));
             fs::create_dir_all(root.join("media")).unwrap();
@@ -846,7 +886,7 @@ mod tests {
             Self { root, state }
         }
 
-        fn upload(&self, id: &str, status: &str, contents: &[u8]) -> PathBuf {
+        pub(super) fn upload(&self, id: &str, status: &str, contents: &[u8]) -> PathBuf {
             let path = self.root.join(format!("{id}.mp4"));
             fs::write(&path, contents).unwrap();
             let signature = monitored_file_signature(&fs::metadata(&path).unwrap()).unwrap();
@@ -857,7 +897,7 @@ mod tests {
             path
         }
 
-        fn remote(&self, id: &str, title: &str, channel: &str, status: &str) {
+        pub(super) fn remote(&self, id: &str, title: &str, channel: &str, status: &str) {
             database(&self.state).unwrap().execute(
                 "INSERT INTO remote_videos(video_id, channel_name, channel_id, title, upload_status, updated_at) VALUES (?1, 'Channel', ?2, ?3, ?4, ?5)",
                 params![id, channel, title, status, super::super::now()],

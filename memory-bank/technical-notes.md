@@ -52,6 +52,25 @@
 
 ## Engineering constraints
 
+- TASK164 adds user-requested optional yt-dlp duplicate review; ordinary
+  provider/account writes remain official native APIs. Only selected tool paths
+  persist. Extraction disables ambient config/plugins/cache, remote components,
+  cookies and default runtimes; optional Deno/Node selection is explicit.
+  Progressive H264/AAC MP4 is the first direct format; other formats/access
+  failures and mobile retain the iframe. No app OAuth is handed to the tool.
+- Remote grants require current evidence/channel, expire after 20 minutes and
+  share the main-only media-preview protocol. Two extractors maximum, 45-second
+  and 2 MiB output caps; pooled HTTPS reads enforce Googlevideo redirects,
+  exact 206/Content-Range, at most 1 MiB responses and a 15-second timeout.
+  Revocation discards reads and cancels pending extraction. A blocking read may
+  remain until its timeout. No downloaded video or converted disk cache exists.
+- Shared controls retain pair/time/offset/audio across fallback, hold both
+  linked players during buffering and fence late play/seek messages. Native
+  Play through buffering preserves intent. Iframe messages validate origin and
+  source; commands wait for navigation and actual API readiness. Synchronization
+  is approximate. Live probes currently require sign-in; cookies are not read
+  automatically to work around provider authentication.
+
 - TASK147 supports up to 64 active/paused configured roots on the device
   with independent visibility, audience, playlist and cleanup choices. Selection
   changes only the activity view. All enabled roots share one scan coordinator

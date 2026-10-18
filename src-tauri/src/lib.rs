@@ -12274,6 +12274,72 @@ fn release_duplicate_media_preview(tokens: Vec<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn get_remote_preview_configuration(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<media_preview::RemotePreviewConfiguration, String> {
+    if window.label() != "main" {
+        return Err("Streaming comparison is only available in the main application.".into());
+    }
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || media_preview::remote_configuration(&state))
+        .await
+        .map_err(|_| "Streaming configuration could not be read.".to_string())?
+}
+
+#[tauri::command]
+async fn configure_remote_preview_tool(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    tool_path: String,
+    runtime_path: Option<String>,
+) -> Result<media_preview::RemotePreviewConfiguration, String> {
+    if window.label() != "main" {
+        return Err("Streaming comparison is only available in the main application.".into());
+    }
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        media_preview::configure_remote(&state, &tool_path, runtime_path.as_deref())
+    })
+    .await
+    .map_err(|_| "Streaming configuration could not be saved.".to_string())?
+}
+
+#[tauri::command]
+async fn prepare_remote_preview(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    target: media_preview::DuplicatePreviewTarget,
+    expected_channel_id: Option<String>,
+    video_id: String,
+    request_id: String,
+) -> Result<media_preview::RemoteMediaPreview, String> {
+    if window.label() != "main" {
+        return Err("Streaming comparison is only available in the main application.".into());
+    }
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        media_preview::prepare_remote(
+            &state,
+            target,
+            expected_channel_id.as_deref(),
+            &video_id,
+            &request_id,
+        )
+    })
+    .await
+    .map_err(|_| "The stream stopped. Use the YouTube player or retry.".to_string())?
+}
+
+#[tauri::command]
+fn release_remote_preview(window: tauri::WebviewWindow, tokens: Vec<String>) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Streaming comparison is only available in the main application.".into());
+    }
+    media_preview::release_remote(&tokens)
+}
+
+#[tauri::command]
 async fn inspect_duplicate_preview_compatibility(
     window: tauri::WebviewWindow,
     token: String,
@@ -12529,6 +12595,10 @@ pub fn run() {
                     delete_preflight_duplicate_file,
                     prepare_duplicate_media_preview,
                     release_duplicate_media_preview,
+                    get_remote_preview_configuration,
+                    configure_remote_preview_tool,
+                    prepare_remote_preview,
+                    release_remote_preview,
                     inspect_duplicate_preview_compatibility,
                     read_duplicate_preview_segment,
                     resolve_upload_title_duplicates,

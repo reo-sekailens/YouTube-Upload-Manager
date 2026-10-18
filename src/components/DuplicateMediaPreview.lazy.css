@@ -2,3 +2,5 @@
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @source "./DuplicateMediaPreview.tsx";
 @source "./CompatibilityVideoPlayer.tsx";
+@source "./DuplicateComparisonPlayers.tsx";
+@source "./DuplicateComparisonTools.tsx";

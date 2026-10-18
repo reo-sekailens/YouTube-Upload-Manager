@@ -244,6 +244,23 @@ or disabling navigation. Explicit channel/folder changes retire the old reader
 and its queued updates; dialog, focus, disclosure and scroll state survive
 ordinary status refreshes.
 
+TASK164 adds optional desktop yt-dlp review at the user's explicit request as a
+scoped exception to the official-API-only boundary. Ordinary account, upload,
+inventory and deletion operations retain their existing authorization. Selected
+yt-dlp and optional Deno/Node resolve only IDs from current native duplicate
+evidence. A revocable opaque grant serves at most 1 MiB per validated HTTPS
+Googlevideo range through the existing media-preview protocol. Signed URLs,
+headers and video bytes stay in native memory. No disk media cache, cookie
+import, OAuth handoff or automatic executable download is introduced.
+
+A shared controller links originals, compatibility playback and iframe players
+using a left-master clock, offset-adjusted overlap, bounded correction,
+buffering holds and one audible side. Fallback/retry preserve selection/time
+without resuming automatically. Iframe commands require committed navigation
+and actual API readiness, with origin/frame validation. Sync is approximate.
+Mobile and unavailable extraction use the embed. Live extraction and installed
+WebView playback remain certification gates; a public probe required sign-in.
+
 Playlist selection is bounded to 200 videos per addition and retained across
 search, visibility filters and pages. Page/matching shortcuts and Shift ranges
 share one selection model. The native playlist bulk adapter preserves reviewed

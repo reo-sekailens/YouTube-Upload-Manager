@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { RefreshCw, X } from "lucide-react";
-import { youtubeComparisonEmbedUrl } from "../lib/comparison-controls";
+import { createComparisonSync } from "../lib/comparison-sync";
+import type { ComparisonPlayer, ComparisonSyncState } from "../lib/comparison-sync";
 import {
   prepareDuplicateMediaPreview,
   releaseDuplicateMediaPreview,
 } from "../lib/duplicate-media-preview";
-import { watchLocalVideoPicture } from "../lib/duplicate-playback-health";
-import CompatibilityVideoPlayer from "./CompatibilityVideoPlayer";
+import { getRemotePreviewConfiguration } from "../lib/remote-preview";
+import { LocalComparisonPlayer, OnlineComparisonPlayer } from "./DuplicateComparisonPlayers";
+import type { RegisterComparisonPlayer } from "./DuplicateComparisonPlayers";
+import { DuplicateComparisonControls, RemoteComparisonSetup } from "./DuplicateComparisonTools";
 import "./DuplicateMediaPreview.lazy.css";
 import type {
   DuplicateMediaPreviewEvidence,
@@ -52,176 +55,121 @@ export function createDuplicatePreviewSession(
   };
 }
 
-function LocalVideoPlayer({
-  source,
-}: {
-  source: DuplicateMediaPreviewEvidence["localSources"][number];
-}) {
-  const player = useRef<HTMLVideoElement>(null);
-  const [loading, setLoading] = useState(true);
-  const [attempt, setAttempt] = useState(0);
-  const [compatibility, setCompatibility] = useState<{ initialTime: number; resume: boolean }>();
-  const useCompatibility = useCallback(() => {
-    const video = player.current;
-    setCompatibility({ initialTime: video?.currentTime ?? 0, resume: video ? !video.paused : false });
-  }, []);
+const initialComparisonState: ComparisonSyncState = {
+  time: 0, duration: 0, start: 0, playing: false, waiting: false,
+  ready: false, offset: 0, linked: true, audio: "left",
+};
 
-  useEffect(() => {
-    if (compatibility) return;
-    const video = player.current;
-    if (!video) return;
-    const stopHealthCheck = watchLocalVideoPicture(video, useCompatibility);
-    // StrictMode replays effects on the same node after its cleanup removed src.
-    if (video && video.getAttribute("src") !== source.url) {
-      video.src = source.url;
-      video.load();
-    }
-    return () => {
-      stopHealthCheck();
-      // Remove the source before revocation so no playback/request survives a switch.
-      video?.pause();
-      video?.removeAttribute("src");
-      video?.load();
-    };
-  }, [source.url, compatibility, attempt, useCompatibility]);
+type RemoteConfiguration = { configured: boolean; runtimeConfigured: boolean; supported: boolean };
 
-  if (compatibility) return <>
-    <CompatibilityVideoPlayer fileName={source.fileName} initialTime={compatibility.initialTime} resume={compatibility.resume} token={source.token} />
-    <button className={`${buttonClass} mt-3`} onClick={() => { setLoading(true); setAttempt((value) => value + 1); setCompatibility(undefined); }} type="button"><RefreshCw aria-hidden="true" size={16} /> Try original player</button>
-  </>;
-
-  return (
-    <>
-      <div className="relative aspect-video w-full overflow-hidden rounded-lg bg-black">
-        <video
-          aria-label={`Local video: ${source.fileName}`}
-          className="absolute inset-0 h-full w-full object-contain"
-          controls
-          onLoadedMetadata={() => setLoading(false)}
-          playsInline
-          preload="metadata"
-          ref={player}
-          src={source.url}
-        />
-        {loading && <p className="pointer-events-none absolute inset-x-3 top-3 m-0 rounded-md bg-black/75 px-3 py-2 text-sm text-white" role="status">Loading local video…</p>}
-      </div>
-      <p className="mt-3 mb-0 text-sm leading-relaxed text-muted">Plays directly from the original file. If the picture stays black or only audio plays, use compatibility playback.</p>
-      <button className={`${buttonClass} mt-3`} onClick={useCompatibility} type="button">Use compatibility player</button>
-    </>
-  );
-}
-
-function YouTubeVideoPlayer({
-  video,
-}: {
-  video: DuplicateMediaPreviewEvidence["youtubeVideos"][number];
-}) {
-  const [loading, setLoading] = useState(true);
-  const [failed, setFailed] = useState(false);
-  const [attempt, setAttempt] = useState(0);
-  return (
-    <>
-      <div className="aspect-video min-h-[200px] w-full overflow-hidden rounded-lg bg-black">
-        <iframe
-          allow="accelerometer; encrypted-media; gyroscope; picture-in-picture"
-          allowFullScreen
-          className="h-full min-h-[200px] w-full border-0"
-          key={attempt}
-          loading="lazy"
-          onError={() => { setLoading(false); setFailed(true); }}
-          onLoad={() => setLoading(false)}
-          referrerPolicy="strict-origin-when-cross-origin"
-          src={youtubeComparisonEmbedUrl(video.videoId)}
-          title={`Matched YouTube video: ${video.title}`}
-        />
-      </div>
-      {loading && !failed && <p className="mt-3 mb-0 text-sm text-muted" role="status">Loading YouTube player…</p>}
-      {failed && <p className="mt-3 mb-0 text-sm leading-relaxed text-danger" role="alert">The YouTube player could not be loaded. Check your connection, then retry.</p>}
-      <p className="mt-3 mb-0 text-sm leading-relaxed text-muted">Private videos may require YouTube sign-in. YouTube can also block playback when embedding is disabled.</p>
-      <button className={`${buttonClass} mt-3`} onClick={() => { setFailed(false); setLoading(true); setAttempt((current) => current + 1); }} type="button"><RefreshCw aria-hidden="true" size={16} /> Retry YouTube player</button>
-    </>
-  );
-}
-
-/** Only selected media mounts; changing a selection tears down the previous player. */
-export function DuplicateMediaPreviewContent({
-  evidence,
-}: {
+/** One controller owns the pair; changing a source never resets its review selection. */
+export function DuplicateMediaPreviewContent({ evidence, target, expectedChannelId }: {
   evidence: DuplicateMediaPreviewEvidence;
+  target?: DuplicateMediaPreviewTarget;
+  expectedChannelId?: string;
 }) {
   const hasLocal = evidence.localSources.length > 0;
   const hasYouTube = evidence.youtubeVideos.length > 0;
   const unavailableLocalSources = evidence.unavailableLocalSources ?? 0;
   const onlineOnlyPair = !hasLocal && unavailableLocalSources === 0 && evidence.youtubeVideos.length > 1;
   const showSelectors = evidence.localSources.length > 1 || evidence.youtubeVideos.length > 1;
-  return (
-    <>
+  const [left, setLeft] = useState<ComparisonPlayer>();
+  const [right, setRight] = useState<ComparisonPlayer>();
+  const registerLeft = useCallback<RegisterComparisonPlayer>((player) => setLeft(player), []);
+  const registerRight = useCallback<RegisterComparisonPlayer>((player) => setRight(player), []);
+  const [state, setState] = useState<ComparisonSyncState>(initialComparisonState);
+  const retainedState = useRef(initialComparisonState);
+  const [controller, setController] = useState<ReturnType<typeof createComparisonSync>>();
+  const [configuration, setConfiguration] = useState<RemoteConfiguration>();
+  const [configurationVersion, setConfigurationVersion] = useState(0);
+  const [setup, setSetup] = useState(false);
+  const active = useRef(true);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  useEffect(() => {
+    if (!left || !right) { setController(undefined); setState((value) => ({ ...value, ready: false, playing: false })); return; }
+    const saved = { ...retainedState.current };
+    const next = createComparisonSync(left, right, (value) => { retainedState.current = value; setState(value); });
+    next.setOffset(saved.offset);
+    next.setLinked(saved.linked);
+    next.setAudio(saved.audio);
+    next.seek(saved.time);
+    setController(next);
+    return () => next.dispose();
+  }, [left, right]);
+  useEffect(() => {
+    if (!target || !hasYouTube) return;
+    let current = true;
+    void getRemotePreviewConfiguration().then((value) => { if (current) setConfiguration(value); }, () => { if (current) setConfiguration({ configured: false, runtimeConfigured: false, supported: false }); });
+    return () => { current = false; };
+  // Only a scoped modal requests native configuration; static evidence fixtures stay usable.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasYouTube, Boolean(target)]);
+  const configured = Boolean(configuration?.configured && configuration.supported && target);
+  const savedSetup = () => {
+    setSetup(false);
+    void getRemotePreviewConfiguration().then((value) => {
+      if (!active.current) return;
+      setConfiguration(value);
+      setConfigurationVersion((value) => value + 1);
+    }, () => { if (active.current) setConfiguration({ configured: false, runtimeConfigured: false, supported: false }); });
+  };
+  const online = { evidence, showSelector: showSelectors, target, expectedChannelId, configured, configurationVersion };
+  return <>
     {unavailableLocalSources > 0 && <p className="mt-0 mb-4 rounded-md bg-warning-surface p-3 text-sm leading-relaxed text-warning-ink" role="status">{unavailableLocalSources} local file{unavailableLocalSources === 1 ? " is" : "s are"} unavailable for playback. Available matches are shown below.</p>}
+    {setup && <RemoteComparisonSetup runtimeConfigured={configuration?.runtimeConfigured ?? false} onClose={() => setSetup(false)} onSaved={savedSetup} />}
+    <DuplicateComparisonControls state={state} controls={controller} hasPair={Boolean(left && right)} />
+    {hasYouTube && target && <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <p className="m-0 text-xs leading-relaxed text-muted">{configured ? "Direct streaming preferred · YouTube embed available as fallback" : configuration?.supported === false ? "Direct streaming is unavailable on this device. Use the YouTube embed." : "YouTube embed · set up yt-dlp for direct in-app streaming"}</p>
+      {configuration?.supported !== false && !setup && <button className={buttonClass} disabled={!configuration} onClick={() => { controller?.pause(); setSetup(true); }} type="button">{configured ? "Streaming setup" : "Set up direct streaming"}</button>}
+    </div>}
     <div className="grid min-w-0 gap-6 md:grid-cols-2">
-      {!onlineOnlyPair ? (
-        <LocalMediaPane evidence={evidence} label="Suspected local duplicate" selectorLabel="Local file to compare" showSelector={showSelectors} />
-      ) : <YouTubeMediaPane evidence={evidence} label="YouTube upload" selectorLabel="First YouTube video to compare" showSelector={showSelectors} />}
-      {hasYouTube ? (
-        <YouTubeMediaPane evidence={evidence} initialIndex={onlineOnlyPair ? 1 : 0} label="Matching online upload" selectorLabel="YouTube match to compare" showSelector={showSelectors} />
-      ) : hasLocal && evidence.localSources.length > 1 ? (
-        <LocalMediaPane evidence={evidence} initialIndex={1} label="Matching local file" selectorLabel="Matching local file to compare" showSelector={showSelectors} />
-      ) : <YouTubeMediaPane evidence={evidence} label="Matching online upload" selectorLabel="YouTube match to compare" showSelector={showSelectors} />}
+      {!onlineOnlyPair ? <LocalMediaPane evidence={evidence} label="Suspected local duplicate" selectorLabel="Local file to compare" showSelector={showSelectors} onPlayer={registerLeft} /> : <YouTubeMediaPane {...online} label="YouTube upload" selectorLabel="First YouTube video to compare" onPlayer={registerLeft} />}
+      {hasYouTube ? <YouTubeMediaPane {...online} initialIndex={onlineOnlyPair ? 1 : 0} label="Matching online upload" selectorLabel="YouTube match to compare" onPlayer={registerRight} /> : hasLocal && evidence.localSources.length > 1 ? <LocalMediaPane evidence={evidence} initialIndex={1} label="Matching local file" selectorLabel="Matching local file to compare" showSelector={showSelectors} onPlayer={registerRight} /> : <YouTubeMediaPane {...online} label="Matching online upload" selectorLabel="YouTube match to compare" onPlayer={registerRight} />}
     </div>
-    </>
-  );
+  </>;
 }
 
-function LocalMediaPane({ evidence, initialIndex = 0, label, selectorLabel, showSelector }: {
+function LocalMediaPane({ evidence, initialIndex = 0, label, selectorLabel, showSelector, onPlayer }: {
   evidence: DuplicateMediaPreviewEvidence;
   initialIndex?: number;
   label: string;
   selectorLabel: string;
   showSelector: boolean;
+  onPlayer: RegisterComparisonPlayer;
 }) {
   const [localIndex, setLocalIndex] = useState(initialIndex);
   const localSource = evidence.localSources[localIndex];
   const id = useId();
-  return (
-      <section aria-labelledby={`${id}-local-heading`} className="min-w-0">
-        <p className="mt-0 mb-2 text-xs font-bold tracking-wide text-muted uppercase">{label}</p>
-        <h3 className="mt-0 mb-3 wrap-anywhere text-base font-semibold text-ink" id={`${id}-local-heading`}>{localSource?.title || localSource?.fileName || "Local file"}</h3>
-        {showSelector && evidence.localSources.length > 0 && (
-          <label className="mb-3 grid gap-1.5 text-sm font-semibold text-ink">{selectorLabel}
-            <select className={selectClass} disabled={evidence.localSources.length === 1} onChange={(event) => setLocalIndex(Number(event.target.value))} value={localIndex}>
-              {evidence.localSources.map((source, index) => <option key={source.token} value={index}>{source.fileName}</option>)}
-            </select>
-          </label>
-        )}
-        {localSource ? <LocalVideoPlayer key={localSource.token} source={localSource} /> : <p className="m-0 rounded-lg bg-subtle-surface p-4 text-sm leading-relaxed text-muted">{(evidence.unavailableLocalSources ?? 0) > 0 ? "The original file could not be opened for playback." : "No available local file was found for this match."}</p>}
-        {localSource && <p className="mt-2 mb-0 wrap-anywhere text-xs text-muted">{localSource.fileName}</p>}
-      </section>
-  );
+  return <section aria-labelledby={`${id}-local-heading`} className="min-w-0">
+    <p className="mt-0 mb-2 text-xs font-bold tracking-wide text-muted uppercase">{label}</p>
+    <h3 className="mt-0 mb-3 wrap-anywhere text-base font-semibold text-ink" id={`${id}-local-heading`}>{localSource?.title || localSource?.fileName || "Local file"}</h3>
+    {showSelector && evidence.localSources.length > 0 && <label className="mb-3 grid gap-1.5 text-sm font-semibold text-ink">{selectorLabel}<select className={selectClass} disabled={evidence.localSources.length === 1} onChange={(event) => setLocalIndex(Number(event.target.value))} value={localIndex}>{evidence.localSources.map((source, index) => <option key={source.token} value={index}>{source.fileName}</option>)}</select></label>}
+    {localSource ? <LocalComparisonPlayer key={localSource.token} source={localSource} onPlayer={onPlayer} /> : <p className="m-0 rounded-lg bg-subtle-surface p-4 text-sm leading-relaxed text-muted">{(evidence.unavailableLocalSources ?? 0) > 0 ? "The original file could not be opened for playback." : "No available local file was found for this match."}</p>}
+    {localSource && <p className="mt-2 mb-0 wrap-anywhere text-xs text-muted">{localSource.fileName}</p>}
+  </section>;
 }
 
-function YouTubeMediaPane({ evidence, initialIndex = 0, label, selectorLabel, showSelector }: {
+function YouTubeMediaPane({ evidence, initialIndex = 0, label, selectorLabel, showSelector, target, expectedChannelId, configured, configurationVersion, onPlayer }: {
   evidence: DuplicateMediaPreviewEvidence;
   initialIndex?: number;
   label: string;
   selectorLabel: string;
   showSelector: boolean;
+  target?: DuplicateMediaPreviewTarget;
+  expectedChannelId?: string;
+  configured: boolean;
+  configurationVersion: number;
+  onPlayer: RegisterComparisonPlayer;
 }) {
   const [youtubeIndex, setYouTubeIndex] = useState(initialIndex);
   const youtubeVideo = evidence.youtubeVideos[youtubeIndex];
   const id = useId();
-  return (
-      <section aria-labelledby={`${id}-youtube-heading`} className="min-w-0">
-        <p className="mt-0 mb-2 text-xs font-bold tracking-wide text-muted uppercase">{label}</p>
-        <h3 className="mt-0 mb-3 wrap-anywhere text-base font-semibold text-ink" id={`${id}-youtube-heading`}>{youtubeVideo?.title || "YouTube video"}</h3>
-        {showSelector && evidence.youtubeVideos.length > 0 && (
-          <label className="mb-3 grid gap-1.5 text-sm font-semibold text-ink">{selectorLabel}
-            <select className={selectClass} disabled={evidence.youtubeVideos.length === 1} onChange={(event) => setYouTubeIndex(Number(event.target.value))} value={youtubeIndex}>
-              {evidence.youtubeVideos.map((video, index) => <option key={video.videoId} value={index}>{video.title}</option>)}
-            </select>
-          </label>
-        )}
-        {youtubeVideo ? <YouTubeVideoPlayer key={youtubeVideo.videoId} video={youtubeVideo} /> : <p className="m-0 rounded-lg bg-subtle-surface p-4 text-sm leading-relaxed text-muted">No matching YouTube upload is available for this review.</p>}
-      </section>
-  );
+  return <section aria-labelledby={`${id}-youtube-heading`} className="min-w-0">
+    <p className="mt-0 mb-2 text-xs font-bold tracking-wide text-muted uppercase">{label}</p>
+    <h3 className="mt-0 mb-3 wrap-anywhere text-base font-semibold text-ink" id={`${id}-youtube-heading`}>{youtubeVideo?.title || "YouTube video"}</h3>
+    {showSelector && evidence.youtubeVideos.length > 0 && <label className="mb-3 grid gap-1.5 text-sm font-semibold text-ink">{selectorLabel}<select className={selectClass} disabled={evidence.youtubeVideos.length === 1} onChange={(event) => setYouTubeIndex(Number(event.target.value))} value={youtubeIndex}>{evidence.youtubeVideos.map((video, index) => <option key={video.videoId} value={index}>{video.title}</option>)}</select></label>}
+    {youtubeVideo ? <OnlineComparisonPlayer key={youtubeVideo.videoId} video={youtubeVideo} target={target} expectedChannelId={expectedChannelId} configured={configured} configurationVersion={configurationVersion} onPlayer={onPlayer} /> : <p className="m-0 rounded-lg bg-subtle-surface p-4 text-sm leading-relaxed text-muted">No matching YouTube upload is available for this review.</p>}
+  </section>;
 }
 
 export function DuplicateMediaPreview({
@@ -314,7 +262,7 @@ export function DuplicateMediaPreview({
       </header>
       <div className="p-4 sm:p-6">
         {reviewEvidence}
-        {!isClosed && (evidence ? <DuplicateMediaPreviewContent evidence={evidence} key={requestKey} /> : errorKey === requestKey ? (
+        {!isClosed && (evidence ? <DuplicateMediaPreviewContent evidence={evidence} target={target} expectedChannelId={expectedChannelId} key={requestKey} /> : errorKey === requestKey ? (
           <div className="rounded-lg bg-warning-surface p-4 text-sm leading-relaxed text-warning-ink" role="alert">
             <p className="mt-0 mb-2 font-semibold">The comparison could not be opened.</p>
             <p className="mt-0 mb-4">The original file may be unavailable, the duplicate evidence may have changed, or the connected channel may have changed. Your upload decision is unchanged.</p>

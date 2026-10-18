@@ -1,5 +1,29 @@
 # Progress
 
+## 2026-10-18 — Linked duplicate playback and optional native streaming
+
+- TASK164 adds shared play/pause, timeline, skips, alignment offset, independent
+  mode and one-side audio to existing upload/preflight/dedupe comparisons.
+  Buffering holds the pair; fallback/retry retain state without autoplay.
+  Advanced controls collapse on the initial view.
+- Two-step setup selects installed yt-dlp and optional Deno/Node. Native code
+  resolves current channel-scoped evidence and serves bounded memory-only
+  progressive ranges with opaque grants. No application server, disk video
+  cache, cookie import or OAuth handoff is introduced. This narrow extractor
+  integration follows the explicit user request; ordinary APIs are unchanged.
+- Forty rendered generated-media checks pass across desktop/mobile,
+  including manual/automatic fallback, timestamp/offset retention, buffering,
+  retry, setup review and cancellation before extraction finishes. Transport
+  and iframe API are fixtures; HTML5 players decode real generated frames.
+  Screenshots/receipts are in task164-stream-sync-20261018 under the thread
+  artifact directory. Source checks pass with unchanged initial bundle budgets.
+  Final suites pass 553 frontend and 438 native cases (nine native ignores),
+  plus strict TypeScript, production native/build/format checks and ownership.
+- The historical extractor fixture is unavailable. YouTube's documented player
+  example requires sign-in with a checksum-verified current test-only yt-dlp
+  and selected Node. No user cookies/profile/credentials were accessed. Live
+  signed-CDN playback and installed WebView behavior remain certification gates.
+
 ## 2026-10-18 — Local video picture and stable watched-folder view
 
 - TASK163 detects metadata/playback without a decoded picture and adds an

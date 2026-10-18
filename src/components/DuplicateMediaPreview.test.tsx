@@ -47,7 +47,9 @@ describe("duplicate playback comparison", () => {
     expect(markup).toContain("md:grid-cols-2");
     expect(markup).toContain("Use compatibility player");
     expect(markup).toContain("If the picture stays black or only audio plays");
-    expect(markup).not.toMatch(/autoplay/i);
+    expect(markup).toContain('allow="autoplay;');
+    expect(markup).not.toMatch(/[?&]autoplay=/i);
+    expect(markup).not.toContain('autoplay=""');
     expect(markup).not.toContain("<a ");
   });
 

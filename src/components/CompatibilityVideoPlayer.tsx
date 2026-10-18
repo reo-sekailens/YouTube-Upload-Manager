@@ -4,11 +4,12 @@ import { createCompatibilityPlayback } from "../lib/compatibility-playback";
 import type { CompatibilityPlaybackStatus } from "../lib/compatibility-playback";
 import { inspectDuplicatePreviewCompatibility, readDuplicatePreviewSegment } from "../lib/duplicate-media-preview";
 
-export default function CompatibilityVideoPlayer({ token, fileName, initialTime, resume }: {
+export default function CompatibilityVideoPlayer({ token, fileName, initialTime, resume, onPlayer }: {
   token: string;
   fileName: string;
   initialTime: number;
   resume: boolean;
+  onPlayer?: (video: HTMLVideoElement | null) => void;
 }) {
   const player = useRef<HTMLVideoElement>(null);
   const [status, setStatus] = useState<CompatibilityPlaybackStatus>("loading");
@@ -18,6 +19,7 @@ export default function CompatibilityVideoPlayer({ token, fileName, initialTime,
   useEffect(() => {
     const video = player.current;
     if (!video) return;
+    onPlayer?.(video);
     const dispose = createCompatibilityPlayback(video, {
       inspect: () => inspectDuplicatePreviewCompatibility(token),
       readSegment: (startSeconds) => readDuplicatePreviewSegment(token, startSeconds),
@@ -27,9 +29,10 @@ export default function CompatibilityVideoPlayer({ token, fileName, initialTime,
       position.current = video.currentTime || position.current;
       // A retry and StrictMode teardown never acquire permission to start playing.
       resumeInitially.current = false;
+      onPlayer?.(null);
       dispose();
     };
-  }, [token, attempt]);
+  }, [token, attempt, onPlayer]);
   return <>
     <div className="relative aspect-video w-full overflow-hidden rounded-lg bg-black">
       <video aria-label={`Local video: ${fileName} (compatibility player)`} className="absolute inset-0 h-full w-full object-contain" controls playsInline preload="metadata" ref={player} />
