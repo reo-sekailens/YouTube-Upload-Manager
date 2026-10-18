@@ -12277,14 +12277,38 @@ fn release_duplicate_media_preview(tokens: Vec<String>) -> Result<(), String> {
 async fn get_remote_preview_configuration(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
+    expected_channel_id: Option<String>,
 ) -> Result<media_preview::RemotePreviewConfiguration, String> {
     if window.label() != "main" {
         return Err("Streaming comparison is only available in the main application.".into());
     }
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || media_preview::remote_configuration(&state))
-        .await
-        .map_err(|_| "Streaming configuration could not be read.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        media_preview::remote_configuration(&state, expected_channel_id.as_deref())
+    })
+    .await
+    .map_err(|_| "Streaming configuration could not be read.".to_string())?
+}
+
+#[tauri::command]
+async fn set_remote_preview_browser_session(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    session: Option<media_preview::BrowserSessionSelection>,
+    expected_channel_id: String,
+    approved: bool,
+) -> Result<media_preview::RemotePreviewConfiguration, String> {
+    if window.label() != "main" {
+        return Err("Streaming comparison is only available in the main application.".into());
+    }
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        media_preview::set_remote_browser_session(&state, session, &expected_channel_id, approved)
+    })
+    .await
+    .map_err(|_| {
+        "The browser session choice could not be saved. Reopen streaming setup.".to_string()
+    })?
 }
 
 #[tauri::command]
@@ -12596,6 +12620,7 @@ pub fn run() {
                     prepare_duplicate_media_preview,
                     release_duplicate_media_preview,
                     get_remote_preview_configuration,
+                    set_remote_preview_browser_session,
                     configure_remote_preview_tool,
                     prepare_remote_preview,
                     release_remote_preview,

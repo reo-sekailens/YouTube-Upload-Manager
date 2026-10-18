@@ -48,7 +48,8 @@ describe("comparison controls and setup", () => {
     expect(markup).toContain("Choose runtime");
     expect(markup).toContain("Deno (recommended) or Node.js 22 or later");
     expect(markup).toContain("does not guarantee access to every video");
-    expect(markup).toContain("does not download tools or import browser cookies");
+    expect(markup).toContain("does not download tools");
+    expect(markup).toContain("Browser session access is a separate, optional setup");
     expect(markup).toMatch(/disabled=""[^>]*>Review setup/);
     expect(markup).not.toContain("<dialog");
   });

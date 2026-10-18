@@ -24,6 +24,9 @@ const UNAVAILABLE: &str = "A directly playable stream is unavailable. Use the Yo
 const CANCELLED: &str =
     "This comparison closed, expired, or changed channel. Reopen the comparison.";
 const SETTINGS_FILE: &str = "duplicate-stream-tools.json";
+const BROWSER_SETTINGS_FILE: &str = "duplicate-stream-browser-sessions.json";
+const MAX_BROWSER_PROFILE_BYTES: usize = 1024;
+const MAX_BROWSER_CHANNELS: usize = 128;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +34,21 @@ pub(crate) struct RemotePreviewConfiguration {
     configured: bool,
     runtime_configured: bool,
     supported: bool,
+    browser_session: Option<BrowserSessionSelection>,
+}
+
+/// This is a remembered opt-in, never a browser cookie jar or app OAuth token.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BrowserSessionSelection {
+    browser: String,
+    profile: String,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserSessions {
+    sessions: HashMap<String, BrowserSessionSelection>,
 }
 
 #[derive(Serialize)]
@@ -88,6 +106,157 @@ fn configuration_path(state: &AppState) -> Result<PathBuf, String> {
         .parent()
         .map(|parent| parent.join(SETTINGS_FILE))
         .ok_or_else(|| "The comparison tool preferences are unavailable.".into())
+}
+
+fn browser_configuration_path(state: &AppState) -> Result<PathBuf, String> {
+    configuration_path(state).map(|path| path.with_file_name(BROWSER_SETTINGS_FILE))
+}
+
+fn validate_browser_session(value: &BrowserSessionSelection) -> Result<(), String> {
+    if !matches!(
+        value.browser.as_str(),
+        "chrome" | "edge" | "firefox" | "brave" | "chromium" | "opera" | "vivaldi" | "safari"
+    ) || (value.browser == "safari" && !cfg!(target_os = "macos"))
+    {
+        return Err("Choose a supported browser on this device.".into());
+    }
+    if value.profile.trim().is_empty()
+        || value.profile.len() > MAX_BROWSER_PROFILE_BYTES
+        || value.profile.contains("::")
+        || value.profile.chars().any(char::is_control)
+    {
+        return Err("Enter a browser profile name or folder without control characters or container options (maximum 1,024 bytes).".into());
+    }
+    Ok(())
+}
+
+fn load_browser_sessions(state: &AppState) -> Result<BrowserSessions, String> {
+    let invalid =
+        "The saved browser-session preferences are invalid. Choose the browser profile again.";
+    let file = match File::open(browser_configuration_path(state)?) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BrowserSessions::default())
+        }
+        Err(_) => return Err(invalid.into()),
+    };
+    if file.metadata().map_err(|_| invalid)?.len() > MAX_CONFIGURATION_BYTES {
+        return Err(invalid.into());
+    }
+    let saved: BrowserSessions =
+        serde_json::from_reader(file.take(MAX_CONFIGURATION_BYTES + 1)).map_err(|_| invalid)?;
+    if saved.sessions.len() > MAX_BROWSER_CHANNELS
+        || saved.sessions.iter().any(|(channel, session)| {
+            channel.is_empty()
+                || channel.len() > 256
+                || channel.chars().any(char::is_control)
+                || validate_browser_session(session).is_err()
+        })
+    {
+        return Err(invalid.into());
+    }
+    Ok(saved)
+}
+
+fn save_browser_sessions(state: &AppState, saved: &BrowserSessions) -> Result<(), String> {
+    let bytes = serde_json::to_vec(saved).map_err(|_| UNAVAILABLE)?;
+    if saved.sessions.len() > MAX_BROWSER_CHANNELS || bytes.len() as u64 > MAX_CONFIGURATION_BYTES {
+        return Err("Too many browser-session preferences are saved on this device.".into());
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(browser_configuration_path(state)?)
+        .map_err(|_| "The browser-session preference could not be saved.".to_string())?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| "The browser-session preference could not be saved.".into())
+}
+
+fn revoke_channel(state: &AppState, channel_id: &str) -> Result<(), String> {
+    let registry = registry().lock().map_err(|_| UNAVAILABLE)?;
+    for entry in registry.active.values().filter(|entry| {
+        entry.database_path == state.database_path && entry.channel_id == channel_id
+    }) {
+        entry.revoked.store(true, Ordering::Release);
+    }
+    Ok(())
+}
+
+pub(super) fn set_browser_session(
+    state: &AppState,
+    session: Option<BrowserSessionSelection>,
+    expected_channel_id: &str,
+    approved: bool,
+) -> Result<RemotePreviewConfiguration, String> {
+    if !supported() {
+        return Err("Browser-session comparison requires desktop yt-dlp.".into());
+    }
+    if session.is_some() && !approved {
+        return Err("Review and approve using this signed-in browser profile first.".into());
+    }
+    if let Some(session) = session.as_ref() {
+        validate_browser_session(session)?;
+    }
+    {
+        let _guard = configuration_lock().lock().map_err(|_| UNAVAILABLE)?;
+        let mut connection = database(state)?;
+        // Hold the channel fence through preference persistence and the scoped
+        // receipt. Browser changes never race admission of an old snapshot.
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| UNAVAILABLE)?;
+        let channel_id = active_channel(&transaction)?;
+        if channel_id.is_empty() || channel_id != expected_channel_id {
+            return Err("The active YouTube channel changed. Reopen duplicate review.".into());
+        }
+        let mut saved = load_browser_sessions(state).unwrap_or_default();
+        let previous = saved.sessions.get(&channel_id).cloned();
+        if previous == session && session.is_some() {
+            drop(transaction);
+            drop(_guard);
+            return configuration(state, Some(expected_channel_id));
+        }
+        if let Some(session) = session.clone() {
+            saved.sessions.insert(channel_id.clone(), session);
+        } else {
+            saved.sessions.remove(&channel_id);
+        }
+        // Revoke even when persistence fails: the operator has withdrawn the
+        // running session's authority and a retry must obtain a new grant.
+        revoke_channel(state, &channel_id)?;
+        save_browser_sessions(state, &saved)?;
+        let enabled = session.is_some();
+        let kind = if enabled {
+            "comparison_browser_session_enabled"
+        } else {
+            "comparison_browser_session_disabled"
+        };
+        let detail = if enabled {
+            "Operator approved the selected browser profile for duplicate comparison; only selection metadata was saved and no cookie jar was exported."
+        } else {
+            "Operator disabled browser-session use for duplicate comparison; existing remote streams were revoked."
+        };
+        // Use the immutable checked channel directly: display names may be
+        // missing or shared by independent connected channels.
+        let receipt = transaction.execute(
+            "INSERT INTO audit_events (id, item_id, channel_name, channel_id, kind, detail, created_at) VALUES (?1, NULL, (SELECT active_channel FROM connection_settings WHERE singleton=1), ?2, ?3, ?4, ?5)",
+            params![Uuid::new_v4().to_string(), channel_id, kind, detail, crate::now()],
+        ).map_err(|_| UNAVAILABLE.to_string()).and_then(|_| transaction.commit().map_err(|_| UNAVAILABLE.to_string()));
+        if let Err(error) = receipt {
+            // A failed receipt cannot silently enable the requested profile.
+            // Restore the prior metadata; all admitted grants remain revoked.
+            if let Some(previous) = previous {
+                saved.sessions.insert(channel_id, previous);
+            } else {
+                saved.sessions.remove(&channel_id);
+            }
+            let _ = save_browser_sessions(state, &saved);
+            return Err(error);
+        }
+    }
+    configuration(state, Some(expected_channel_id))
 }
 
 fn selected_executable(value: &Path, runtime: bool) -> Result<PathBuf, String> {
@@ -160,10 +329,21 @@ fn load_configuration(state: &AppState) -> Result<Option<ToolConfiguration>, Str
         })
 }
 
-pub(super) fn configuration(state: &AppState) -> Result<RemotePreviewConfiguration, String> {
+pub(super) fn configuration(
+    state: &AppState,
+    expected_channel_id: Option<&str>,
+) -> Result<RemotePreviewConfiguration, String> {
     let _guard = configuration_lock().lock().map_err(|_| UNAVAILABLE)?;
     // Invalid preferences must not prevent the official embed from opening.
     let saved = load_configuration(state).ok().flatten();
+    let browser_session = expected_channel_id
+        .filter(|expected| !expected.is_empty())
+        .and_then(|expected| {
+            let connection = database(state).ok()?;
+            (active_channel(&connection).ok()?.as_str() == expected)
+                .then(|| load_browser_sessions(state).ok()?.sessions.remove(expected))
+                .flatten()
+        });
     Ok(RemotePreviewConfiguration {
         configured: supported()
             && saved
@@ -175,6 +355,7 @@ pub(super) fn configuration(state: &AppState) -> Result<RemotePreviewConfigurati
                 .and_then(|saved| saved.runtime_path.as_ref())
                 .is_some_and(|path| selected_executable(path, true).is_ok()),
         supported: supported(),
+        browser_session,
     })
 }
 
@@ -209,9 +390,9 @@ pub(super) fn configure(
             .and_then(|_| file.sync_all())
             .map_err(|_| "The comparison tool preferences could not be saved.".to_string())?;
     }
-    // Paths are the only persistent data. Resolution URLs, headers, and media
-    // remain native memory; changing the tools does not grant a video target.
-    configuration(state)
+    // This file persists only selected tool paths. Resolution URLs, headers,
+    // and media remain native memory; tool setup never grants a video target.
+    configuration(state, None)
 }
 
 fn current(entry: &RemoteEntry) -> bool {
@@ -299,19 +480,60 @@ pub(super) fn prepare(
         return Err("The comparison request is invalid. Reopen it.".into());
     }
     let channel_id = authorize_target(state, target, expected_channel_id, video_id)?;
-    let tools = {
+    let (tools, browser_session, entry) =
+        admit_request(state, channel_id, expected_channel_id, request_id)?;
+    let result = (|| {
+        let _permit = ExtractPermit::acquire(&entry)?;
+        require_current(&entry)?;
+        let mut grant = extract(&tools, browser_session.as_ref(), video_id, &entry)?;
+        require_current(&entry)?;
+        // A real range probe establishes content length and seek support. Never
+        // trust extractor size estimates or accept an unbounded 200 response.
+        let (length, _) = fetch_range(&grant, 0, 0, None, &entry)?;
+        grant.length = length;
+        require_current(&entry)?;
+        *entry.grant.lock().map_err(|_| UNAVAILABLE)? = Some(grant);
+        Ok(RemoteMediaPreview {
+            token: request_id.into(),
+        })
+    })();
+    if result.is_err() {
+        let _ = release(&[request_id.into()]);
+    }
+    result
+}
+
+type AdmittedRequest = (
+    ToolConfiguration,
+    Option<BrowserSessionSelection>,
+    Arc<RemoteEntry>,
+);
+
+fn admit_request(
+    state: &AppState,
+    channel_id: String,
+    expected_channel_id: Option<&str>,
+    request_id: &str,
+) -> Result<AdmittedRequest, String> {
+    let (tools, browser_session, entry) = {
         let _guard = configuration_lock().lock().map_err(|_| UNAVAILABLE)?;
-        load_configuration(state)?
-            .ok_or("Choose your yt-dlp executable to enable direct comparison.")?
-    };
-    let entry = Arc::new(RemoteEntry {
-        database_path: state.database_path.clone(),
-        channel_id,
-        created_at: Instant::now(),
-        revoked: AtomicBool::new(false),
-        grant: Mutex::new(None),
-    });
-    {
+        let tools = load_configuration(state)?
+            .ok_or("Choose your yt-dlp executable to enable direct comparison.")?;
+        let browser_session = if expected_channel_id == Some(channel_id.as_str()) {
+            load_browser_sessions(state)?.sessions.remove(&channel_id)
+        } else {
+            None
+        };
+        let entry = Arc::new(RemoteEntry {
+            database_path: state.database_path.clone(),
+            channel_id,
+            created_at: Instant::now(),
+            revoked: AtomicBool::new(false),
+            grant: Mutex::new(None),
+        });
+        require_current(&entry)?;
+        // The snapshot and insertion share the mutation lock. An earlier
+        // prepare cannot insert an authenticated entry after disable returns.
         let mut registry = registry().lock().map_err(|_| UNAVAILABLE)?;
         prune(&mut registry);
         if registry.cancelled.contains_key(request_id) {
@@ -329,26 +551,9 @@ pub(super) fn prepare(
             return Err("Close another comparison before opening more remote videos.".into());
         }
         registry.active.insert(request_id.into(), entry.clone());
-    }
-    let result = (|| {
-        let _permit = ExtractPermit::acquire(&entry)?;
-        require_current(&entry)?;
-        let mut grant = extract(&tools, video_id, &entry)?;
-        require_current(&entry)?;
-        // A real range probe establishes content length and seek support. Never
-        // trust extractor size estimates or accept an unbounded 200 response.
-        let (length, _) = fetch_range(&grant, 0, 0, None, &entry)?;
-        grant.length = length;
-        require_current(&entry)?;
-        *entry.grant.lock().map_err(|_| UNAVAILABLE)? = Some(grant);
-        Ok(RemoteMediaPreview {
-            token: request_id.into(),
-        })
-    })();
-    if result.is_err() {
-        let _ = release(&[request_id.into()]);
-    }
-    result
+        (tools, browser_session, entry)
+    };
+    Ok((tools, browser_session, entry))
 }
 
 pub(super) fn release(tokens: &[String]) -> Result<(), String> {
@@ -412,7 +617,12 @@ fn tool_identity(path: &Path) -> Result<((u64, String), FileIdentity), String> {
     ))
 }
 
-fn extraction_command(tool: &Path, runtime: Option<&Path>, video_id: &str) -> Command {
+fn extraction_command(
+    tool: &Path,
+    runtime: Option<&Path>,
+    browser_session: Option<&BrowserSessionSelection>,
+    video_id: &str,
+) -> Command {
     let mut command = Command::new(tool);
     command.args([
         "--ignore-config",
@@ -421,7 +631,6 @@ fn extraction_command(tool: &Path, runtime: Option<&Path>, video_id: &str) -> Co
         "--no-cache-dir",
         "--no-remote-components",
         "--no-cookies",
-        "--no-cookies-from-browser",
         "--no-js-runtimes",
         "--no-playlist",
         "--simulate",
@@ -438,6 +647,13 @@ fn extraction_command(tool: &Path, runtime: Option<&Path>, video_id: &str) -> Co
         "best[ext=mp4][vcodec^=avc1][acodec^=mp4a][protocol=https]",
         "--dump-single-json",
     ]);
+    if let Some(session) = browser_session {
+        command
+            .arg("--cookies-from-browser")
+            .arg(format!("{}:{}", session.browser, session.profile));
+    } else {
+        command.arg("--no-cookies-from-browser");
+    }
     if let Some(runtime) = runtime {
         if let Some(name) = runtime_name(runtime) {
             command
@@ -466,8 +682,81 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// yt-dlp may copy a locked browser database while extracting cookies. Keep
+/// that third-party temporary work inside a private, uniquely owned directory
+/// and clean it only after the subprocess has terminated, including failures.
+struct BrowserWorkspace {
+    path: PathBuf,
+    parent: PathBuf,
+}
+
+impl BrowserWorkspace {
+    fn create(database_path: &Path) -> Result<Self, String> {
+        let parent = database_path
+            .parent()
+            .ok_or(UNAVAILABLE)?
+            .canonicalize()
+            .map_err(|_| UNAVAILABLE)?;
+        let path = parent.join(format!("comparison-browser-{}", Uuid::new_v4()));
+        let builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        let builder = {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = builder;
+            builder.mode(0o700);
+            builder
+        };
+        builder.create(&path).map_err(|_| UNAVAILABLE)?;
+        Ok(Self { path, parent })
+    }
+
+    fn apply(&self, command: &mut Command) {
+        for name in ["TMP", "TEMP", "TMPDIR"] {
+            command.env(name, &self.path);
+        }
+    }
+
+    fn cleanup(&self) {
+        if self.path.parent() != Some(self.parent.as_path())
+            || self
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("comparison-browser-"))
+                .is_none_or(|id| !valid_token(id))
+        {
+            return;
+        }
+        let Ok(metadata) = fs::symlink_metadata(&self.path) else {
+            return;
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return; // Never traverse a reparse-point substitute.
+            }
+        }
+        if self.path.canonicalize().ok().as_deref() != Some(self.path.as_path()) {
+            return;
+        }
+        // std's recursive remover does not follow symlinks to outside content.
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+impl Drop for BrowserWorkspace {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
 fn extract(
     tools: &ToolConfiguration,
+    browser_session: Option<&BrowserSessionSelection>,
     video_id: &str,
     entry: &RemoteEntry,
 ) -> Result<RemoteGrant, String> {
@@ -479,13 +768,28 @@ fn extract(
         .transpose()?;
     let tool_before = tool_identity(&tool)?;
     let runtime_before = runtime.as_deref().map(tool_identity).transpose()?;
-    let mut child = KillOnDrop(
-        extraction_command(&tool, runtime.as_deref(), video_id)
-            .spawn()
-            .map_err(|_| {
-                "The selected yt-dlp executable could not start. Choose it again or use the embed."
-            })?,
-    );
+    if let Some(session) = browser_session {
+        validate_browser_session(session)?;
+    }
+    // Declaration order matters: KillOnDrop terminates/waits for yt-dlp before
+    // this workspace removes any temporary browser-database files.
+    let workspace = browser_session
+        .map(|_| BrowserWorkspace::create(&entry.database_path))
+        .transpose()?;
+    let mut command = extraction_command(&tool, runtime.as_deref(), browser_session, video_id);
+    if let Some(workspace) = workspace.as_ref() {
+        workspace.apply(&mut command);
+    }
+    let mut child = {
+        // Serialize the final authorization check and process start with
+        // disable/change. A withdrawn snapshot cannot start reading a browser
+        // after the preference mutation has already returned.
+        let _guard = configuration_lock().lock().map_err(|_| UNAVAILABLE)?;
+        require_current(entry)?;
+        KillOnDrop(command.spawn().map_err(|_| {
+            "The selected yt-dlp executable could not start. Choose it again or use the embed."
+        })?)
+    };
     let mut stdout = child.0.stdout.take().ok_or(UNAVAILABLE)?;
     let (sender, receiver) = mpsc::sync_channel(1);
     crate::spawn_worker(move || {
@@ -852,6 +1156,374 @@ fn respond_entry(request: &Request<Vec<u8>>, entry: &RemoteEntry) -> Response<Ve
 mod tests {
     use super::*;
 
+    fn browser_session(browser: &str, profile: &str) -> BrowserSessionSelection {
+        BrowserSessionSelection {
+            browser: browser.into(),
+            profile: profile.into(),
+        }
+    }
+
+    fn configure_fixture_tool(state: &AppState) {
+        let tool = state
+            .database_path
+            .parent()
+            .unwrap()
+            .join(if cfg!(windows) {
+                "yt-dlp.exe"
+            } else {
+                "yt-dlp"
+            });
+        fs::write(&tool, b"selected executable fixture; never executed").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        configure(state, tool.to_str().unwrap(), None).unwrap();
+    }
+
+    #[test]
+    fn browser_session_validation_rejects_cli_grammar_and_unsupported_browsers() {
+        for browser in [
+            "chrome", "edge", "brave", "chromium", "firefox", "opera", "vivaldi",
+        ] {
+            assert!(validate_browser_session(&browser_session(browser, "Profile 1")).is_ok());
+        }
+        assert_eq!(
+            validate_browser_session(&browser_session("safari", "Default")).is_ok(),
+            cfg!(target_os = "macos")
+        );
+        for browser in [
+            "",
+            "Chrome",
+            "chrome+gnomekeyring",
+            "edge:Default",
+            "--cookies",
+        ] {
+            assert!(validate_browser_session(&browser_session(browser, "Default")).is_err());
+        }
+        for profile in [
+            "",
+            " ",
+            "Default::Container",
+            "Default\n--cookies jar",
+            "Profile\0Name",
+            "a\t",
+        ] {
+            assert!(validate_browser_session(&browser_session("firefox", profile)).is_err());
+        }
+        assert!(validate_browser_session(&browser_session(
+            "chrome",
+            &"a".repeat(MAX_BROWSER_PROFILE_BYTES + 1)
+        ))
+        .is_err());
+        // A Windows drive colon is a profile path, not Firefox container syntax.
+        assert!(validate_browser_session(&browser_session(
+            "chrome",
+            r"C:\Selected Profiles\Profile 2"
+        ))
+        .is_ok());
+        assert!(
+            serde_json::from_value::<BrowserSessionSelection>(serde_json::json!({
+                "browser":"chrome", "profile":"Default", "cookies":"secret"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn browser_session_requires_approval_and_is_remembered_only_for_the_expected_channel() {
+        let fixture = super::super::tests::Fixture::new();
+        if !supported() {
+            return;
+        }
+        let selected = browser_session("firefox", "review-profile");
+        assert!(
+            set_browser_session(&fixture.state, Some(selected.clone()), "channel-a", false)
+                .is_err()
+        );
+        assert!(!browser_configuration_path(&fixture.state).unwrap().exists());
+        assert!(
+            set_browser_session(&fixture.state, Some(selected.clone()), "channel-b", true).is_err()
+        );
+        let saved =
+            set_browser_session(&fixture.state, Some(selected.clone()), "channel-a", true).unwrap();
+        assert_eq!(saved.browser_session, Some(selected.clone()));
+        assert_eq!(
+            configuration(&fixture.state, Some("channel-a"))
+                .unwrap()
+                .browser_session,
+            Some(selected.clone())
+        );
+        for expected in [None, Some(""), Some("channel-b")] {
+            assert!(configuration(&fixture.state, expected)
+                .unwrap()
+                .browser_session
+                .is_none());
+        }
+        database(&fixture.state)
+            .unwrap()
+            .execute(
+                "UPDATE connection_settings SET active_channel_id='channel-b'",
+                [],
+            )
+            .unwrap();
+        assert!(configuration(&fixture.state, Some("channel-a"))
+            .unwrap()
+            .browser_session
+            .is_none());
+        assert!(configuration(&fixture.state, Some("channel-b"))
+            .unwrap()
+            .browser_session
+            .is_none());
+        let other = browser_session("edge", "Profile 2");
+        set_browser_session(&fixture.state, Some(other.clone()), "channel-b", true).unwrap();
+        assert_eq!(
+            configuration(&fixture.state, Some("channel-b"))
+                .unwrap()
+                .browser_session,
+            Some(other)
+        );
+        database(&fixture.state)
+            .unwrap()
+            .execute(
+                "UPDATE connection_settings SET active_channel_id='channel-a'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            configuration(&fixture.state, Some("channel-a"))
+                .unwrap()
+                .browser_session,
+            Some(selected)
+        );
+        let bytes = fs::read(browser_configuration_path(&fixture.state).unwrap()).unwrap();
+        let preferences: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            preferences["sessions"]["channel-a"]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+        let receipts: Vec<(String, String, String)> = database(&fixture.state).unwrap()
+            .prepare("SELECT channel_id, kind, detail FROM audit_events WHERE kind LIKE 'comparison_browser_session_%'").unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+            .collect::<Result<_, _>>().unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts.iter().all(|(_, kind, detail)| kind
+            == "comparison_browser_session_enabled"
+            && !detail.contains("review-profile")
+            && !detail.contains("Profile 2")));
+    }
+
+    #[test]
+    fn browser_session_arguments_are_explicit_without_cookie_export() {
+        let selected = browser_session("chrome", r"C:\Selected Profiles\Profile 2");
+        let command = extraction_command(Path::new("yt-dlp"), None, Some(&selected), "abcdefghijk");
+        let arguments = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let position = arguments
+            .iter()
+            .position(|value| value == "--cookies-from-browser")
+            .unwrap();
+        assert_eq!(
+            arguments[position + 1],
+            r"chrome:C:\Selected Profiles\Profile 2"
+        );
+        assert!(arguments.iter().any(|value| value == "--no-cookies"));
+        assert!(!arguments
+            .iter()
+            .any(|value| value == "--cookies" || value == "--no-cookies-from-browser"));
+        for required in [
+            "--ignore-config",
+            "--no-plugin-dirs",
+            "--no-cache-dir",
+            "--no-remote-components",
+            "--simulate",
+            "--no-mark-watched",
+        ] {
+            assert!(arguments.iter().any(|value| value == required));
+        }
+    }
+
+    #[test]
+    fn browser_session_change_and_disable_revoke_admitted_requests_before_new_snapshots() {
+        let fixture = super::super::tests::Fixture::new();
+        if !supported() {
+            return;
+        }
+        configure_fixture_tool(&fixture.state);
+        let original = browser_session("chrome", "Default");
+        set_browser_session(&fixture.state, Some(original.clone()), "channel-a", true).unwrap();
+        let first_token = Uuid::new_v4().to_string();
+        let (tools, snapshot, first) = admit_request(
+            &fixture.state,
+            "channel-a".into(),
+            Some("channel-a"),
+            &first_token,
+        )
+        .unwrap();
+        assert_eq!(snapshot, Some(original));
+        assert!(current(&first));
+        let changed = browser_session("firefox", "review-profile");
+        set_browser_session(&fixture.state, Some(changed.clone()), "channel-a", true).unwrap();
+        assert!(!current(&first));
+        // The fixture is deliberately not an executable: a revoked request
+        // must stop before spawn, even if it already held the old snapshot.
+        assert_eq!(
+            extract(&tools, snapshot.as_ref(), "abcdefghijk", &first)
+                .err()
+                .unwrap(),
+            CANCELLED
+        );
+        assert!(!fs::read_dir(fixture.state.database_path.parent().unwrap())
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("comparison-browser-")));
+        let second_token = Uuid::new_v4().to_string();
+        let (_, snapshot, second) = admit_request(
+            &fixture.state,
+            "channel-a".into(),
+            Some("channel-a"),
+            &second_token,
+        )
+        .unwrap();
+        assert_eq!(snapshot, Some(changed));
+        assert!(current(&second));
+        // Disabling requires no new consent and revokes extraction/range work.
+        let info = set_browser_session(&fixture.state, None, "channel-a", false).unwrap();
+        assert!(info.browser_session.is_none());
+        assert!(!current(&second));
+        let third_token = Uuid::new_v4().to_string();
+        let (_, snapshot, third) = admit_request(
+            &fixture.state,
+            "channel-a".into(),
+            Some("channel-a"),
+            &third_token,
+        )
+        .unwrap();
+        assert!(snapshot.is_none());
+        assert!(current(&third));
+        set_browser_session(
+            &fixture.state,
+            Some(browser_session("edge", "Default")),
+            "channel-a",
+            true,
+        )
+        .unwrap();
+        assert!(!current(&third));
+        let omitted_token = Uuid::new_v4().to_string();
+        let (_, snapshot, _) =
+            admit_request(&fixture.state, "channel-a".into(), None, &omitted_token).unwrap();
+        assert!(snapshot.is_none());
+        release(&[first_token, second_token, third_token, omitted_token]).unwrap();
+    }
+
+    #[test]
+    fn browser_session_temp_workspace_is_private_and_cleans_nested_third_party_files() {
+        let fixture = super::super::tests::Fixture::new();
+        let path;
+        {
+            let workspace = BrowserWorkspace::create(&fixture.state.database_path).unwrap();
+            path = workspace.path.clone();
+            fs::create_dir(path.join("yt-dlp-temp")).unwrap();
+            fs::write(
+                path.join("yt-dlp-temp/cookie-db"),
+                b"synthetic cookie database fixture",
+            )
+            .unwrap();
+            let mut command = Command::new("never-executed");
+            workspace.apply(&mut command);
+            for (name, value) in command.get_envs() {
+                assert!(["TMP", "TEMP", "TMPDIR"].contains(&name.to_str().unwrap()));
+                assert_eq!(value.unwrap(), workspace.path.as_os_str());
+            }
+            assert_eq!(command.get_envs().count(), 3);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+        }
+        assert!(!path.exists());
+        let outside = fixture
+            .state
+            .database_path
+            .parent()
+            .unwrap()
+            .join("keep-this-folder");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), b"original").unwrap();
+        {
+            let forged = BrowserWorkspace {
+                path: outside.clone(),
+                parent: outside.parent().unwrap().to_owned(),
+            };
+            forged.cleanup();
+        }
+        assert_eq!(fs::read(outside.join("keep")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn invalid_browser_preferences_never_enable_auth_or_hide_the_embed() {
+        let fixture = super::super::tests::Fixture::new();
+        if !supported() {
+            return;
+        }
+        configure_fixture_tool(&fixture.state);
+        set_browser_session(
+            &fixture.state,
+            Some(browser_session("chrome", "Default")),
+            "channel-a",
+            true,
+        )
+        .unwrap();
+        let token = Uuid::new_v4().to_string();
+        let (_, _, admitted) = admit_request(
+            &fixture.state,
+            "channel-a".into(),
+            Some("channel-a"),
+            &token,
+        )
+        .unwrap();
+        fs::write(
+            browser_configuration_path(&fixture.state).unwrap(),
+            br#"{"sessions":{"channel-a":{"browser":"chrome+keyring","profile":"Default"}}}"#,
+        )
+        .unwrap();
+        assert!(configuration(&fixture.state, Some("channel-a"))
+            .unwrap()
+            .browser_session
+            .is_none());
+        assert!(load_browser_sessions(&fixture.state).is_err());
+        set_browser_session(&fixture.state, None, "channel-a", false).unwrap();
+        assert!(!current(&admitted));
+        release(&[token]).unwrap();
+        assert!(load_browser_sessions(&fixture.state)
+            .unwrap()
+            .sessions
+            .is_empty());
+        fs::write(
+            browser_configuration_path(&fixture.state).unwrap(),
+            vec![0; MAX_CONFIGURATION_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert!(load_browser_sessions(&fixture.state).is_err());
+        assert!(configuration(&fixture.state, Some("channel-a"))
+            .unwrap()
+            .browser_session
+            .is_none());
+    }
+
     fn metadata(url: &str) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "id": "abcdefghijk", "ext": "mp4", "protocol": "https",
@@ -1037,9 +1709,9 @@ mod tests {
     #[test]
     fn missing_and_corrupt_preferences_keep_the_embed_available() {
         let fixture = super::super::tests::Fixture::new();
-        assert!(!configuration(&fixture.state).unwrap().configured);
+        assert!(!configuration(&fixture.state, None).unwrap().configured);
         fs::write(configuration_path(&fixture.state).unwrap(), b"broken json").unwrap();
-        let info = configuration(&fixture.state).unwrap();
+        let info = configuration(&fixture.state, None).unwrap();
         assert!(!info.configured);
         assert!(!info.runtime_configured);
         fs::write(
@@ -1047,7 +1719,7 @@ mod tests {
             vec![b'x'; MAX_CONFIGURATION_BYTES as usize + 1],
         )
         .unwrap();
-        assert!(!configuration(&fixture.state).unwrap().configured);
+        assert!(!configuration(&fixture.state, None).unwrap().configured);
     }
 
     #[test]
@@ -1115,8 +1787,12 @@ mod tests {
 
     #[test]
     fn extractor_arguments_disable_ambient_auth_code_and_writes() {
-        let command =
-            extraction_command(Path::new("yt-dlp"), Some(Path::new("deno")), "abcdefghijk");
+        let command = extraction_command(
+            Path::new("yt-dlp"),
+            Some(Path::new("deno")),
+            None,
+            "abcdefghijk",
+        );
         let arguments = command
             .get_args()
             .map(|value| value.to_string_lossy().into_owned())
@@ -1154,7 +1830,7 @@ mod tests {
             ("Node.EXE", "node"),
         ] {
             let path = Path::new("Selected Tools").join(file_name);
-            let command = extraction_command(Path::new("yt-dlp"), Some(&path), "abcdefghijk");
+            let command = extraction_command(Path::new("yt-dlp"), Some(&path), None, "abcdefghijk");
             let arguments = command
                 .get_args()
                 .map(|value| value.to_string_lossy().into_owned())
@@ -1311,7 +1987,7 @@ mod tests {
             "Select an eleven-character test video ID."
         );
         // No URL/header, audiovisual bytes or raw diagnostics reach test output.
-        match extract(&tools, &video_id, &entry) {
+        match extract(&tools, None, &video_id, &entry) {
             Ok(grant) => {
                 assert!(valid_stream_url(&grant.url));
                 let (length, bytes) = fetch_range(&grant, 0, 0, None, &entry)

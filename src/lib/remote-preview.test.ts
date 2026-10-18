@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { configureRemotePreviewTool, getRemotePreviewConfiguration, prepareRemotePreview, releaseRemotePreview } from "./remote-preview";
+import { configureRemotePreviewTool, getRemotePreviewConfiguration, prepareRemotePreview, releaseRemotePreview, setRemotePreviewBrowserSession } from "./remote-preview";
 
 const mocks = vi.hoisted(() => ({ native: vi.fn(() => true), invoke: vi.fn(), convert: vi.fn((token: string, scheme: string) => `${scheme}://localhost/${token}`) }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: mocks.native, invoke: mocks.invoke, convertFileSrc: mocks.convert }));
@@ -31,8 +31,22 @@ describe("native remote comparison bridge", () => {
     mocks.native.mockReturnValue(false);
     await expect(getRemotePreviewConfiguration()).rejects.toThrow("desktop app");
     await expect(configureRemotePreviewTool("tool")).rejects.toThrow("desktop app");
+    await expect(setRemotePreviewBrowserSession({ browser: "firefox", profile: "profile-a" }, "channel-a", true)).rejects.toThrow("desktop app");
     await expect(prepareRemotePreview({ kind: "upload", itemId: "item" }, undefined, "video", "request")).rejects.toThrow("desktop app");
     await releaseRemotePreview(["request"]);
     expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("fences browser-session preferences to an explicit channel and final approval", async () => {
+    const session = { browser: "firefox", profile: "profile-a" } as const;
+    mocks.invoke.mockResolvedValue({ configured: true, supported: true, runtimeConfigured: false, browserSession: session });
+    await expect(getRemotePreviewConfiguration("channel-a")).resolves.toMatchObject({ browserSession: session });
+    await setRemotePreviewBrowserSession(session, "channel-a", true);
+    await setRemotePreviewBrowserSession(null, "channel-a", false);
+    expect(mocks.invoke.mock.calls).toEqual([
+      ["get_remote_preview_configuration", { expectedChannelId: "channel-a" }],
+      ["set_remote_preview_browser_session", { session, expectedChannelId: "channel-a", approved: true }],
+      ["set_remote_preview_browser_session", { session: null, expectedChannelId: "channel-a", approved: false }],
+    ]);
   });
 });

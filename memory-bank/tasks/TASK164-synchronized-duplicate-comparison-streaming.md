@@ -144,7 +144,9 @@ provider access and embedding permission.
 Before certifying shipped runtime support, test accessible authorized media with
 maintained selected tools in the installed app, measure drift across seeks and
 buffering, and confirm memory/cancellation behavior on each desktop WebView.
-Broader adaptive formats and separate cookie authorization remain follow-ups.
+Broader adaptive formats remain a follow-up. TASK165 implements separately
+reviewed per-channel browser-session authorization; live private playback remains
+uncertified.
 
 ## Primary sources checked 2026-10-18
 

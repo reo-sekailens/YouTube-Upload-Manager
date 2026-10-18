@@ -53,9 +53,12 @@
 ## Engineering constraints
 
 - TASK164 adds user-requested optional yt-dlp duplicate review; ordinary
-  provider/account writes remain official native APIs. Only selected tool paths
-  persist. Extraction disables ambient config/plugins/cache, remote components,
-  cookies and default runtimes; optional Deno/Node selection is explicit.
+  provider/account writes remain official native APIs. Selected tool paths and
+  TASK165's separately approved per-channel browser/profile metadata persist.
+  Extraction disables ambient config/plugins/cache, remote components, exported
+  cookie jars and default runtimes; optional Deno/Node selection is explicit.
+  Browser cookies are disabled unless the current channel has an approved
+  profile. Cookies and signed provider details remain native-only.
   Progressive H264/AAC MP4 is the first direct format; other formats/access
   failures and mobile retain the iframe. No app OAuth is handed to the tool.
 - Remote grants require current evidence/channel, expire after 20 minutes and
@@ -68,8 +71,12 @@
   linked players during buffering and fence late play/seek messages. Native
   Play through buffering preserves intent. Iframe messages validate origin and
   source; commands wait for navigation and actual API readiness. Synchronization
-  is approximate. Live probes currently require sign-in; cookies are not read
-  automatically to work around provider authentication.
+  is approximate. Live anonymous probes required sign-in. TASK165 lets operators
+  approve a remembered browser profile; no browser auto-discovery or silent
+  personal-cookie access occurs. Native session disable/change revokes pending
+  and active streams. Third-party database copies use private temporary work
+  cleaned after child termination; abrupt-exit recovery remains a follow-up.
+  Live private extraction/browser decryption and installed playback are untested.
 
 - TASK147 supports up to 64 active/paused configured roots on the device
   with independent visibility, audience, playlist and cleanup choices. Selection

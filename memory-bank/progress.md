@@ -1,5 +1,27 @@
 # Progress
 
+## 2026-10-18 — Remembered browser session for private-video review
+
+- TASK165 adds **Use browser session** in comparison, with browser/profile
+  selection and explicit review inside the existing modal. The preference is
+  remembered per immutable channel and can be disabled. Another comparison
+  reuses the selection without a new app sign-in; retry preserves timestamps,
+  offset and audio without autoplay.
+- Native yt-dlp reads only the approved selected profile. Preferences contain
+  selection metadata; no cookie jar is exported and app OAuth is unchanged.
+  Changing/disabling revokes active and pending grants. Private temporary work
+  is cleaned after child termination on ordinary exits/errors/cancellation;
+  abrupt process termination cleanup remains a documented follow-up.
+- Complete suites pass 562 frontend and 444 native tests (nine ignored native
+  cases), strict TypeScript, production frontend/native checks, formatting,
+  Tailwind guard and unchanged initial bundle budgets. Twenty-nine desktop/mobile
+  rendered fixture checks pass with no app errors/warnings. Inspected screenshots
+  and receipts are under `task165-browser-session-20261018` in thread artifacts.
+- No personal browser cookies, profile or private provider media was accessed.
+  Installed browser decryption and live authorized private playback remain
+  separate verification gates; provider access/challenges and format limits
+  still apply. TASK165 supersedes TASK164's anonymous-only extraction boundary.
+
 ## 2026-10-18 — Linked duplicate playback and optional native streaming
 
 - TASK164 adds shared play/pause, timeline, skips, alignment offset, independent

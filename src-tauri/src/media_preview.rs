@@ -23,10 +23,22 @@ use uuid::Uuid;
 mod compatibility;
 mod remote;
 
-pub(super) use remote::{RemoteMediaPreview, RemotePreviewConfiguration};
+pub(super) use remote::{BrowserSessionSelection, RemoteMediaPreview, RemotePreviewConfiguration};
 
-pub(super) fn remote_configuration(state: &AppState) -> Result<RemotePreviewConfiguration, String> {
-    remote::configuration(state)
+pub(super) fn remote_configuration(
+    state: &AppState,
+    expected_channel_id: Option<&str>,
+) -> Result<RemotePreviewConfiguration, String> {
+    remote::configuration(state, expected_channel_id)
+}
+
+pub(super) fn set_remote_browser_session(
+    state: &AppState,
+    session: Option<BrowserSessionSelection>,
+    expected_channel_id: &str,
+    approved: bool,
+) -> Result<RemotePreviewConfiguration, String> {
+    remote::set_browser_session(state, session, expected_channel_id, approved)
 }
 
 pub(super) fn configure_remote(

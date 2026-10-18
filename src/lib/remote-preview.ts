@@ -5,15 +5,31 @@ export type RemotePreviewConfiguration = {
   configured: boolean;
   runtimeConfigured: boolean;
   supported: boolean;
+  browserSession?: RemotePreviewBrowserSession | null;
+};
+
+export type RemotePreviewBrowserSession = {
+  browser: "chrome" | "edge" | "firefox" | "brave" | "chromium" | "opera" | "vivaldi" | "safari";
+  profile: string;
 };
 
 function nativeOnly(): void {
   if (!isTauri()) throw new Error("Streaming comparison is available in the desktop app.");
 }
 
-export async function getRemotePreviewConfiguration(): Promise<RemotePreviewConfiguration> {
+export async function getRemotePreviewConfiguration(expectedChannelId?: string): Promise<RemotePreviewConfiguration> {
   nativeOnly();
-  return invoke("get_remote_preview_configuration");
+  return invoke("get_remote_preview_configuration", { expectedChannelId: expectedChannelId ?? null });
+}
+
+/** Saves only a channel-bound browser/profile choice; native code owns cookie access. */
+export async function setRemotePreviewBrowserSession(
+  session: RemotePreviewBrowserSession | null,
+  expectedChannelId: string,
+  approved: boolean,
+): Promise<RemotePreviewConfiguration> {
+  nativeOnly();
+  return invoke("set_remote_preview_browser_session", { session, expectedChannelId, approved });
 }
 
 /** Only operator-selected tool locations cross this bridge; media URLs stay native. */

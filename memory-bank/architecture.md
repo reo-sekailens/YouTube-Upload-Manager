@@ -250,8 +250,18 @@ inventory and deletion operations retain their existing authorization. Selected
 yt-dlp and optional Deno/Node resolve only IDs from current native duplicate
 evidence. A revocable opaque grant serves at most 1 MiB per validated HTTPS
 Googlevideo range through the existing media-preview protocol. Signed URLs,
-headers and video bytes stay in native memory. No disk media cache, cookie
-import, OAuth handoff or automatic executable download is introduced.
+headers and video bytes stay in native memory. No disk media cache, OAuth
+handoff or automatic executable download is introduced.
+
+TASK165 adds a separately reviewed, remembered browser/profile choice per
+immutable channel. Browser cookies are disabled by default; only this explicit
+opt-in enables yt-dlp's native cookies-from-browser reader. Preferences contain
+selection metadata, never cookie values or an exported jar. App OAuth remains
+independent. Native admission and process start share the preference mutation
+lock; disable/change revokes the channel's active and pending grants. Third-party
+temporary database copies use a private per-extraction directory and cleanup
+after child termination. Abrupt app exit may leave that directory; startup
+recovery is not yet implemented. Live private playback remains unverified.
 
 A shared controller links originals, compatibility playback and iframe players
 using a left-master clock, offset-adjusted overlap, bounded correction,

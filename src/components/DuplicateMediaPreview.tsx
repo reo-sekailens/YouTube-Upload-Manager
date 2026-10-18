@@ -8,6 +8,8 @@ import {
   releaseDuplicateMediaPreview,
 } from "../lib/duplicate-media-preview";
 import { getRemotePreviewConfiguration } from "../lib/remote-preview";
+import type { RemotePreviewConfiguration } from "../lib/remote-preview";
+import { BrowserSessionSetup } from "./BrowserSessionSetup";
 import { LocalComparisonPlayer, OnlineComparisonPlayer } from "./DuplicateComparisonPlayers";
 import type { RegisterComparisonPlayer } from "./DuplicateComparisonPlayers";
 import { DuplicateComparisonControls, RemoteComparisonSetup } from "./DuplicateComparisonTools";
@@ -60,8 +62,6 @@ const initialComparisonState: ComparisonSyncState = {
   ready: false, offset: 0, linked: true, audio: "left",
 };
 
-type RemoteConfiguration = { configured: boolean; runtimeConfigured: boolean; supported: boolean };
-
 /** One controller owns the pair; changing a source never resets its review selection. */
 export function DuplicateMediaPreviewContent({ evidence, target, expectedChannelId }: {
   evidence: DuplicateMediaPreviewEvidence;
@@ -80,9 +80,11 @@ export function DuplicateMediaPreviewContent({ evidence, target, expectedChannel
   const [state, setState] = useState<ComparisonSyncState>(initialComparisonState);
   const retainedState = useRef(initialComparisonState);
   const [controller, setController] = useState<ReturnType<typeof createComparisonSync>>();
-  const [configuration, setConfiguration] = useState<RemoteConfiguration>();
+  const [configuration, setConfiguration] = useState<RemotePreviewConfiguration>();
   const [configurationVersion, setConfigurationVersion] = useState(0);
-  const [setup, setSetup] = useState(false);
+  const [setup, setSetup] = useState<"tools" | "browser">();
+  const toolsButton = useRef<HTMLButtonElement>(null);
+  const browserButton = useRef<HTMLButtonElement>(null);
   const active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   useEffect(() => {
@@ -99,28 +101,39 @@ export function DuplicateMediaPreviewContent({ evidence, target, expectedChannel
   useEffect(() => {
     if (!target || !hasYouTube) return;
     let current = true;
-    void getRemotePreviewConfiguration().then((value) => { if (current) setConfiguration(value); }, () => { if (current) setConfiguration({ configured: false, runtimeConfigured: false, supported: false }); });
+    void getRemotePreviewConfiguration(expectedChannelId).then((value) => { if (current) setConfiguration(value); }, () => { if (current) setConfiguration({ configured: false, runtimeConfigured: false, supported: false }); });
     return () => { current = false; };
   // Only a scoped modal requests native configuration; static evidence fixtures stay usable.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasYouTube, Boolean(target)]);
+  }, [hasYouTube, Boolean(target), expectedChannelId]);
   const configured = Boolean(configuration?.configured && configuration.supported && target);
+  const closeSetup = () => {
+    const returnToBrowser = setup === "browser";
+    setSetup(undefined);
+    requestAnimationFrame(() => { if (active.current) (returnToBrowser ? browserButton : toolsButton).current?.focus(); });
+  };
   const savedSetup = () => {
-    setSetup(false);
-    void getRemotePreviewConfiguration().then((value) => {
+    closeSetup();
+    void getRemotePreviewConfiguration(expectedChannelId).then((value) => {
       if (!active.current) return;
       setConfiguration(value);
       setConfigurationVersion((value) => value + 1);
     }, () => { if (active.current) setConfiguration({ configured: false, runtimeConfigured: false, supported: false }); });
   };
+  const savedBrowserSession = (value: RemotePreviewConfiguration) => {
+    closeSetup();
+    setConfiguration(value);
+    setConfigurationVersion((version) => version + 1);
+  };
   const online = { evidence, showSelector: showSelectors, target, expectedChannelId, configured, configurationVersion };
   return <>
     {unavailableLocalSources > 0 && <p className="mt-0 mb-4 rounded-md bg-warning-surface p-3 text-sm leading-relaxed text-warning-ink" role="status">{unavailableLocalSources} local file{unavailableLocalSources === 1 ? " is" : "s are"} unavailable for playback. Available matches are shown below.</p>}
-    {setup && <RemoteComparisonSetup runtimeConfigured={configuration?.runtimeConfigured ?? false} onClose={() => setSetup(false)} onSaved={savedSetup} />}
+    {setup === "tools" && <RemoteComparisonSetup runtimeConfigured={configuration?.runtimeConfigured ?? false} onClose={closeSetup} onSaved={savedSetup} />}
+    {setup === "browser" && expectedChannelId && <BrowserSessionSetup expectedChannelId={expectedChannelId} initialSession={configuration?.browserSession} onClose={closeSetup} onSaved={savedBrowserSession} />}
     <DuplicateComparisonControls state={state} controls={controller} hasPair={Boolean(left && right)} />
     {hasYouTube && target && <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-      <p className="m-0 text-xs leading-relaxed text-muted">{configured ? "Direct streaming preferred · YouTube embed available as fallback" : configuration?.supported === false ? "Direct streaming is unavailable on this device. Use the YouTube embed." : "YouTube embed · set up yt-dlp for direct in-app streaming"}</p>
-      {configuration?.supported !== false && !setup && <button className={buttonClass} disabled={!configuration} onClick={() => { controller?.pause(); setSetup(true); }} type="button">{configured ? "Streaming setup" : "Set up direct streaming"}</button>}
+      <p className="m-0 text-xs leading-relaxed text-muted">{configured ? configuration?.browserSession ? "Direct streaming preferred · browser session enabled for this channel · YouTube embed fallback" : "Direct streaming preferred · YouTube embed available as fallback" : configuration?.supported === false ? "Direct streaming is unavailable on this device. Use the YouTube embed." : "YouTube embed · set up yt-dlp for direct in-app streaming"}</p>
+      {configuration?.supported !== false && !setup && <div className="flex flex-wrap items-center gap-2"><button className={buttonClass} disabled={!configuration} onClick={() => { controller?.pause(); setSetup("tools"); }} ref={toolsButton} type="button">{configured ? "Streaming setup" : "Set up direct streaming"}</button>{configured && expectedChannelId && <button className={buttonClass} onClick={() => { controller?.pause(); setSetup("browser"); }} ref={browserButton} type="button">{configuration?.browserSession ? "Browser session settings" : "Use browser session"}</button>}</div>}
     </div>}
     <div className="grid min-w-0 gap-6 md:grid-cols-2">
       {!onlineOnlyPair ? <LocalMediaPane evidence={evidence} label="Suspected local duplicate" selectorLabel="Local file to compare" showSelector={showSelectors} onPlayer={registerLeft} /> : <YouTubeMediaPane {...online} label="YouTube upload" selectorLabel="First YouTube video to compare" onPlayer={registerLeft} />}
