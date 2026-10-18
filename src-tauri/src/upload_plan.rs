@@ -1,4 +1,4 @@
-//! Read-only batch planning. Plans are bounded native snapshots, never queue jobs.
+//! Batch planning. Online evidence may refresh its cache; plans never create queue jobs.
 use super::*;
 
 const PLAN_TTL_SECONDS: i64 = 15 * 60;
@@ -166,138 +166,31 @@ fn cached_evidence(connection: &Connection, channel: &str) -> Result<Evidence, S
     })
 }
 
-/// Explicit owner-authorized GETs; no inventory replacement or upload-job writes.
-/// The shared transport retains request observations and exact provider quota holds.
+/// Explicit owner-authorized inventory refresh, shared with upload admission.
+/// Only the canonical scoped inventory cache may change; no queue or provider writes.
 fn online_evidence(
     state: &AppState,
     channel: &str,
-    mut evidence: Evidence,
+    _evidence: Evidence,
 ) -> Result<Evidence, String> {
-    // Keep the reviewed token and request observations in one selected profile.
-    // This guard covers only explicit online reads, not local source hashing.
-    let _execution_guard = deletion_execution_lock(state).lock().map_err(|_| {
-        "The reviewed online preview is unavailable. No work was imported.".to_string()
-    })?;
-    require_channel(&readonly(state)?, channel)?;
-    let token = refreshed_access_token(state)?;
-    require_channel(&readonly(state)?, channel)?;
-    let payload = youtube_json(
-        state,
-        &token,
-        "channels",
-        &[("part", "contentDetails"), ("mine", "true")],
-    )?;
-    let own = payload
-        .get("items")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|rows| {
-            rows.iter()
-                .find(|row| row.get("id").and_then(serde_json::Value::as_str) == Some(channel))
-        })
-        .ok_or(
-            "Google did not confirm the reviewed channel. Reconnect before previewing online.",
-        )?;
-    let playlist = own
-        .pointer("/contentDetails/relatedPlaylists/uploads")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("YouTube did not return this channel's upload library.")?;
-    let mut ids = BTreeSet::new();
-    let mut page_tokens = HashSet::new();
-    let mut page_token = String::new();
-    for page in 0..512 {
-        let mut query = vec![
-            ("part", "contentDetails"),
-            ("playlistId", playlist),
-            ("maxResults", "50"),
-        ];
-        if !page_token.is_empty() {
-            query.push(("pageToken", page_token.as_str()));
-        }
-        require_channel(&readonly(state)?, channel)?;
-        let page_payload = youtube_json(state, &token, "playlistItems", &query)?;
-        let rows = page_payload
-            .get("items")
-            .and_then(serde_json::Value::as_array)
-            .ok_or("YouTube returned an incomplete library page.")?;
-        for row in rows {
-            let id = row
-                .pointer("/contentDetails/videoId")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("YouTube returned an incomplete video identity.")?;
-            ids.insert(id.to_string());
-        }
-        page_token = page_payload
-            .get("nextPageToken")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if page_token.is_empty() {
-            break;
-        }
-        if !page_tokens.insert(page_token.clone()) {
-            return Err(
-                "YouTube repeated a library page. The preview stopped without changing saved work."
-                    .into(),
-            );
-        }
-        if page == 511 {
-            return Err("This library exceeds the bounded online preview. Use cached evidence and refresh the library separately.".into());
-        }
-    }
-    let mut remote = Vec::new();
-    let ids: Vec<_> = ids.into_iter().collect();
-    for chunk in ids.chunks(50) {
-        let joined = chunk.join(",");
-        require_channel(&readonly(state)?, channel)?;
-        let payload = youtube_json(
-            state,
-            &token,
-            "videos",
-            &[("part", "snippet,status"), ("id", joined.as_str())],
-        )?;
-        let rows = payload
-            .get("items")
-            .and_then(serde_json::Value::as_array)
-            .ok_or("YouTube returned incomplete video evidence.")?;
-        for row in rows {
-            if !row
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| chunk.iter().any(|expected| expected == id))
-            {
-                return Err(
-                    "YouTube returned an unrequested video identity. Preview stopped safely."
-                        .into(),
-                );
-            }
-            if row
-                .pointer("/snippet/channelId")
-                .and_then(serde_json::Value::as_str)
-                != Some(channel)
-            {
-                return Err(
-                    "YouTube returned another channel's video. Preview stopped safely.".into(),
-                );
-            }
-            let id = row
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("YouTube returned an incomplete video identity.")?;
-            let title = row
-                .pointer("/snippet/title")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("YouTube returned an incomplete video title.")?;
-            let privacy = row
-                .pointer("/status/privacyStatus")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            remote.push((id.to_string(), title.to_string(), privacy.to_string()));
-        }
-    }
-    remote.sort();
-    evidence.remote = remote;
-    evidence.as_of = Some(now());
-    Ok(evidence)
+    online_evidence_with(state, channel, || refresh_upload_inventory(state, channel))
+}
+
+fn online_evidence_with(
+    state: &AppState,
+    channel: &str,
+    refresh: impl FnOnce() -> Result<usize, String>,
+) -> Result<Evidence, String> {
+    let connection = readonly(state)?;
+    require_channel(&connection, channel)?;
+    let binding = SelectedYouTubeReadBinding::capture(&connection)?;
+    // The coordinator owns credential serialization and verified refresh reuse.
+    // Do not take its execution lock again or crawl the same library separately.
+    refresh()?;
+    let connection = readonly(state)?;
+    require_channel(&connection, channel)?;
+    binding.require_current(&connection)?;
+    cached_evidence(&connection, channel)
 }
 
 fn fingerprint(evidence: &Evidence) -> Result<String, String> {
@@ -1232,8 +1125,10 @@ mod tests {
     }
 
     #[test]
-    fn upload_plan_online_refresh_is_explicit_and_never_updates_inventory_or_jobs() {
+    fn upload_plan_online_refresh_reuses_canonical_inventory_without_creating_jobs() {
         let (root, state, connection) = fixture();
+        connection.execute("UPDATE connection_settings SET oauth_client_id='fixture.apps.googleusercontent.com' WHERE singleton=1", []).unwrap();
+        connection.execute("INSERT INTO remote_videos(video_id,channel_name,channel_id,title,privacy_status,updated_at) VALUES('other','Other','channel-b','HIDDEN OTHER CHANNEL','public',?1)", [now()]).unwrap();
         let before = connection.total_changes();
         let refreshes = Cell::new(0);
         let owner_reads = Cell::new(0);
@@ -1246,11 +1141,12 @@ mod tests {
             choices,
             "channel-a",
             true,
-            |mut evidence| {
-                refreshes.set(refreshes.get() + 1);
-                evidence.remote = vec![("existing".into(), "fresh".into(), "private".into())];
-                evidence.as_of = Some("2026-10-13T01:02:03Z".into());
-                Ok(evidence)
+            |_| {
+                online_evidence_with(&state, "channel-a", || {
+                    refreshes.set(refreshes.get() + 1);
+                    connection.execute("INSERT INTO remote_videos(video_id,channel_name,channel_id,title,privacy_status,updated_at) VALUES('existing','Fixture','channel-a','fresh','private','2026-10-13T01:02:03Z')", []).unwrap();
+                    Ok(1)
+                })
             },
             |id| {
                 assert_eq!(id, "playlist-a");
@@ -1268,10 +1164,67 @@ mod tests {
             Some("Current owned title")
         );
         assert_eq!(plan.page.duplicate_files, 1);
-        assert_eq!(connection.total_changes(), before);
+        assert_eq!(
+            plan.page.evidence_as_of.as_deref(),
+            Some("2026-10-13T01:02:03Z")
+        );
+        assert!(!export_text(&plan).unwrap().contains("HIDDEN OTHER CHANNEL"));
+        assert!(connection.total_changes() > before);
         assert_eq!(
             connection
                 .query_row("SELECT COUNT(*) FROM remote_videos", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM upload_items", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM folder_monitors", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        finish(root, state, connection);
+    }
+
+    #[test]
+    fn upload_plan_shared_inventory_refresh_rejects_failure_channel_and_credential_changes() {
+        let (root, state, connection) = fixture();
+        connection.execute("UPDATE connection_settings SET oauth_client_id='fixture.apps.googleusercontent.com' WHERE singleton=1", []).unwrap();
+        assert_eq!(
+            online_evidence_with(&state, "channel-a", || Err("refresh failed".into()))
+                .err()
+                .unwrap(),
+            "refresh failed"
+        );
+        assert!(online_evidence_with(&state, "channel-b", || panic!(
+            "A mismatched channel must not refresh"
+        ))
+        .is_err());
+        assert!(online_evidence_with(&state, "channel-a", || {
+            connection.execute("UPDATE connection_settings SET active_channel_id='channel-b' WHERE singleton=1", []).unwrap();
+            Ok(0)
+        }).err().unwrap().contains("connected channel changed"));
+        connection
+            .execute(
+                "UPDATE connection_settings SET active_channel_id='channel-a' WHERE singleton=1",
+                [],
+            )
+            .unwrap();
+        assert!(online_evidence_with(&state, "channel-a", || {
+            connection.execute("UPDATE connection_settings SET oauth_credential_id='replacement-bundle' WHERE singleton=1", []).unwrap();
+            Ok(0)
+        }).err().unwrap().contains("selected YouTube account changed"));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM upload_items", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
             0

@@ -29,7 +29,6 @@ import {
   queueItem,
   reAuditIgnoredDuplicateCandidates,
   resolveUploadTitleDuplicates,
-  resumeQueuedUploads,
   setItemDeleteSourceAfterUpload,
   setItemVisibility,
   syncChannelInventory,
@@ -230,7 +229,7 @@ export default function App({
     initialStartup?.snapshot ?? emptySnapshot,
   );
   const [notice, setNotice] = useState(
-    "Local queue is ready. No media leaves this device except during a YouTube upload.",
+    "Local queue ready. Original files upload directly to YouTube.",
   );
   const [busy, setBusy] = useState(false);
   const [dedupeBusy, setDedupeBusy] = useState(false);
@@ -679,7 +678,7 @@ export default function App({
           ? ` ${receipt.failedCount} item${pluralS(receipt.failedCount)} need attention.${firstFailure ? ` ${firstFailure}` : ""}`
           : "";
         setNotice(
-          `${importNotice}${receipt.queuedCount > 0 ? " Uploads start automatically when capacity is available." : ""}${failuresNotice}`.trim(),
+          `${importNotice}${receipt.queuedCount > 0 ? " Uploads start when capacity and limits allow." : ""}${failuresNotice}`.trim(),
         );
       } catch (error) {
         await reportOperatorError(error, "import");
@@ -763,7 +762,7 @@ export default function App({
       const updated = await queueItem(item.id);
       updateSnapshotItem(updated);
       setNotice(
-        `${updated.fileName} is queued and will start automatically when capacity is available.`,
+        `${updated.fileName} is queued. Uploads start when capacity and limits allow.`,
       );
     } catch (error) {
       await reportOperatorError(error, "queue");
@@ -877,8 +876,6 @@ export default function App({
     try {
       const synced = await syncChannelInventory();
       if (generation !== stateChannelGenerationRef.current) return;
-      const started = await resumeQueuedUploads();
-      if (generation !== stateChannelGenerationRef.current) return;
       await refresh();
       if (generation !== stateChannelGenerationRef.current) return;
       const nextConnection = await loadConnectionSettings();
@@ -886,7 +883,7 @@ export default function App({
       updateConnection(nextConnection);
       setLibraryRefreshVersion((version) => version + 1);
       setNotice(
-        `Library refreshed: ${synced} YouTube video${pluralS(synced)} saved locally for ${channel}.${started > 0 ? ` ${started} queued upload${pluralS(started)} started.` : " Automatic upload dispatch was checked."}`,
+        `Library refreshed: ${synced} YouTube video${pluralS(synced)} saved locally for ${channel}. Eligible uploads resume automatically.`,
       );
     } catch (error) {
       await reportOperatorError(error, "library");

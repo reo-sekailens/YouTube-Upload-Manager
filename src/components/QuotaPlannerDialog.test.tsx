@@ -12,10 +12,10 @@ const estimate: QuotaEstimate = { snapshot, operations: [{ label: "New video upl
 
 describe("stepped quota operation planner", () => {
   beforeEach(() => { vi.resetAllMocks(); mocks.connection.mockResolvedValue({ connected: true, activeChannelId: "channel-a" }); mocks.load.mockResolvedValue(snapshot); mocks.estimate.mockResolvedValue(estimate); mocks.save.mockResolvedValue(snapshot); });
-  it("opens at Choices without provider calls or saved reference mutations", () => {
+  it("opens the Google report separately from local estimates without provider calls", () => {
     const markup = renderToStaticMarkup(<QuotaPlannerDialog expectedChannelId="channel-a" activeChannel="Channel A" initialChoices={{ uploads: 3 }} onClose={() => undefined} />);
-    expect(markup).toContain('aria-modal="true"'); expect(markup).toContain('aria-label="Quota planning steps"'); expect(markup).toContain("Choose operations to estimate"); expect(markup).toContain("Choices"); expect(markup).toContain("Estimate"); expect(markup).toContain("Review");
-    expect(markup).toContain("Actual remaining project quota and channel upload allowance stay unknown."); expect(markup).toContain("Loading local quota records");
+    expect(markup).toContain('aria-modal="true"'); expect(markup).toContain('aria-label="Quota report source"'); expect(markup).toContain("Check quota from Google"); expect(markup).toContain("Google report"); expect(markup).toContain("Local estimate"); expect(markup).not.toContain('aria-label="Quota planning steps"');
+    expect(markup).toContain("Usage samples can be delayed; channel upload allowance remains unknown."); expect(markup).toContain("Loading local quota records");
     expect(mocks.load).not.toHaveBeenCalled(); expect(mocks.estimate).not.toHaveBeenCalled(); expect(mocks.save).not.toHaveBeenCalled();
   });
   it("shows bucket costs as estimates and never presents local counts as remaining quota", () => {

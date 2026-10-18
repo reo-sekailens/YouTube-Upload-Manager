@@ -29,6 +29,10 @@ mod channel_profiles;
 mod desktop_presence;
 mod folder_monitors;
 mod folder_rules;
+#[cfg(test)]
+mod inventory_refresh_tests;
+mod inventory_sync;
+mod live_quota;
 mod media_preview;
 mod media_runtime;
 mod oauth_replacement;
@@ -56,6 +60,7 @@ mod upload_retry;
 mod upload_scheduler;
 mod video_assets;
 mod youtube_limits;
+mod youtube_read_cache;
 
 #[cfg(test)]
 use media_runtime::bundled_sidecar_path;
@@ -73,7 +78,6 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 const FOLDER_MONITOR_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPABILITY_CHECK_INTERVAL: ChronoDuration = ChronoDuration::days(3);
-const FOLDER_INVENTORY_REFRESH_INTERVAL: ChronoDuration = ChronoDuration::hours(6);
 const CAPABILITY_READ_SAMPLE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CONCURRENT_UPLOADS_PER_VOLUME: usize = 4;
 const MAX_CONCURRENT_UPLOAD_WORKERS: usize = 4;
@@ -262,6 +266,7 @@ enum OAuthAttemptKind {
     Connection,
     Deletion,
     Replacement,
+    CloudQuota,
 }
 
 fn cancel_connection_attempt(
@@ -364,7 +369,7 @@ struct BatchImportReceipt {
     detail: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct YouTubePlaylist {
     id: String,
     title: String,
@@ -2089,7 +2094,7 @@ fn complete_oauth_connection(
                 )
                 .map_err(user_error)?;
                 }
-                OAuthAttemptKind::Replacement => {
+                OAuthAttemptKind::Replacement | OAuthAttemptKind::CloudQuota => {
                     return Err("Use the reviewed credential replacement callback.".into())
                 }
             }
@@ -2460,13 +2465,22 @@ fn reconcile_source_cleanup_processing_from_inventory(
     channel_id: &str,
     processing_by_video_id: &HashMap<String, SourceCleanupProcessing>,
 ) -> Result<(), String> {
+    reconcile_source_cleanup_processing_for_item(state, channel_id, processing_by_video_id, None)
+}
+
+fn reconcile_source_cleanup_processing_for_item(
+    state: &AppState,
+    channel_id: &str,
+    processing_by_video_id: &HashMap<String, SourceCleanupProcessing>,
+    only_item: Option<&str>,
+) -> Result<(), String> {
     let connection = database(state)?;
     let candidates = connection
         .prepare(
-            "SELECT id, video_id, source_delete_status FROM upload_items WHERE channel_id = ?1 AND status = 'uploaded' AND delete_source_after_upload = 1 AND source_delete_status IN ('pending', 'waiting_for_youtube_processing') ORDER BY updated_at ASC, id ASC",
+            "SELECT id, video_id, source_delete_status FROM upload_items WHERE channel_id = ?1 AND (?2 IS NULL OR id=?2) AND status = 'uploaded' AND delete_source_after_upload = 1 AND source_delete_status IN ('pending', 'waiting_for_youtube_processing') ORDER BY updated_at ASC, id ASC",
         )
         .map_err(user_error)?
-        .query_map([channel_id], |row| {
+        .query_map(params![channel_id,only_item], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
@@ -2670,18 +2684,22 @@ fn finalize_confirmed_source_cleanup(state: &AppState, item_id: &str) -> Result<
 }
 
 /// An explicit, typed post-upload cleanup request. The native boundary waits
-/// for a fresh YouTube inventory read to verify processing before it can mark
+/// for a fresh targeted YouTube read to verify processing before it can mark
 /// the source for the same guarded cleanup used by the opt-in automatic mode.
 fn delete_uploaded_source_impl(
     state: &AppState,
     item_id: &str,
     confirmation: &str,
 ) -> Result<(), String> {
+    let _execution_guard = deletion_execution_lock(state)
+        .lock()
+        .map_err(|_| "YouTube source verification is unavailable.".to_string())?;
+    let binding = SelectedYouTubeReadBinding::capture(&database(state)?)?;
     let connection = database(state)?;
     let (status, file_name): (String, String) = connection
         .query_row(
-            "SELECT status, file_name FROM upload_items WHERE id = ?1",
-            [item_id],
+            "SELECT status, file_name FROM upload_items WHERE id = ?1 AND channel_id = ?2",
+            params![item_id, binding.channel_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
@@ -2700,8 +2718,8 @@ fn delete_uploaded_source_impl(
     }
     connection
         .execute(
-            "UPDATE upload_items SET source_delete_status = 'pending', updated_at = ?1 WHERE id = ?2 AND status = 'uploaded'",
-            params![now(), item_id],
+            "UPDATE upload_items SET source_delete_status = 'pending', updated_at = ?1 WHERE id = ?2 AND status = 'uploaded' AND channel_id = ?3",
+            params![now(), item_id, binding.channel_id],
         )
         .map_err(user_error)?;
     audit(
@@ -2711,7 +2729,72 @@ fn delete_uploaded_source_impl(
         "Operator requested original-source cleanup; YouTube processing must succeed before deletion.",
     )?;
     drop(connection);
-    sync_channel_inventory_worker(state).map(|_| ())
+    require_youtube_read_admission(state)?;
+    let token = refreshed_access_token(state)?;
+    if active_channel_id(state, &token)? != binding.channel_id {
+        return Err(
+            "The protected credential no longer matches the reviewed source's channel.".into(),
+        );
+    }
+    verify_source_cleanup_processing_with(state, item_id, &binding, |path, query| {
+        youtube_json(state, &token, path, query)
+    })
+}
+
+fn verify_source_cleanup_processing_with(
+    state: &AppState,
+    item_id: &str,
+    binding: &SelectedYouTubeReadBinding,
+    mut fetch: impl FnMut(&str, &[(&str, &str)]) -> Result<serde_json::Value, String>,
+) -> Result<(), String> {
+    binding.require_current(&database(state)?)?;
+    require_youtube_read_admission(state)?;
+    let video_id: String = database(state)?
+        .query_row(
+            "SELECT video_id FROM upload_items WHERE id=?1 AND status='uploaded' AND channel_id=?2",
+            params![item_id, binding.channel_id],
+            |row| row.get(0),
+        )
+        .map_err(user_error)?;
+    let payload = fetch(
+        "videos",
+        &[
+            ("part", "snippet,status,processingDetails"),
+            ("id", &video_id),
+        ],
+    )?;
+    binding.require_current(&database(state)?)?;
+    let videos = payload
+        .get("items")
+        .and_then(|v| v.as_array())
+        .ok_or("YouTube returned an invalid processing check; the source was retained.")?;
+    if videos.len() != 1
+        || videos[0].get("id").and_then(|v| v.as_str()) != Some(video_id.as_str())
+        || videos[0]
+            .pointer("/snippet/channelId")
+            .and_then(|v| v.as_str())
+            != Some(binding.channel_id.as_str())
+    {
+        return Err(
+            "YouTube did not confirm this video on its reviewed channel; the source was retained."
+                .into(),
+        );
+    }
+    upload_completion::record_processing_from_inventory(
+        &database(state)?,
+        &binding.channel_id,
+        &videos[0],
+    )?;
+    let processing = HashMap::from([(video_id, source_cleanup_processing(&videos[0]))]);
+    reconcile_source_cleanup_processing_for_item(
+        state,
+        &binding.channel_id,
+        &processing,
+        Some(item_id),
+    )?;
+    // Recording fresh processing can already advance this receipt to verified.
+    // Complete only this approved target, including that idempotent transition.
+    finalize_confirmed_source_cleanup(state, item_id)
 }
 
 fn begin_upload_transfer(
@@ -3770,6 +3853,7 @@ fn youtube_json(
     path: &str,
     query: &[(&str, &str)],
 ) -> Result<serde_json::Value, String> {
+    require_youtube_read_admission(state)?;
     let captured = database(state).ok().and_then(|connection| {
         Some((
             connection_settings(&connection).ok()?.active_channel_id?,
@@ -3794,13 +3878,15 @@ fn youtube_json(
             == Some(youtube_limits::UploadLimitKind::ApiQuota)
         {
             if let Some((channel, scope)) = captured {
-                let _ = oauth_replacement::record_scoped_api_pause(
+                if let Ok(until) = oauth_replacement::record_scoped_api_pause(
                     state,
                     &channel,
                     &scope,
                     None,
                     youtube_limits::includes_channel_limit(status, &body),
-                );
+                ) {
+                    return Err(oauth_replacement::api_pause_detail(&until));
+                }
             }
         }
         return Err(youtube_inventory_http_error(status));
@@ -3845,7 +3931,9 @@ fn youtube_inventory_http_error(status: u16) -> String {
 /// into diagnostics. Keep their classifications actionable but never persist a
 /// raw credential-store, filesystem, or provider response error.
 fn safe_folder_monitor_inventory_failure(error: &str) -> &'static str {
-    if error.contains("no longer has a YouTube credential") {
+    if error.starts_with("Google Cloud API quota") {
+        "Google Cloud API quota is paused. Automatic reads wait for the saved reset; approved source files and queue entries remain retained."
+    } else if error.contains("no longer has a YouTube credential") {
         "This device no longer has a saved YouTube credential. Reconnect YouTube, then retry the scan."
     } else if error.contains("invalid_grant") {
         "Google rejected the saved sign-in (invalid_grant). Reconnect YouTube, then retry the scan."
@@ -3965,18 +4053,26 @@ fn replace_inventory_from_staging(
 /// refreshes. A five-second local folder poll must never become a five-second
 /// full YouTube library crawl.
 fn folder_inventory_refresh_due(connection: &Connection, channel_id: &str) -> Result<bool, String> {
-    let newest: Option<String> = connection
-        .query_row(
-            "SELECT MAX(updated_at) FROM remote_videos WHERE channel_id = ?1",
-            [channel_id],
-            |row| row.get(0),
+    let Ok(binding) = SelectedYouTubeReadBinding::capture(connection) else {
+        return Ok(true);
+    };
+    if binding.channel_id != channel_id {
+        return Ok(true);
+    }
+    let checkpoint: Option<InventoryReadCheckpoint> =
+        youtube_read_cache::load(connection, "inventory", &binding.cache_key()?)?;
+    let time = Utc::now();
+    Ok(checkpoint.is_none_or(|checkpoint| {
+        !recent_read(
+            checkpoint.checked_at.as_deref(),
+            time,
+            ChronoDuration::minutes(15),
+        ) || !recent_read(
+            checkpoint.full_synced_at.as_deref(),
+            time,
+            ChronoDuration::hours(24),
         )
-        .map_err(user_error)?;
-    Ok(newest
-        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
-        .is_none_or(|timestamp| {
-            timestamp.with_timezone(&Utc) + FOLDER_INVENTORY_REFRESH_INTERVAL <= Utc::now()
-        }))
+    }))
 }
 
 /// A complete authenticated inventory read is also a repair boundary for old
@@ -4041,6 +4137,16 @@ struct SelectedYouTubeReadBinding {
 }
 
 impl SelectedYouTubeReadBinding {
+    fn cache_key(&self) -> Result<String, String> {
+        let metadata = serde_json::to_vec(&(
+            &self.channel_id,
+            &self.client_id,
+            &self.credential_bundle,
+            &self.project_id,
+        ))
+        .map_err(user_error)?;
+        Ok(blake3::hash(&metadata).to_hex().to_string())
+    }
     fn capture(connection: &Connection) -> Result<Self, String> {
         let channel_id = connection_settings(connection)?
             .active_channel_id
@@ -4285,9 +4391,100 @@ mod youtube_quota_coverage_tests {
     }
 }
 
+#[derive(Default, Serialize, Deserialize)]
+struct InventoryReadCheckpoint {
+    uploads_playlist: Option<String>,
+    channel_name: Option<String>,
+    checked_at: Option<String>,
+    full_synced_at: Option<String>,
+    retry_after: Option<String>,
+    #[serde(default)]
+    failures: u8,
+}
+
+fn recent_read(value: Option<&str>, time: DateTime<Utc>, age: ChronoDuration) -> bool {
+    value
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .is_some_and(|value| {
+            value.with_timezone(&Utc) <= time && value.with_timezone(&Utc) + age > time
+        })
+}
+
+fn inventory_count(connection: &Connection, channel: &str) -> Result<usize, String> {
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM remote_videos WHERE channel_id=?1",
+            [channel],
+            |row| row.get(0),
+        )
+        .map_err(user_error)
+}
+
+fn inventory_retry_deadline(
+    connection: &Connection,
+    channel: &str,
+    time: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, String> {
+    let Ok(binding) = SelectedYouTubeReadBinding::capture(connection) else {
+        return Ok(None);
+    };
+    if binding.channel_id != channel {
+        return Ok(None);
+    }
+    let checkpoint: Option<InventoryReadCheckpoint> =
+        youtube_read_cache::load(connection, "inventory", &binding.cache_key()?)?;
+    let Some(checkpoint) = checkpoint else {
+        return Ok(None);
+    };
+    if recent_read(
+        checkpoint.checked_at.as_deref(),
+        time,
+        ChronoDuration::minutes(15),
+    ) && recent_read(
+        checkpoint.full_synced_at.as_deref(),
+        time,
+        ChronoDuration::hours(24),
+    ) {
+        return Ok(None);
+    }
+    Ok(checkpoint
+        .retry_after
+        .as_deref()
+        .and_then(|until| DateTime::parse_from_rfc3339(until).ok())
+        .map(|until| until.with_timezone(&Utc))
+        .filter(|until| *until > time))
+}
+
+fn require_youtube_read_admission(state: &AppState) -> Result<(), String> {
+    if let Some(until) = oauth_replacement::active_api_pause(&database(state)?)? {
+        return Err(oauth_replacement::api_pause_detail(&until));
+    }
+    Ok(())
+}
+
 fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
-    // Every selected-profile mutation takes this guard before its credential
-    // guard, so all pages use one credential identity and one quota scope.
+    run_inventory_refresh(state, true, None, |path, query| {
+        let token = refreshed_access_token(state)?;
+        youtube_json(state, &token, path, query)
+    })
+}
+
+/// All automatic consumers share this bounded-freshness snapshot, including
+/// reviewed plan evidence. An explicit library refresh still reads every page.
+fn refresh_upload_inventory(state: &AppState, expected_channel: &str) -> Result<usize, String> {
+    run_inventory_refresh(state, false, Some(expected_channel), |path, query| {
+        let token = refreshed_access_token(state)?;
+        youtube_json(state, &token, path, query)
+    })
+}
+
+fn run_inventory_refresh(
+    state: &AppState,
+    force_full: bool,
+    expected_channel: Option<&str>,
+    mut fetch: impl FnMut(&str, &[(&str, &str)]) -> Result<serde_json::Value, String>,
+) -> Result<usize, String> {
+    let requested_at = Utc::now();
     let _management_guard = deletion_execution_lock(state)
         .lock()
         .map_err(|_| "YouTube account refresh is unavailable.".to_string())?;
@@ -4295,200 +4492,188 @@ fn sync_channel_inventory_worker(state: &AppState) -> Result<usize, String> {
         .lock()
         .map_err(|_| "The local YouTube library refresh lock is unavailable.".to_string())?;
     let binding = SelectedYouTubeReadBinding::capture(&database(state)?)?;
-    let access_token = refreshed_access_token(state)?;
-    binding.require_current(&database(state)?)?;
-    let channel_response = youtube_json(
-        state,
-        &access_token,
-        "channels",
-        &[("part", "contentDetails,snippet"), ("mine", "true")],
-    )?;
-    let channel = channel_response
-        .get("items")
-        .and_then(|value| value.as_array())
-        .and_then(|items| items.first())
-        .ok_or_else(|| "No YouTube channel was returned for this account.".to_string())?;
-    let channel_name = channel
-        .pointer("/snippet/title")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| "YouTube did not return a channel name.".to_string())?;
-    let channel_id = channel
-        .get("id")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "YouTube did not return an immutable channel identity.".to_string())?;
-    if channel_id != binding.channel_id {
-        return Err("The protected YouTube credential no longer matches the selected channel. Reconnect that account before refreshing its library.".into());
+    if expected_channel.is_some_and(|expected| expected != binding.channel_id) {
+        return Err("The reviewed YouTube channel changed before its inventory read.".into());
     }
-    let uploads_playlist = channel
-        .pointer("/contentDetails/relatedPlaylists/uploads")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| "YouTube did not return an uploads playlist.".to_string())?;
-    let mut connection = database(state)?;
-    let sync_id = Uuid::new_v4().to_string();
-    clear_stale_inventory_staging(&connection, channel_id)?;
-    let mut processing_by_video_id = HashMap::<String, SourceCleanupProcessing>::new();
-    let mut next_page: Option<String> = None;
-    loop {
-        let mut query = vec![
-            ("part", "contentDetails"),
-            ("playlistId", uploads_playlist),
-            ("maxResults", "50"),
-        ];
-        if let Some(page) = next_page.as_deref() {
-            query.push(("pageToken", page));
-        }
-        let playlist = youtube_json(state, &access_token, "playlistItems", &query)?;
-        let ids = playlist
-            .get("items")
-            .and_then(|value| value.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|item| {
-                item.pointer("/contentDetails/videoId")
-                    .and_then(|value| value.as_str())
-            })
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        for ids in ids.chunks(50) {
-            let joined = ids.join(",");
-            let videos = youtube_json(
-                state,
-                &access_token,
-                "videos",
-                &[
-                    ("part", "snippet,contentDetails,status,processingDetails"),
-                    ("id", joined.as_str()),
-                ],
-            )?;
-            for video in videos
-                .get("items")
-                .and_then(|value| value.as_array())
-                .into_iter()
-                .flatten()
-            {
-                if let Some(video_id) = video.get("id").and_then(|value| value.as_str()) {
-                    processing_by_video_id
-                        .insert(video_id.to_string(), source_cleanup_processing(video));
-                    upload_completion::record_processing_from_inventory(
-                        &connection,
-                        channel_id,
-                        video,
-                    )?;
-                }
-            }
-            let staged_videos = videos
-                .get("items")
-                .and_then(|value| value.as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|video| {
-                    Some((
-                        video.get("id")?.as_str()?.to_string(),
-                        video.pointer("/snippet/title")?.as_str()?.to_string(),
-                        video
-                            .pointer("/contentDetails/duration")
-                            .and_then(|value| value.as_str())
-                            .map(str::to_string),
-                        video
-                            .pointer("/status/privacyStatus")
-                            .and_then(|value| value.as_str())
-                            .map(str::to_string),
-                        video
-                            .pointer("/status/uploadStatus")
-                            .and_then(|value| value.as_str())
-                            .map(str::to_string),
-                    ))
-                })
-                .collect::<Vec<_>>();
-            let transaction = connection.transaction().map_err(user_error)?;
-            {
-                let mut insert = transaction.prepare_cached("INSERT INTO remote_video_sync_staging (sync_id, video_id, channel_name, channel_id, title, normalized_title, canonical_title, has_copy_marker, numeric_title_key, title_keys_version, duration, privacy_status, upload_status, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) ON CONFLICT(sync_id, video_id) DO UPDATE SET channel_name = excluded.channel_name, channel_id = excluded.channel_id, title = excluded.title, normalized_title = excluded.normalized_title, canonical_title = excluded.canonical_title, has_copy_marker = excluded.has_copy_marker, numeric_title_key = excluded.numeric_title_key, title_keys_version = excluded.title_keys_version, duration = excluded.duration, privacy_status = excluded.privacy_status, upload_status = excluded.upload_status, updated_at = excluded.updated_at").map_err(user_error)?;
-                let timestamp = now();
-                for (video_id, title, duration, privacy, upload_status) in staged_videos {
-                    let keys = title_matching::keys(&title);
-                    insert
-                        .execute(params![
-                            &sync_id,
-                            video_id,
-                            channel_name,
-                            channel_id,
-                            title,
-                            keys.normalized,
-                            keys.canonical,
-                            keys.has_copy_marker as i64,
-                            keys.numeric,
-                            title_matching::TITLE_KEYS_VERSION,
-                            duration,
-                            privacy,
-                            upload_status,
-                            &timestamp,
-                        ])
-                        .map_err(user_error)?;
-                }
-            }
-            transaction.commit().map_err(user_error)?;
-        }
-        next_page = playlist
-            .get("nextPageToken")
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-        if next_page.is_none() {
-            break;
-        }
+    let key = binding.cache_key()?;
+    let mut checkpoint: InventoryReadCheckpoint =
+        youtube_read_cache::load(&database(state)?, "inventory", &key)?.unwrap_or_default();
+    let time = Utc::now();
+    let full_is_current = recent_read(
+        checkpoint.full_synced_at.as_deref(),
+        time,
+        ChronoDuration::hours(24),
+    );
+    let joined_full = checkpoint
+        .full_synced_at
+        .as_deref()
+        .and_then(|saved| DateTime::parse_from_rfc3339(saved).ok())
+        .is_some_and(|saved| {
+            saved.with_timezone(&Utc) >= requested_at && saved.with_timezone(&Utc) <= time
+        });
+    if (!force_full
+        && full_is_current
+        && recent_read(
+            checkpoint.checked_at.as_deref(),
+            time,
+            ChronoDuration::minutes(15),
+        ))
+        || (force_full && joined_full)
+    {
+        binding.require_current(&database(state)?)?;
+        return inventory_count(&database(state)?, &binding.channel_id);
     }
-    let count = connection
-        .query_row(
-            "SELECT COUNT(*) FROM remote_video_sync_staging WHERE sync_id = ?1 AND channel_id = ?2",
-            params![&sync_id, channel_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(user_error)? as usize;
-    let processed_count = connection
-        .query_row(
-            "SELECT COUNT(*) FROM remote_video_sync_staging WHERE sync_id = ?1 AND channel_id = ?2 AND upload_status = 'processed'",
-            params![&sync_id, channel_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(user_error)? as usize;
-    let confirmed_video_ids = connection
-        .prepare(
-            "SELECT video_id FROM remote_video_sync_staging WHERE sync_id = ?1 AND channel_id = ?2",
-        )
+    require_youtube_read_admission(state)?;
+    if checkpoint
+        .retry_after
+        .as_deref()
+        .and_then(|saved| DateTime::parse_from_rfc3339(saved).ok())
+        .is_some_and(|saved| saved.with_timezone(&Utc) > time)
+    {
+        return Err("YouTube library reads are briefly backed off after a failed request. The last complete local snapshot is retained; retry shortly.".into());
+    }
+    let full = force_full
+        || !full_is_current
+        || checkpoint.uploads_playlist.is_none()
+        || checkpoint.channel_name.is_none();
+    let connection = database(state)?;
+    let known = connection
+        .prepare("SELECT video_id,title FROM remote_videos WHERE channel_id=?1")
         .map_err(user_error)?
-        .query_map(params![&sync_id, channel_id], |row| row.get::<_, String>(0))
+        .query_map([&binding.channel_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(user_error)?
-        .collect::<Result<HashSet<_>, _>>()
+        .collect::<Result<HashMap<_, _>, _>>()
         .map_err(user_error)?;
-    // Keep the last complete inventory until every remote page has been read.
-    // A crash or network failure therefore leaves a usable, coherent snapshot.
     drop(connection);
-    replace_inventory_from_staging(state, channel_id, &sync_id)?;
-    let repaired =
-        reconcile_uploaded_items_from_live_inventory(state, channel_id, &confirmed_video_ids)?;
-    reconcile_source_cleanup_processing_from_inventory(state, channel_id, &processing_by_video_id)?;
-    let _ = ensure_upload_postprocess_worker(state.clone());
+    let identity = checkpoint
+        .uploads_playlist
+        .as_deref()
+        .zip(checkpoint.channel_name.as_deref());
+    let result = inventory_sync::read(
+        &binding.channel_id,
+        identity,
+        &known,
+        if full {
+            inventory_sync::RefreshMode::Full
+        } else {
+            inventory_sync::RefreshMode::Recent
+        },
+        |path, query| {
+            binding.require_current(&database(state)?)?;
+            require_youtube_read_admission(state)?;
+            let value = fetch(path, query)?;
+            binding.require_current(&database(state)?)?;
+            Ok(value)
+        },
+    );
+    let snapshot = match result {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            // A failed read never makes old evidence fresh. Persist only a
+            // bounded retry time, not provider diagnostics, tokens or payloads.
+            if binding.require_current(&database(state)?).is_ok() {
+                let wait = (60_i64 * (1_i64 << checkpoint.failures.min(4))).min(900);
+                checkpoint.failures = checkpoint.failures.saturating_add(1);
+                checkpoint.retry_after =
+                    Some((Utc::now() + ChronoDuration::seconds(wait)).to_rfc3339());
+                let _ = youtube_read_cache::save(&database(state)?, "inventory", &key, &checkpoint);
+            }
+            return Err(error);
+        }
+    };
+    binding.require_current(&database(state)?)?;
+    let channel_id = &binding.channel_id;
+    let sync_id = Uuid::new_v4().to_string();
+    let mut connection = database(state)?;
+    clear_stale_inventory_staging(&connection, channel_id)?;
+    let mut processing = HashMap::new();
+    {
+        let transaction = connection.transaction().map_err(user_error)?;
+        let timestamp = now();
+        for video in &snapshot.videos {
+            let id = video
+                .get("id")
+                .and_then(|value| value.as_str())
+                .ok_or("YouTube omitted a video identity.")?;
+            let title = video
+                .pointer("/snippet/title")
+                .and_then(|value| value.as_str())
+                .ok_or("YouTube omitted a video title.")?;
+            let keys = title_matching::keys(title);
+            transaction.execute("INSERT INTO remote_video_sync_staging(sync_id,video_id,channel_name,channel_id,title,normalized_title,canonical_title,has_copy_marker,numeric_title_key,title_keys_version,duration,privacy_status,upload_status,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",params![sync_id,id,snapshot.channel_name,channel_id,title,keys.normalized,keys.canonical,keys.has_copy_marker as i64,keys.numeric,title_matching::TITLE_KEYS_VERSION,video.pointer("/contentDetails/duration").and_then(|v|v.as_str()),video.pointer("/status/privacyStatus").and_then(|v|v.as_str()),video.pointer("/status/uploadStatus").and_then(|v|v.as_str()),timestamp]).map_err(user_error)?;
+            processing.insert(id.to_string(), source_cleanup_processing(video));
+            upload_completion::record_processing_from_inventory(&transaction, channel_id, video)?;
+        }
+        transaction.commit().map_err(user_error)?;
+    }
+    drop(connection);
+    if snapshot.complete {
+        // Only a full traversal can interpret absence as a missing video.
+        let ids = snapshot
+            .videos
+            .iter()
+            .filter_map(|v| v.get("id").and_then(|v| v.as_str()).map(str::to_string))
+            .collect::<HashSet<_>>();
+        replace_inventory_from_staging(state, channel_id, &sync_id)?;
+        reconcile_uploaded_items_from_live_inventory(state, channel_id, &ids)?;
+        reconcile_source_cleanup_processing_from_inventory(state, channel_id, &processing)?;
+    } else {
+        merge_inventory_from_staging(state, channel_id, &sync_id)?;
+    }
+    binding.require_current(&database(state)?)?;
+    let completed = now();
+    checkpoint.uploads_playlist = Some(snapshot.uploads_playlist);
+    checkpoint.channel_name = Some(snapshot.channel_name.clone());
+    checkpoint.checked_at = Some(completed.clone());
+    checkpoint.retry_after = None;
+    checkpoint.failures = 0;
+    if snapshot.complete {
+        checkpoint.full_synced_at = Some(completed);
+    }
+    youtube_read_cache::save(&database(state)?, "inventory", &key, &checkpoint)?;
+    let count = inventory_count(&database(state)?, channel_id)?;
     binding.save_inventory_detail(
         &database(state)?,
-        channel_name,
-        &format!("Synced {count} YouTube video records locally; {processed_count} fully processed videos are eligible for duplicate checks."),
+        &snapshot.channel_name,
+        if snapshot.complete {
+            "Complete YouTube inventory refreshed and saved locally."
+        } else {
+            "Recent YouTube changes checked; the complete local inventory was retained."
+        },
     )?;
-    let connection = database(state)?;
-    audit_global(
-        &connection,
-        "youtube_inventory_synced",
-        "Channel upload inventory synced locally",
-    )?;
-    if repaired > 0 {
-        audit_global(
-            &connection,
-            "youtube_upload_receipts_reconciled",
-            &format!("{repaired} completed upload receipt(s) were moved to reconciliation after YouTube did not confirm their video IDs"),
-        )?;
-    }
-    drop(connection);
+    audit_global(&database(state)?,if snapshot.complete { "youtube_inventory_synced" } else { "youtube_inventory_recent_checked" },"Verified channel inventory metadata refreshed; automatic checks reuse the bounded local snapshot")?;
     let _ = ensure_upload_postprocess_worker(state.clone());
     Ok(count)
+}
+
+fn merge_inventory_from_staging(
+    state: &AppState,
+    channel: &str,
+    sync_id: &str,
+) -> Result<(), String> {
+    let mut connection = database(state)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(user_error)?;
+    let foreign:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM remote_video_sync_staging s JOIN remote_videos r ON r.video_id=s.video_id WHERE s.sync_id=?1 AND s.channel_id=?2 AND r.channel_id IS NOT ?2)",params![sync_id,channel],|row|row.get(0)).map_err(user_error)?;
+    if foreign {
+        return Err("A recent inventory record conflicts with another channel. The prior snapshot was retained.".into());
+    }
+    let changed=transaction.execute("INSERT INTO remote_videos(video_id,channel_name,channel_id,title,normalized_title,canonical_title,has_copy_marker,numeric_title_key,title_keys_version,duration,privacy_status,upload_status,updated_at) SELECT video_id,channel_name,channel_id,title,normalized_title,canonical_title,has_copy_marker,numeric_title_key,title_keys_version,duration,privacy_status,upload_status,updated_at FROM remote_video_sync_staging WHERE sync_id=?1 AND channel_id=?2 ON CONFLICT(video_id) DO UPDATE SET channel_name=excluded.channel_name,title=excluded.title,normalized_title=excluded.normalized_title,canonical_title=excluded.canonical_title,has_copy_marker=excluded.has_copy_marker,numeric_title_key=excluded.numeric_title_key,title_keys_version=excluded.title_keys_version,duration=excluded.duration,privacy_status=excluded.privacy_status,upload_status=excluded.upload_status,updated_at=excluded.updated_at",params![sync_id,channel]).map_err(user_error)?;
+    transaction
+        .execute(
+            "DELETE FROM remote_video_sync_staging WHERE sync_id=?1 AND channel_id=?2",
+            params![sync_id, channel],
+        )
+        .map_err(user_error)?;
+    if changed > 0 {
+        transaction.execute("INSERT INTO channel_generations(channel_id,inventory_generation,upload_generation,updated_at) VALUES(?1,1,0,?2) ON CONFLICT(channel_id) DO UPDATE SET inventory_generation=inventory_generation+1,updated_at=excluded.updated_at",params![channel,now()]).map_err(user_error)?;
+        state_events::record_invalidation(&transaction, channel, "inventory", channel, "merge")?;
+        state_events::record_invalidation(&transaction, channel, "dedupe", channel, "invalidate")?;
+    }
+    transaction.commit().map_err(user_error)
 }
 
 fn await_oauth_callback(
@@ -4934,7 +5119,7 @@ struct RemoteTitleIndex {
 impl RemoteTitleIndex {
     fn load(connection: &Connection, channel_id: &str) -> Result<Self, String> {
         ensure_remote_title_keys(connection, channel_id)?;
-        let titles = connection
+        let mut titles = connection
             .prepare(
                 "SELECT title, duration, privacy_status, updated_at, normalized_title, canonical_title, has_copy_marker, numeric_title_key, video_id FROM remote_videos WHERE channel_id = ?1 AND upload_status = 'processed' ORDER BY video_id ASC",
             )
@@ -4954,6 +5139,51 @@ impl RemoteTitleIndex {
             .map_err(user_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(user_error)?;
+        // A warm provider snapshot predates uploads completed by this app.
+        // Reuse their confirmed, channel-scoped receipts as title-review
+        // evidence immediately, without another library crawl. An authoritative
+        // processed inventory row takes precedence over the local saved title.
+        let local = connection
+            .prepare("SELECT title,visibility,updated_at,video_id FROM upload_items WHERE channel_id=?1 AND status='uploaded' AND total_bytes>0 AND confirmed_bytes=total_bytes AND video_id IS NOT NULL ORDER BY updated_at DESC,id")
+            .map_err(user_error)?
+            .query_map([channel_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(user_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(user_error)?;
+        let mut represented = titles
+            .iter()
+            .map(|title| title.video_id.clone())
+            .collect::<HashSet<_>>();
+        for (title, visibility, updated_at, video_id) in local {
+            if video_id.is_empty()
+                || video_id.len() > 128
+                || !video_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+                || title.trim().is_empty()
+                || !represented.insert(video_id.clone())
+            {
+                continue;
+            }
+            let keys = title_matching::keys(&title);
+            titles.push(IndexedRemoteTitle {
+                video_id,
+                title,
+                duration: None,
+                privacy_status: Some(visibility),
+                updated_at,
+                normalized: keys.normalized,
+                canonical: keys.canonical,
+                numeric: keys.numeric,
+            });
+        }
         let mut index = Self {
             titles,
             normalized: HashMap::new(),
@@ -5090,7 +5320,13 @@ fn check_upload_title_duplicates_impl(
     if !settings.connected {
         return Err("Connect a YouTube channel before checking uploaded titles.".into());
     }
-    sync_channel_inventory_worker(state)?;
+    refresh_upload_inventory(
+        state,
+        settings
+            .active_channel_id
+            .as_deref()
+            .ok_or("Connect a YouTube channel before checking uploaded titles.")?,
+    )?;
     let connection = database(state)?;
     let active_channel_id = connection_settings(&connection)?
         .active_channel_id
@@ -5337,7 +5573,7 @@ fn run_preflight_scan_job(
     } else if mode == "deep" && connection_settings(&connection)?.connected {
         connection.execute("UPDATE preflight_scan_jobs SET status = 'syncing', inventory_status = 'syncing', updated_at = ?1 WHERE id = ?2", params![now(), job_id]).map_err(user_error)?;
         drop(connection);
-        match sync_channel_inventory_worker(state) {
+        match refresh_upload_inventory(state,&job_channel_id) {
             Ok(_) => database(state)?.execute("UPDATE preflight_scan_jobs SET status = 'materializing', inventory_status = 'complete', updated_at = ?1 WHERE id = ?2", params![now(), job_id]).map_err(user_error)?,
             Err(error) => database(state)?.execute("UPDATE preflight_scan_jobs SET status = 'materializing', inventory_status = 'failed', detail = ?1, updated_at = ?2 WHERE id = ?3", params![format!("YouTube titles were not refreshed: {error}"), now(), job_id]).map_err(user_error)?,
         };
@@ -7705,7 +7941,7 @@ fn scan_folder_monitor_locked_for(
                     && !inventory_synced
                     && folder_inventory_refresh_due(&connection, channel_id)?
                 {
-                    if let Err(error) = sync_channel_inventory_worker(state) {
+                    if let Err(error) = refresh_upload_inventory(state, channel_id) {
                         let detail = format!(
                             "YouTube library refresh failed before watched-folder upload: {}",
                             safe_folder_monitor_inventory_failure(&error)
@@ -7721,12 +7957,14 @@ fn scan_folder_monitor_locked_for(
                             None,
                             None,
                         )?;
-                        folder_monitors::audit_monitor(
-                            &connection,
-                            monitor_id,
-                            "folder_monitor_inventory_sync_failed",
-                            &detail,
-                        )?;
+                        if settings.status != "error" || settings.detail != detail {
+                            folder_monitors::audit_monitor(
+                                &connection,
+                                monitor_id,
+                                "folder_monitor_inventory_sync_failed",
+                                &detail,
+                            )?;
+                        }
                         return folder_monitors::update_result(
                             &connection,
                             monitor_id,
@@ -8267,8 +8505,14 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
         .ok_or_else(|| {
             "The active YouTube connection has no immutable channel identity.".to_string()
         })?;
+    expire_upload_admission_pauses(&connection, Utc::now())?;
     if let Some((_, detail)) = upload_admission_delay(state, Utc::now(), true)? {
         persist_queued_upload_hold(&connection, active_channel_id, &detail)?;
+        ensure_quota_resume_worker(state.clone())?;
+        return Ok(0);
+    }
+    if let Some(until) = inventory_retry_deadline(&connection, active_channel_id, Utc::now())? {
+        persist_queued_upload_hold(&connection,active_channel_id,&format!("YouTube library read retry is scheduled for {until}. Original sources and saved upload checkpoints are retained."))?;
         ensure_quota_resume_worker(state.clone())?;
         return Ok(0);
     }
@@ -8369,10 +8613,15 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
             .map(|candidate| candidate.item_id)
             .collect::<HashSet<_>>(),
         Err(error) => {
+            let hold = upload_admission_delay(state, Utc::now(), true)
+                .ok()
+                .flatten()
+                .map(|(_, detail)| detail);
+            let detail=hold.unwrap_or_else(||"Waiting for the native light duplicate check; failed library reads retry automatically with backoff.".into());
             for item_id in &item_ids {
                 let _ = connection.execute(
-                    "UPDATE upload_items SET detail = 'Waiting for the native light duplicate check before upload.', updated_at = ?1 WHERE id = ?2 AND status = 'queued'",
-                    params![now(), item_id],
+                    "UPDATE upload_items SET detail = ?3, updated_at = ?1 WHERE id = ?2 AND status = 'queued' AND detail IS NOT ?3",
+                    params![now(), item_id,detail],
                 );
                 let _ = audit(
                     &connection,
@@ -8381,6 +8630,7 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
                     "Native light duplicate check did not complete; upload was not started",
                 );
             }
+            let _ = ensure_quota_resume_worker(state.clone());
             return Err(error);
         }
     };
@@ -8613,6 +8863,7 @@ fn expire_upload_admission_pauses(
     time: DateTime<Utc>,
 ) -> Result<(), String> {
     let transaction = connection.unchecked_transaction().map_err(user_error)?;
+    oauth_replacement::normalize_api_pause_deadlines(&transaction)?;
     for (table, kind) in [
         ("upload_quota_pauses", "youtube_daily_upload_pause_elapsed"),
         ("api_quota_pauses", "youtube_api_quota_pause_elapsed"),
@@ -8760,7 +9011,7 @@ fn upload_resume_plan(
     } else {
         None
     };
-    let (admission_open, upload_next) = if queued {
+    let (mut admission_open, mut upload_next) = if queued {
         match upload_admission_delay(state, time, true)? {
             Some((until, _)) => (false, until),
             None => (true, None),
@@ -8768,6 +9019,12 @@ fn upload_resume_plan(
     } else {
         (false, None)
     };
+    if queued && admission_open {
+        if let Some(until) = inventory_retry_deadline(&connection, channel, time)? {
+            admission_open = false;
+            upload_next = Some(until);
+        }
+    }
     upload_followup_quota_context(
         state,
         cloud
@@ -8912,6 +9169,85 @@ mod upload_controls_integration_tests {
             let _ = fs::remove_dir_all(&self.root);
         }
     }
+    #[test]
+    fn cloud_reset_automatically_releases_the_retained_queue_for_a_scoped_claim() {
+        for mixed in [false, true] {
+            let fixture = Fixture::new();
+            let observed = Utc::now();
+            let reset =
+                DateTime::parse_from_rfc3339(&quota_planner::pacific_window(observed).unwrap().1)
+                    .unwrap()
+                    .with_timezone(&Utc);
+            fixture
+                .db()
+                .execute(
+                    "INSERT INTO api_quota_pauses VALUES('project:fixture','channel-a',?1,?2)",
+                    params![
+                        (observed + ChronoDuration::hours(24)).to_rfc3339(),
+                        observed.to_rfc3339()
+                    ],
+                )
+                .unwrap();
+            if mixed {
+                fixture
+                    .db()
+                    .execute(
+                        "INSERT INTO upload_quota_pauses VALUES('channel-a',?1,?2)",
+                        params![
+                            (observed + ChronoDuration::hours(24)).to_rfc3339(),
+                            observed.to_rfc3339()
+                        ],
+                    )
+                    .unwrap();
+            }
+            // Exercise the same housekeeping -> admission plan -> durable claim
+            // chain used by the deadline worker, advancing only its local clock.
+            expire_upload_admission_pauses(fixture.db(), reset).unwrap();
+            let plan = upload_resume_plan(&fixture.state, reset).unwrap();
+            assert!(plan.0);
+            if mixed && reset < observed + ChronoDuration::hours(24) {
+                assert!(!plan.1);
+                assert_eq!(plan.3, Some(observed + ChronoDuration::hours(24)));
+                expire_upload_admission_pauses(fixture.db(), observed + ChronoDuration::hours(24))
+                    .unwrap();
+            }
+            let plan =
+                upload_resume_plan(&fixture.state, observed + ChronoDuration::hours(24)).unwrap();
+            assert!(plan.1);
+            let mut connection = database(&fixture.state).unwrap();
+            assert_eq!(
+                claim_uploads_with_controls(
+                    &mut connection,
+                    "channel-a",
+                    vec!["item-a".into(), "item-b".into()]
+                )
+                .unwrap(),
+                vec!["item-a"]
+            );
+            let retained:(String,i64,String,String)=fixture.db().query_row("SELECT status,confirmed_bytes,resumable_session_uri,workspace_path FROM upload_items WHERE id='item-a'",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap();
+            assert_eq!(
+                retained,
+                (
+                    "dispatching".into(),
+                    40,
+                    "protected-checkpoint".into(),
+                    "original-locator".into()
+                )
+            );
+            assert_eq!(
+                fixture
+                    .db()
+                    .query_row(
+                        "SELECT status FROM upload_items WHERE id='item-b'",
+                        [],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "queued"
+            );
+        }
+    }
+
     #[test]
     fn normal_claim_is_transactional_scoped_and_retains_source_bytes_and_checkpoint() {
         let fixture = Fixture::new();
@@ -10497,7 +10833,23 @@ fn resolve_upload_title_duplicates(
     resolve_upload_title_duplicates_impl(&state, &item_ids, &action)
 }
 
+#[derive(Serialize, Deserialize)]
+struct PlaylistReadCheckpoint {
+    checked_at: String,
+    playlists: Vec<YouTubePlaylist>,
+}
+
 fn list_youtube_playlists_impl(state: &AppState) -> Result<Vec<YouTubePlaylist>, String> {
+    list_youtube_playlists_with(state, |path, query| {
+        let token = refreshed_access_token(state)?;
+        youtube_json(state, &token, path, query)
+    })
+}
+
+fn list_youtube_playlists_with(
+    state: &AppState,
+    mut fetch: impl FnMut(&str, &[(&str, &str)]) -> Result<serde_json::Value, String>,
+) -> Result<Vec<YouTubePlaylist>, String> {
     let _management_guard = deletion_execution_lock(state)
         .lock()
         .map_err(|_| "YouTube playlist loading is unavailable.".to_string())?;
@@ -10506,30 +10858,69 @@ fn list_youtube_playlists_impl(state: &AppState) -> Result<Vec<YouTubePlaylist>,
         return Ok(Vec::new());
     }
     let binding = SelectedYouTubeReadBinding::capture(&database(state)?)?;
-    let access_token = refreshed_access_token(state)?;
+    let key = binding.cache_key()?;
+    let cached: Option<PlaylistReadCheckpoint> =
+        youtube_read_cache::load(&database(state)?, "playlists", &key)?;
+    if let Some(cached) = cached.filter(|cached| {
+        recent_read(
+            Some(&cached.checked_at),
+            Utc::now(),
+            ChronoDuration::minutes(15),
+        )
+    }) {
+        binding.require_current(&database(state)?)?;
+        return Ok(cached.playlists);
+    }
+    require_youtube_read_admission(state)?;
     binding.require_current(&database(state)?)?;
     let mut playlists = Vec::new();
+    let mut seen_pages = HashSet::new();
+    let mut seen_ids = HashSet::new();
     let mut next_page: Option<String> = None;
     loop {
-        let mut query = vec![("part", "snippet"), ("mine", "true"), ("maxResults", "50")];
+        let mut query = vec![
+            ("part", "snippet"),
+            ("mine", "true"),
+            ("maxResults", "50"),
+            ("fields", "items(id,snippet(channelId,title)),nextPageToken"),
+        ];
         if let Some(page) = next_page.as_deref() {
             query.push(("pageToken", page));
         }
-        let response = youtube_json(state, &access_token, "playlists", &query)?;
-        for playlist in response
+        let response = fetch("playlists", &query)?;
+        binding.require_current(&database(state)?)?;
+        let items = response
             .get("items")
             .and_then(|value| value.as_array())
-            .into_iter()
-            .flatten()
-        {
+            .filter(|items| items.len() <= 50)
+            .ok_or("YouTube returned an invalid playlist page; the prior cache was retained.")?;
+        for playlist in items {
             let (Some(id), Some(title)) = (
                 playlist.get("id").and_then(|value| value.as_str()),
                 playlist
                     .pointer("/snippet/title")
                     .and_then(|value| value.as_str()),
             ) else {
-                continue;
+                return Err(
+                    "YouTube returned incomplete playlist metadata; the prior cache was retained."
+                        .into(),
+                );
             };
+            if id.is_empty()
+                || id.len() > 256
+                || title.len() > 1024
+                || playlist
+                    .pointer("/snippet/channelId")
+                    .and_then(|value| value.as_str())
+                    != Some(binding.channel_id.as_str())
+            {
+                return Err(
+                    "YouTube did not confirm this playlist on the selected channel.".into(),
+                );
+            }
+            if !seen_ids.insert(id.to_string()) {
+                continue;
+            }
             playlists.push(YouTubePlaylist {
                 id: id.to_string(),
                 title: title.to_string(),
@@ -10542,9 +10933,21 @@ fn list_youtube_playlists_impl(state: &AppState) -> Result<Vec<YouTubePlaylist>,
         if next_page.is_none() {
             break;
         }
+        if seen_pages.len() >= 1000 || !seen_pages.insert(next_page.clone().unwrap_or_default()) {
+            return Err("YouTube returned repeated or excessive playlist pages; the prior cache was retained.".into());
+        }
     }
     binding.require_current(&database(state)?)?;
     playlists.sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+    youtube_read_cache::save(
+        &database(state)?,
+        "playlists",
+        &key,
+        &PlaylistReadCheckpoint {
+            checked_at: now(),
+            playlists: playlists.clone(),
+        },
+    )?;
     Ok(playlists)
 }
 
@@ -10567,7 +10970,15 @@ fn create_youtube_playlist_impl(
     let _execution_guard = deletion_execution_lock(state)
         .lock()
         .map_err(|_| "YouTube playlist management is unavailable.".to_string())?;
-    playlist_bulk::create(state, title, privacy_status, expected_channel_id)
+    let result = playlist_bulk::create(state, title, privacy_status, expected_channel_id);
+    if let Ok(connection) = database(state) {
+        if let Ok(binding) = SelectedYouTubeReadBinding::capture(&connection) {
+            if let Ok(key) = binding.cache_key() {
+                let _ = youtube_read_cache::invalidate(&connection, "playlists", &key);
+            }
+        }
+    }
+    result
 }
 
 #[tauri::command]
@@ -11042,19 +11453,57 @@ fn clear_deletion_requests(state: State<'_, AppState>) -> Result<usize, String> 
 }
 
 fn active_channel_id(state: &AppState, access_token: &str) -> Result<String, String> {
-    youtube_json(
-        state,
-        access_token,
-        "channels",
-        &[("part", "id"), ("mine", "true")],
-    )?
-    .get("items")
-    .and_then(|value| value.as_array())
-    .and_then(|items| items.first())
-    .and_then(|item| item.get("id"))
-    .and_then(|value| value.as_str())
-    .map(str::to_string)
-    .ok_or_else(|| "YouTube did not return the active channel identity.".to_string())
+    active_channel_id_with(state, access_token, || {
+        youtube_json(
+            state,
+            access_token,
+            "channels",
+            &[("part", "id"), ("mine", "true")],
+        )
+    })
+}
+
+fn active_channel_id_with(
+    state: &AppState,
+    access_token: &str,
+    fetch: impl FnOnce() -> Result<serde_json::Value, String>,
+) -> Result<String, String> {
+    type ProofKey = (PathBuf, String, [u8; 32]);
+    static PROOFS: OnceLock<Mutex<HashMap<ProofKey, (Instant, String)>>> = OnceLock::new();
+    let binding = SelectedYouTubeReadBinding::capture(&database(state)?)?;
+    let key = (
+        state.database_path.clone(),
+        binding.cache_key()?,
+        *blake3::hash(access_token.as_bytes()).as_bytes(),
+    );
+    let mut proofs = PROOFS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "YouTube identity verification is unavailable.".to_string())?;
+    proofs.retain(|_, (checked, _)| checked.elapsed() < Duration::from_secs(300));
+    if let Some((_, channel)) = proofs.get(&key) {
+        binding.require_current(&database(state)?)?;
+        return Ok(channel.clone());
+    }
+    let payload = fetch()?;
+    let channel = payload
+        .get("items")
+        .and_then(|value| value.as_array())
+        .filter(|items| items.len() == 1)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("id"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "YouTube did not return the active channel identity.".to_string())?;
+    binding.require_current(&database(state)?)?;
+    if channel != binding.channel_id {
+        return Err("The protected YouTube credential belongs to a different channel.".into());
+    }
+    if proofs.len() >= 128 {
+        proofs.clear();
+    }
+    proofs.insert(key, (Instant::now(), channel.clone()));
+    Ok(channel)
 }
 
 fn validate_video_title_rename(change: &VideoTitleRename) -> Result<(), String> {
@@ -12685,6 +13134,10 @@ pub fn run() {
                     quota_planner::load_quota_planner,
                     quota_planner::estimate_quota_operations,
                     quota_planner::save_quota_project_limits,
+                    live_quota::begin_live_quota_authorization,
+                    live_quota::load_live_quota_status,
+                    live_quota::cancel_live_quota_authorization,
+                    live_quota::refresh_live_quota,
                     source_relink::prepare_source_relink,
                     source_relink::verify_source_relink,
                     source_relink::load_source_relink_review,
@@ -15085,6 +15538,7 @@ mod tests {
             oauth_attempts: Arc::new(Mutex::new(HashMap::new())),
         };
         let connection = database(&state).unwrap();
+        connection.execute("INSERT INTO connection_settings(singleton,oauth_client_id,oauth_credential_id,oauth_project_id,active_channel,active_channel_id,updated_at) VALUES(1,'fixture-client','fixture-bundle','fixture-project','Fixture channel','fixture-channel',?1) ON CONFLICT(singleton) DO UPDATE SET oauth_client_id=excluded.oauth_client_id,oauth_credential_id=excluded.oauth_credential_id,oauth_project_id=excluded.oauth_project_id,active_channel=excluded.active_channel,active_channel_id=excluded.active_channel_id", [now()]).unwrap();
         connection.execute(
             "INSERT INTO upload_items (id, title, file_name, source_path, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES ('cleanup', 'Completed', 'original.mp4', ?1, ?2, 23, ?3, 'uploaded', 23, ?4, ?4)",
             params![source.to_string_lossy(), media.join("cleanup.media").to_string_lossy(), digest, now()],
@@ -15093,6 +15547,7 @@ mod tests {
             "INSERT INTO upload_items (id, title, file_name, source_path, workspace_path, size_bytes, digest, status, total_bytes, created_at, updated_at) VALUES ('not-ready', 'Queued', 'queued.mp4', ?1, ?2, 23, 'digest', 'queued', 23, ?3, ?3)",
             params![source.to_string_lossy(), media.join("queued.media").to_string_lossy(), now()],
         ).unwrap();
+        connection.execute("UPDATE upload_items SET channel_id='fixture-channel' WHERE id IN ('cleanup','not-ready')", []).unwrap();
         drop(connection);
 
         assert!(delete_uploaded_source_impl(&state, "not-ready", "queued.mp4").is_err());

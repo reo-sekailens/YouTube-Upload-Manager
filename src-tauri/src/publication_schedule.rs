@@ -982,7 +982,31 @@ pub(super) fn process_requested_job(state: &AppState, item: &str) -> Result<(), 
     let permitted = settings.deletion_authorized && settings.deletion_sudo_active;
     drop(connection);
     let mut provider = NativeProvider { state, clock: None };
-    run_with(state, item, &channel, permitted, false, &mut provider)
+    run_automatic_with(state, item, &channel, permitted, Utc::now(), &mut provider)
+}
+
+fn run_automatic_with(
+    state: &AppState,
+    item: &str,
+    channel: &str,
+    permitted: bool,
+    time: DateTime<Utc>,
+    provider: &mut impl ScheduleProvider,
+) -> Result<(), String> {
+    let connection = database(state)?;
+    require_channel(&connection, channel)?;
+    // Other follow-up steps can wake this item's shared worker. They must not
+    // turn a missing publication job or its retained cooldown into provider I/O.
+    let due = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM publication_schedule_jobs AS jobs JOIN upload_items AS uploads ON uploads.id=jobs.item_id AND uploads.channel_id=jobs.channel_id WHERE jobs.item_id=?1 AND jobs.channel_id=?2 AND uploads.status='uploaded' AND uploads.video_id IS NOT NULL AND jobs.ever_public=0 AND ((jobs.state IN ('waiting_upload','pending','waiting_processing','waiting_verification','accepted') AND (jobs.next_check_at IS NULL OR jobs.next_check_at<=?3)) OR (jobs.state='waiting_permission' AND ?4)))",
+        params![item, channel, time.to_rfc3339(), permitted],
+        |row| row.get::<_, bool>(0),
+    ).map_err(user_error)?;
+    if !due {
+        return Ok(());
+    }
+    drop(connection);
+    run_with(state, item, channel, permitted, false, provider)
 }
 
 /// Completion repair already holds the shared provider execution lock. This
@@ -1439,6 +1463,222 @@ mod tests {
             "succeeded"
         );
         assert!(next_wake(&fixture.db(), "channel-a").unwrap().is_some());
+    }
+
+    #[test]
+    fn automatic_followup_without_a_due_publication_never_contacts_provider() {
+        let fixture = Fixture::new();
+        fixture.seed("item-a");
+        let retained = fixture.retained("item-a");
+        let mut provider = FakeProvider::new();
+        let current = Utc::now();
+        run_automatic_with(
+            &fixture.state,
+            "item-a",
+            "channel-a",
+            true,
+            current,
+            &mut provider,
+        )
+        .unwrap();
+        fixture.receipt("item-a");
+        for status in ["published", "needs_attention", "uncertain", "applying"] {
+            fixture.db().execute("UPDATE publication_schedule_jobs SET state=?1,next_check_at=NULL WHERE item_id='item-a'",[status]).unwrap();
+            run_automatic_with(
+                &fixture.state,
+                "item-a",
+                "channel-a",
+                true,
+                current,
+                &mut provider,
+            )
+            .unwrap();
+            assert_eq!(fixture.job("item-a").state, status);
+        }
+        fixture.db().execute("UPDATE publication_schedule_jobs SET state='pending',ever_public=1,next_check_at=NULL WHERE item_id='item-a'",[]).unwrap();
+        run_automatic_with(
+            &fixture.state,
+            "item-a",
+            "channel-a",
+            true,
+            current,
+            &mut provider,
+        )
+        .unwrap();
+        fixture
+            .db()
+            .execute(
+                "DELETE FROM publication_schedule_jobs WHERE item_id='item-a'",
+                [],
+            )
+            .unwrap();
+        run_automatic_with(
+            &fixture.state,
+            "item-a",
+            "channel-a",
+            true,
+            current,
+            &mut provider,
+        )
+        .unwrap();
+        assert_eq!(provider.read_count, 0);
+        assert!(provider.writes.is_empty());
+        assert_eq!(fixture.retained("item-a"), retained);
+    }
+
+    #[test]
+    fn unrelated_followup_wakes_preserve_publication_cooldowns_and_accepted_schedule() {
+        let fixture = Fixture::new();
+        let requested = fixture.seed("item-a");
+        fixture.receipt("item-a");
+        let retained = fixture.retained("item-a");
+        let mut provider = FakeProvider::new();
+        let current = Utc::now();
+        let future = (current + ChronoDuration::minutes(5)).to_rfc3339();
+        for status in [
+            "waiting_upload",
+            "pending",
+            "waiting_processing",
+            "waiting_verification",
+            "accepted",
+        ] {
+            fixture.db().execute("UPDATE publication_schedule_jobs SET state=?1,next_check_at=?2 WHERE item_id='item-a'",params![status,future]).unwrap();
+            let updated = fixture.job("item-a").updated_at;
+            for _ in 0..3 {
+                run_automatic_with(
+                    &fixture.state,
+                    "item-a",
+                    "channel-a",
+                    true,
+                    current,
+                    &mut provider,
+                )
+                .unwrap();
+            }
+            assert_eq!(fixture.job("item-a").state, status);
+            assert_eq!(fixture.job("item-a").updated_at, updated);
+        }
+        assert_eq!(provider.read_count, 0);
+        assert!(provider.writes.is_empty());
+        assert_eq!(fixture.job("item-a").publish_at, requested);
+        assert_eq!(fixture.retained("item-a"), retained);
+    }
+
+    #[test]
+    fn due_automatic_publication_runs_once_then_only_reads_at_its_deadline() {
+        let fixture = Fixture::new();
+        let requested = fixture.seed("item-a");
+        fixture.receipt("item-a");
+        let mut provider = FakeProvider::new();
+        run_automatic_with(
+            &fixture.state,
+            "item-a",
+            "channel-a",
+            true,
+            Utc::now(),
+            &mut provider,
+        )
+        .unwrap();
+        assert_eq!(fixture.job("item-a").state, "accepted");
+        assert_eq!(provider.read_count, 2);
+        assert_eq!(provider.writes.len(), 1);
+        run_automatic_with(
+            &fixture.state,
+            "item-a",
+            "channel-a",
+            true,
+            Utc::now(),
+            &mut provider,
+        )
+        .unwrap();
+        assert_eq!(provider.read_count, 2);
+        provider.server_time = utc(&requested).unwrap() + ChronoDuration::seconds(60);
+        provider.video["status"]["privacyStatus"] = json!("public");
+        provider.video["snippet"]["publishedAt"] = json!(requested);
+        run_automatic_with(
+            &fixture.state,
+            "item-a",
+            "channel-a",
+            true,
+            provider.server_time,
+            &mut provider,
+        )
+        .unwrap();
+        assert_eq!(fixture.job("item-a").state, "published");
+        assert_eq!(provider.read_count, 3);
+        assert_eq!(provider.writes.len(), 1);
+    }
+
+    #[test]
+    fn automatic_due_gate_retains_channel_receipt_and_permission_guards() {
+        let fixture = Fixture::new();
+        fixture.seed("item-a");
+        fixture.receipt("item-a");
+        let mut provider = FakeProvider::new();
+        assert!(run_automatic_with(
+            &fixture.state,
+            "item-a",
+            "channel-b",
+            true,
+            Utc::now(),
+            &mut provider,
+        )
+        .is_err());
+        fixture.db().execute("UPDATE publication_schedule_jobs SET state='waiting_permission' WHERE item_id='item-a'",[]).unwrap();
+        run_automatic_with(
+            &fixture.state,
+            "item-a",
+            "channel-a",
+            false,
+            Utc::now(),
+            &mut provider,
+        )
+        .unwrap();
+        assert_eq!(provider.read_count, 0);
+        run_automatic_with(
+            &fixture.state,
+            "item-a",
+            "channel-a",
+            true,
+            Utc::now(),
+            &mut provider,
+        )
+        .unwrap();
+        assert_eq!(provider.writes.len(), 1);
+        fixture.db().execute("UPDATE publication_schedule_jobs SET state='pending',video_id='different-video',next_check_at=NULL WHERE item_id='item-a'",[]).unwrap();
+        let reads = provider.read_count;
+        assert!(run_automatic_with(
+            &fixture.state,
+            "item-a",
+            "channel-a",
+            true,
+            Utc::now(),
+            &mut provider,
+        )
+        .is_err());
+        assert_eq!(provider.read_count, reads);
+        assert_eq!(provider.writes.len(), 1);
+    }
+
+    #[test]
+    fn explicit_publication_repair_still_reads_fresh_inside_automatic_cooldown() {
+        let fixture = Fixture::new();
+        fixture.seed("item-a");
+        fixture.receipt("item-a");
+        fixture.db().execute("UPDATE publication_schedule_jobs SET state='needs_attention',next_check_at=?1 WHERE item_id='item-a'",[(Utc::now()+ChronoDuration::hours(1)).to_rfc3339()]).unwrap();
+        let mut provider = FakeProvider::new();
+        run_with(
+            &fixture.state,
+            "item-a",
+            "channel-a",
+            true,
+            true,
+            &mut provider,
+        )
+        .unwrap();
+        assert_eq!(provider.read_count, 2);
+        assert_eq!(provider.writes.len(), 1);
+        assert_eq!(fixture.job("item-a").state, "accepted");
     }
 
     #[test]

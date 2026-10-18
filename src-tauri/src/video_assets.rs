@@ -1682,9 +1682,102 @@ struct WriteFailure {
 trait AssetProvider {
     fn ensure(&mut self, channel: &str, kind: &str) -> Result<(), String>;
     fn owner(&mut self, video: &str) -> Result<String, String>;
-    fn tracks(&mut self, video: &str) -> Result<Vec<CaptionTrack>, String>;
+    fn tracks(&mut self, video: &str, refresh: bool) -> Result<Vec<CaptionTrack>, String>;
     fn thumbnail(&mut self, job: &Job, file: File) -> Result<(), WriteFailure>;
     fn insert_caption(&mut self, job: &Job, file: File) -> Result<CaptionTrack, WriteFailure>;
+}
+
+/// Evidence is shared only by jobs for one item and permission kind while the
+/// existing execution lock fences the run. No proof survives this run.
+struct RunProvider<P> {
+    inner: P,
+    owners: HashMap<String, String>,
+    tracks: HashMap<String, Vec<CaptionTrack>>,
+}
+impl<P> RunProvider<P> {
+    fn new(inner: P) -> Self {
+        Self {
+            inner,
+            owners: HashMap::new(),
+            tracks: HashMap::new(),
+        }
+    }
+}
+impl<P: AssetProvider> AssetProvider for RunProvider<P> {
+    fn ensure(&mut self, channel: &str, kind: &str) -> Result<(), String> {
+        // Keep fresh local channel, permission expiry and quota checks even
+        // when the provider's remote proof has already succeeded in this run.
+        self.inner.ensure(channel, kind)
+    }
+    fn owner(&mut self, video: &str) -> Result<String, String> {
+        if let Some(owner) = self.owners.get(video) {
+            return Ok(owner.clone());
+        }
+        let owner = self.inner.owner(video)?;
+        self.owners.insert(video.into(), owner.clone());
+        Ok(owner)
+    }
+    fn tracks(&mut self, video: &str, refresh: bool) -> Result<Vec<CaptionTrack>, String> {
+        if refresh {
+            self.tracks.remove(video);
+        } else if let Some(tracks) = self.tracks.get(video) {
+            return Ok(tracks.clone());
+        }
+        let tracks = self.inner.tracks(video, refresh)?;
+        self.tracks.insert(video.into(), tracks.clone());
+        Ok(tracks)
+    }
+    fn thumbnail(&mut self, job: &Job, file: File) -> Result<(), WriteFailure> {
+        self.inner.thumbnail(job, file)
+    }
+    fn insert_caption(&mut self, job: &Job, file: File) -> Result<CaptionTrack, WriteFailure> {
+        let video = job.view.video_id.as_deref().unwrap_or_default();
+        let result = self.inner.insert_caption(job, file);
+        match &result {
+            Ok(track)
+                if same_track(job, track)
+                    && job.view.draft == Some(track.draft)
+                    && self.tracks.get(video).is_some_and(|tracks| {
+                        !tracks.iter().any(|existing| existing.id == track.id)
+                    }) =>
+            {
+                self.tracks.get_mut(video).unwrap().push(track.clone());
+            }
+            // Unknown outcomes, duplicate conflicts and incomplete receipts
+            // must never leave a pre-write membership snapshot reusable.
+            _ => {
+                self.tracks.remove(video);
+            }
+        }
+        result
+    }
+}
+
+fn process_run_jobs<P: AssetProvider>(
+    state: &AppState,
+    channel: &str,
+    jobs: impl IntoIterator<Item = (String, String, String)>,
+    repair: bool,
+    mut create: impl FnMut(&str, &str) -> Result<P, String>,
+) -> Result<u64, String> {
+    let mut providers = HashMap::new();
+    let mut written = 0;
+    for (id, kind, item_id) in jobs {
+        let key = (item_id, kind);
+        if !providers.contains_key(&key) {
+            providers.insert(key.clone(), RunProvider::new(create(&key.0, &key.1)?));
+        }
+        if process_with(
+            state,
+            &id,
+            channel,
+            repair,
+            providers.get_mut(&key).unwrap(),
+        )? {
+            written += 1;
+        }
+    }
+    Ok(written)
 }
 
 fn outcome(
@@ -1827,7 +1920,7 @@ fn process_with(
         return Ok(false);
     }
     if job.view.kind == "caption" {
-        let tracks = match provider.tracks(video) {
+        let tracks = match provider.tracks(video, reconcile) {
             Ok(tracks) => tracks,
             Err(_) => {
                 outcome(
@@ -2003,6 +2096,7 @@ struct NativeProvider<'a> {
     channel: String,
     kind: String,
     token: Option<String>,
+    channel_verified: bool,
     quota_scope: String,
     item_id: String,
 }
@@ -2021,6 +2115,7 @@ impl<'a> NativeProvider<'a> {
             channel: channel.into(),
             kind: kind.into(),
             token: None,
+            channel_verified: false,
             quota_scope: scope,
             item_id: item_id.into(),
         })
@@ -2232,6 +2327,8 @@ impl AssetProvider for NativeProvider<'_> {
                     refreshed_access_token(self.state)?
                 },
             );
+        }
+        if !self.channel_verified {
             let own = self.read("channels", &[("part", "snippet"), ("mine", "true")])?;
             if !own
                 .get("items")
@@ -2246,6 +2343,7 @@ impl AssetProvider for NativeProvider<'_> {
                     "Google did not confirm the reviewed caption/thumbnail channel.".into(),
                 );
             }
+            self.channel_verified = true;
         }
         Ok(())
     }
@@ -2264,7 +2362,7 @@ impl AssetProvider for NativeProvider<'_> {
             .map(str::to_string)
             .ok_or_else(|| "YouTube did not confirm the target video's owner.".into())
     }
-    fn tracks(&mut self, video: &str) -> Result<Vec<CaptionTrack>, String> {
+    fn tracks(&mut self, video: &str, _refresh: bool) -> Result<Vec<CaptionTrack>, String> {
         let value = self.read("captions", &[("part", "snippet"), ("videoId", video)])?;
         let items = value
             .get("items")
@@ -2362,17 +2460,15 @@ fn run_for_item(
     ensure_channel(&connection, channel)?;
     let ids=connection.prepare("SELECT id,kind FROM video_asset_jobs WHERE channel_id=?1 AND item_id=?2 AND (status IN ('waiting_upload','queued','waiting_permission') OR (status='waiting_processing' AND (next_check_at<=?3 OR ?4)) OR (?4 AND status IN ('failed','needs_reconciliation'))) ORDER BY created_at,id LIMIT 100").map_err(user_error)?.query_map(params![channel,item_id,now(),repair],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).map_err(user_error)?.collect::<Result<Vec<_>,_>>().map_err(user_error)?;
     drop(connection);
-    let mut written = 0;
-    for (id, kind) in ids {
-        if kind_filter.is_some_and(|selected| selected != kind) {
-            continue;
-        }
-        let mut provider = NativeProvider::new(state, channel, &kind, item_id)?;
-        if process_with(state, &id, channel, repair, &mut provider)? {
-            written += 1
-        }
-    }
-    Ok(written)
+    process_run_jobs(
+        state,
+        channel,
+        ids.into_iter()
+            .filter(|(_, kind)| !kind_filter.is_some_and(|selected| selected != kind))
+            .map(|(id, kind)| (id, kind, item_id.to_string())),
+        repair,
+        |item, kind| NativeProvider::new(state, channel, kind, item),
+    )
 }
 /// The lower-priority coordinator may call this before taking its existing
 /// execution lock. Caption management and credential promotion share that lock.
@@ -2483,14 +2579,14 @@ pub(super) fn repair_job_ids_locked(
         let _credentials = oauth_replacement::lock_credentials()?;
         oauth_replacement::ensure_no_pending(state)?;
     }
-    let mut repaired = 0;
-    for job in jobs {
-        let mut provider = NativeProvider::new(state, channel, &job.view.kind, item_id)?;
-        if process_with(state, &job.view.job_id, channel, true, &mut provider)? {
-            repaired += 1;
-        }
-    }
-    Ok(repaired)
+    process_run_jobs(
+        state,
+        channel,
+        jobs.into_iter()
+            .map(|job| (job.view.job_id, job.view.kind, job.view.item_id)),
+        true,
+        |item, kind| NativeProvider::new(state, channel, kind, item),
+    )
 }
 
 #[derive(Serialize)]
@@ -2711,16 +2807,18 @@ pub(super) async fn repair_video_asset_jobs(
             let _credentials = oauth_replacement::lock_credentials()?;
             oauth_replacement::ensure_no_pending(&state)?;
         }
-        for id in &job_ids {
-            let job = load_job(&database(&state)?, id, &expected_channel_id)?;
-            let mut provider = NativeProvider::new(
-                &state,
-                &expected_channel_id,
-                &job.view.kind,
-                &job.view.item_id,
-            )?;
-            process_with(&state, id, &expected_channel_id, true, &mut provider)?;
-        }
+        let connection = database(&state)?;
+        let jobs = job_ids
+            .iter()
+            .map(|id| {
+                let job = load_job(&connection, id, &expected_channel_id)?;
+                Ok((job.view.job_id, job.view.kind, job.view.item_id))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        drop(connection);
+        process_run_jobs(&state, &expected_channel_id, jobs, true, |item, kind| {
+            NativeProvider::new(&state, &expected_channel_id, kind, item)
+        })?;
         Ok(AssetReceipt {
             channel_id: expected_channel_id,
             job_ids,
@@ -2733,6 +2831,7 @@ pub(super) async fn repair_video_asset_jobs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::RefCell, rc::Rc};
     fn png() -> Vec<u8> {
         let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
         let mut chunk = |kind: &[u8], data: &[u8]| {
@@ -2822,6 +2921,31 @@ mod tests {
         .job_ids[0]
             .clone()
     }
+    fn caption_jobs(state: &AppState, root: &Path, names: &[&str]) -> Vec<String> {
+        let review = prepare(
+            state,
+            "channel-a",
+            vec!["item-a".into()],
+            vec![source(
+                root,
+                "run-captions.vtt",
+                b"WEBVTT\n\n00:00.000 --> 00:01.000\nCaption\n",
+            )],
+            false,
+        )
+        .unwrap();
+        let bindings = names
+            .iter()
+            .map(|name| {
+                let mut declaration = binding(&review.assets[0].asset_id, "item-a", "caption");
+                declaration.name = Some((*name).into());
+                declaration
+            })
+            .collect();
+        save(state, "channel-a", &review.review_id, bindings)
+            .unwrap()
+            .job_ids
+    }
     fn finish(root: PathBuf, state: AppState, connection: Connection) {
         upload_plan::test_discard_workspace(&state);
         reviews()
@@ -2832,6 +2956,14 @@ mod tests {
         drop(state);
         fs::remove_dir_all(root).unwrap();
     }
+    #[derive(Default)]
+    struct ProviderCounts {
+        builds: usize,
+        ensures: usize,
+        owners: usize,
+        tracks: usize,
+        writes: usize,
+    }
     struct Mock<'a> {
         state: &'a AppState,
         allowed: bool,
@@ -2840,6 +2972,8 @@ mod tests {
         writes: usize,
         uncertain: bool,
         status: String,
+        caption_insertions: usize,
+        counts: Rc<RefCell<ProviderCounts>>,
     }
     impl Mock<'_> {
         fn check_write(&self, job: &Job, mut file: File) {
@@ -2873,6 +3007,7 @@ mod tests {
     }
     impl AssetProvider for Mock<'_> {
         fn ensure(&mut self, _: &str, _: &str) -> Result<(), String> {
+            self.counts.borrow_mut().ensures += 1;
             if self.allowed {
                 Ok(())
             } else {
@@ -2880,14 +3015,17 @@ mod tests {
             }
         }
         fn owner(&mut self, _: &str) -> Result<String, String> {
+            self.counts.borrow_mut().owners += 1;
             Ok(self.owner.clone())
         }
-        fn tracks(&mut self, _: &str) -> Result<Vec<CaptionTrack>, String> {
+        fn tracks(&mut self, _: &str, _: bool) -> Result<Vec<CaptionTrack>, String> {
+            self.counts.borrow_mut().tracks += 1;
             Ok(self.tracks.clone())
         }
         fn thumbnail(&mut self, job: &Job, file: File) -> Result<(), WriteFailure> {
             self.check_write(job, file);
             self.writes += 1;
+            self.counts.borrow_mut().writes += 1;
             if self.uncertain {
                 Err(WriteFailure {
                     detail: "Unknown response retained for review".into(),
@@ -2900,20 +3038,28 @@ mod tests {
         fn insert_caption(&mut self, job: &Job, file: File) -> Result<CaptionTrack, WriteFailure> {
             self.check_write(job, file);
             self.writes += 1;
+            self.counts.borrow_mut().writes += 1;
             if self.uncertain {
                 Err(WriteFailure {
                     detail: "Unknown response retained for reconciliation".into(),
                     uncertain: true,
                 })
             } else {
-                Ok(CaptionTrack {
-                    id: "track-new".into(),
+                self.caption_insertions += 1;
+                let track = CaptionTrack {
+                    id: if self.caption_insertions == 1 {
+                        "track-new".into()
+                    } else {
+                        format!("track-new-{}", self.caption_insertions)
+                    },
                     video_id: job.view.video_id.clone().unwrap(),
                     language: job.view.language.clone().unwrap(),
                     name: job.view.name.clone().unwrap(),
                     draft: job.view.draft.unwrap(),
                     status: self.status.clone(),
-                })
+                };
+                self.tracks.push(track.clone());
+                Ok(track)
             }
         }
     }
@@ -2926,6 +3072,8 @@ mod tests {
             writes: 0,
             uncertain: false,
             status: "serving".into(),
+            caption_insertions: 0,
+            counts: Rc::new(RefCell::new(ProviderCounts::default())),
         }
     }
     fn track(id: &str, status: &str) -> CaptionTrack {
@@ -2937,6 +3085,185 @@ mod tests {
             draft: false,
             status: status.into(),
         }
+    }
+
+    #[test]
+    fn video_assets_item_run_reuses_providers_and_reads_with_updated_caption_baselines() {
+        let (root, state, connection) = fixture();
+        let thumbnail = create(&state, source(&root, "run-image.png", &png()), "item-a");
+        let captions = caption_jobs(
+            &state,
+            &root,
+            &["English", "English SDH", "English commentary"],
+        );
+        let mut jobs = vec![(thumbnail, "thumbnail".into(), "item-a".into())];
+        jobs.extend(
+            captions
+                .iter()
+                .map(|id| (id.clone(), "caption".into(), "item-a".into())),
+        );
+        let counts = Rc::new(RefCell::new(ProviderCounts::default()));
+        assert_eq!(
+            process_run_jobs(&state, "channel-a", jobs, false, |_, _| {
+                counts.borrow_mut().builds += 1;
+                let mut mock = provider(&state);
+                mock.counts = counts.clone();
+                Ok(mock)
+            })
+            .unwrap(),
+            4
+        );
+        let observed = counts.borrow();
+        assert_eq!(
+            (
+                observed.builds,
+                observed.owners,
+                observed.tracks,
+                observed.writes
+            ),
+            (2, 2, 1, 4)
+        );
+        // All four jobs still run both preflight and immediate pre-write guards.
+        assert_eq!(observed.ensures, 8);
+        drop(observed);
+        let baseline: String = connection
+            .query_row(
+                "SELECT baseline_json FROM video_asset_jobs WHERE id=?1",
+                [&captions[2]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let baseline: Vec<CaptionTrack> = serde_json::from_str(&baseline).unwrap();
+        assert_eq!(
+            baseline
+                .iter()
+                .map(|track| track.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["track-new", "track-new-2"]
+        );
+        for id in captions {
+            assert_eq!(
+                load_job(&connection, &id, "channel-a").unwrap().view.status,
+                "succeeded"
+            );
+        }
+        finish(root, state, connection);
+    }
+
+    #[test]
+    fn video_assets_item_run_discards_caption_snapshot_after_uncertain_writes() {
+        let (root, state, connection) = fixture();
+        let ids = caption_jobs(&state, &root, &["English", "English SDH"]);
+        let counts = Rc::new(RefCell::new(ProviderCounts::default()));
+        let jobs = ids
+            .iter()
+            .map(|id| (id.clone(), "caption".into(), "item-a".into()));
+        assert_eq!(
+            process_run_jobs(&state, "channel-a", jobs, false, |_, _| {
+                counts.borrow_mut().builds += 1;
+                let mut mock = provider(&state);
+                mock.uncertain = true;
+                mock.counts = counts.clone();
+                Ok(mock)
+            })
+            .unwrap(),
+            2
+        );
+        let observed = counts.borrow();
+        assert_eq!(
+            (
+                observed.builds,
+                observed.owners,
+                observed.tracks,
+                observed.writes
+            ),
+            (1, 1, 2, 2)
+        );
+        drop(observed);
+        for id in ids {
+            assert_eq!(
+                load_job(&connection, &id, "channel-a").unwrap().view.status,
+                "needs_reconciliation"
+            );
+        }
+        finish(root, state, connection);
+    }
+
+    #[test]
+    fn video_assets_item_run_reconciliation_forces_fresh_membership_without_repeat_write() {
+        let (root, state, connection) = fixture();
+        let ids = caption_jobs(&state, &root, &["English"]);
+        let mut mock = provider(&state);
+        mock.status = "syncing".into();
+        let counts = mock.counts.clone();
+        let mut run = RunProvider::new(mock);
+        assert!(process_with(&state, &ids[0], "channel-a", false, &mut run).unwrap());
+        assert_eq!(counts.borrow().tracks, 1);
+        run.inner.tracks[0].status = "failed".into();
+        assert!(!process_with(&state, &ids[0], "channel-a", true, &mut run).unwrap());
+        assert_eq!(
+            (
+                counts.borrow().owners,
+                counts.borrow().tracks,
+                counts.borrow().writes
+            ),
+            (1, 2, 1)
+        );
+        assert_eq!(
+            load_job(&connection, &ids[0], "channel-a")
+                .unwrap()
+                .view
+                .status,
+            "conflict"
+        );
+        finish(root, state, connection);
+    }
+
+    #[test]
+    fn video_assets_item_run_keeps_permission_guards_and_drops_proof_between_runs() {
+        let (root, state, connection) = fixture();
+        let ids = caption_jobs(&state, &root, &["English", "English SDH"]);
+        let mock = provider(&state);
+        let counts = mock.counts.clone();
+        let mut run = RunProvider::new(mock);
+        assert!(process_with(&state, &ids[0], "channel-a", false, &mut run).unwrap());
+        run.inner.allowed = false;
+        assert!(!process_with(&state, &ids[1], "channel-a", false, &mut run).unwrap());
+        assert_eq!(
+            (
+                counts.borrow().ensures,
+                counts.borrow().owners,
+                counts.borrow().tracks,
+                counts.borrow().writes
+            ),
+            (3, 1, 1, 1)
+        );
+        assert_eq!(
+            load_job(&connection, &ids[1], "channel-a")
+                .unwrap()
+                .view
+                .status,
+            "waiting_permission"
+        );
+        let mut next = provider(&state);
+        next.counts = counts.clone();
+        assert!(process_with(
+            &state,
+            &ids[1],
+            "channel-a",
+            false,
+            &mut RunProvider::new(next)
+        )
+        .unwrap());
+        assert_eq!(
+            (
+                counts.borrow().owners,
+                counts.borrow().tracks,
+                counts.borrow().writes
+            ),
+            (2, 2, 2)
+        );
+        finish(root, state, connection);
     }
 
     #[test]

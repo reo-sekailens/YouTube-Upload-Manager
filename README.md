@@ -31,6 +31,9 @@ authorize and start.
   quota pause recovery, and safe startup reconciliation.
 - Optional watched-folder intake for private or unlisted videos only, with
   stable-file checks, channel binding, and duplicate withholding.
+- Google-reported project quota with separate read-only Cloud authorization,
+  used/limit/remaining values, sample timestamps, and manual refresh. Local
+  operation estimates remain available in a separate view.
 - Duplicate review with local BLAKE3 evidence, synchronized uploaded-title
   evidence, lazy YouTube comparison players, search, and audited decisions.
 - Pre-ingest checks for arbitrary files including `.insv` and `.lrv`: desktop
@@ -59,6 +62,28 @@ All multi-step work is durable and crash-safe. Imports, uploads, watched-folder
 observations, pre-ingest jobs, and inventory refreshes resume from their
 persisted checkpoints. Remote ambiguity is retained for reconciliation rather
 than blindly repeating an operation.
+
+## Google quota reports
+
+Open the quota dialog's **Google report** view and choose **Set up Google quota
+access**. Its two-step review connects a Google account that can read the Cloud
+project from your imported Desktop OAuth JSON. This account can differ from the
+YouTube channel account. Enable Service Usage and Cloud Monitoring access and
+grant **Service Usage Viewer** plus **Monitoring Viewer**, or equivalent read
+permissions. Upload and video-management authorization remain separate.
+
+Choose **Refresh from Google** to read effective daily limits and consumed quota
+across apps and devices using that project. Google samples usage every minute
+and reports can lag another four minutes; fetched and sample times are shown.
+Missing or unsupported metrics show **Unknown**, never an assumed full allowance.
+These reports do not reveal YouTube's separate channel upload allowance or clear
+a saved provider pause. The app does not poll quota metrics in the background.
+
+Automatic duplicate checks reuse a scoped local inventory for 15 minutes, then
+merge recent changes. A complete refresh occurs after 24 hours or when you choose
+**Refresh library**. Confirmed uploads on this device enter title checks immediately.
+Saved quota holds and transient backoff prevent every folder scan from repeating
+Google requests.
 
 ## Quick start
 

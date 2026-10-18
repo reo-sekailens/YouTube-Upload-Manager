@@ -1,5 +1,60 @@
 # Technical Notes
 
+## Google project quota reports (TASK168, 2026-10-19)
+
+- Read-only Cloud access requests `cloud-platform.read-only` and
+  `monitoring.read` separately from YouTube authorization. Both granted scopes
+  must be returned before promotion. Cancellation, expiry or any selected
+  channel/client/project/bundle change fences callbacks and late results.
+- Google IAM is separate from OAuth consent. The account needs
+  `serviceusage.quotas.get`, `monitoring.timeSeries.list` and project metadata
+  read permission (`resourcemanager.projects.get`); Service Usage Viewer plus
+  Monitoring Viewer provides these reads. Service Usage/Monitoring APIs must be available. A Google
+  denial produces a fixed actionable error without exposing provider payloads.
+- Service Usage reports effective global project/day limits; Monitoring
+  `serviceruntime.googleapis.com/quota/rate/net_usage` reports weighted consumed
+  quota, not API request counts. Sum validated disjoint DELTA INT64 intervals
+  since Pacific midnight across methods only for their matching quota metric.
+  Unsupported dimensions/units, missing series and ambiguous midnight intervals
+  remain unknown. Do not hardcode a single 10,000-unit total for every bucket.
+- Monitoring samples every 60 seconds and can lag another 240 seconds. Fetch
+  time and latest sample are both visible. Missing data never becomes zero;
+  partial/failed pagination cannot promote a new report. Earlier reports retain
+  original timestamps after failure. No automatic metric polling is enabled.
+- Grant tokens and project mapping stay in OS secure storage, never SQLite,
+  webview, logs or repo. Quota reports are bounded in native memory. Reauthorization
+  uses the same stepped review and leaves upload/management grants intact.
+- Local verification uses provider-shaped synthetic payloads and an actual
+  rendered React component fixture. No signed-in Cloud IAM/API access or real
+  project's remaining quota has been verified by those tests.
+
+## Provider read budgets and queue waiting (TASK166–167, 2026-10-19)
+
+- Full inventory cost is `1 + 2 * ceil(N/50)` list calls. The injected 5,000-video
+  case uses 201; unchanged recent refresh uses one head page; new/changed head
+  details use two. Warm checks and known quota holds use zero. These are local
+  provider-injected counts, not measurements of a signed-in production project.
+- Recent reads are merge-only and can miss changes to older videos. Fifteen-minute
+  warm reuse and the 24-hour full snapshot bound are explicit freshness tradeoffs;
+  manual Refresh library performs complete reconciliation. A partial/failing read
+  cannot replace the last inventory or renew its successful checkpoint.
+- Cache keys hash the complete selected channel/client/project/bundle metadata.
+  Successful empty inventories/playlists persist across restarts; corrupt cached
+  JSON is a miss. Account changes fence late results before promotion.
+- Inventory retry delays are 60, 120, 240, 480 and 900 seconds, capped at 900.
+  Queue admission schedules the deadline without pausing an already active byte
+  transfer. Watched scans do not keep attempting provider reads during that hold.
+- The shared Data API read boundary checks saved project quota before HTTP.
+  Request telemetry remains local SQLite evidence and is not an API usage total.
+  Explicit playlist/source mutation guards and uncertain-write readback are not
+  replaced with display caches.
+- Cloud quota resets use the canonical dated Pacific/DST calculation. Legacy
+  deadline correction is transactional with its audit receipt and preserves the
+  original observation time so repeated housekeeping never rolls the hold forward.
+- Rendered queue QA uses synthetic files and events. The personal installed queue
+  was inspected read-only; no personal upload, original-file mutation or live
+  provider acceptance was used for validation.
+
 ## Comparison playback and monitor refresh (TASK163, 2026-10-18)
 
 - Metadata alone is not video-picture evidence. A missing video dimension after

@@ -57,6 +57,22 @@ function fileProgress(file: FolderMonitorFileActivity) {
   return Math.min(100, Math.round((file.confirmedBytes / file.totalBytes) * 100));
 }
 
+export function FolderMonitorQueuedFiles({ files }: { files: FolderMonitorFileActivity[] }) {
+  if (files.length === 0) return <p className="mt-2 mb-0 text-[0.7rem] leading-snug text-[#75849a]">No watched-folder files are awaiting upload.</p>;
+  return <ul className="mt-2 grid max-h-56 list-none gap-1.5 overflow-auto p-0">
+    {files.map((file) => (
+      <li className="min-w-0 border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={file.itemId || file.fileName}>
+        <div className="flex items-baseline justify-between gap-2">
+          <strong className="min-w-0 truncate text-[0.72rem] text-[#2f4262]" title={file.fileName}>{file.fileName}</strong>
+          <span className="shrink-0 text-[0.66rem] text-[#4671a4] capitalize">{file.uploadStatus ?? file.observationState}</span>
+        </div>
+        <p className="mt-1 mb-0 text-[0.66rem] leading-snug text-[#68788e]">{formatBytes(file.sizeBytes)} · updated {formatScanTime(file.updatedAt)}</p>
+        {file.detail?.trim() ? <p className="mt-1.5 mb-0 break-words text-[0.7rem] leading-relaxed text-muted"><span className="font-semibold text-ink">Queue status: </span>{file.detail}</p> : null}
+      </li>
+    ))}
+  </ul>;
+}
+
 export function FolderMonitorCards({ monitors, selectedId, busy, onSelect, onToggle, onEdit, onRemove }: {
   monitors: FolderMonitorSettings[]; selectedId?: string; busy: boolean;
   onSelect: (id: string) => void; onToggle: (monitor: FolderMonitorSettings) => void;
@@ -340,21 +356,7 @@ export function FolderMonitorPanel({ activeChannel, activeChannelId, onNotice, o
               </div>
               <div className="min-w-0 rounded-md border border-[#e2e8f0] bg-white p-2.5">
                 <h4 className="m-0 text-[0.72rem] text-[#384966]">Waiting in this folder’s queue</h4>
-                {queuedFiles.length === 0 ? (
-                  <p className="mt-2 mb-0 text-[0.7rem] leading-snug text-[#75849a]">No watched-folder files are awaiting upload.</p>
-                ) : (
-                  <ul className="mt-2 grid max-h-56 list-none gap-1.5 overflow-auto p-0">
-                    {queuedFiles.map((file) => (
-                      <li className="border-t border-[#edf0f5] pt-1.5 first:border-t-0 first:pt-0" key={file.itemId || file.fileName}>
-                        <div className="flex items-baseline justify-between gap-2">
-                          <strong className="min-w-0 truncate text-[0.72rem] text-[#2f4262]" title={file.fileName}>{file.fileName}</strong>
-                          <span className="text-[0.66rem] text-[#4671a4] capitalize">{file.uploadStatus ?? file.observationState}</span>
-                        </div>
-                        <p className="mt-1 mb-0 text-[0.66rem] leading-snug text-[#68788e]">{formatBytes(file.sizeBytes)} · updated {formatScanTime(file.updatedAt)}</p>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                <FolderMonitorQueuedFiles files={queuedFiles} />
               </div>
             </div>
             {reconciliationFiles.length > 0 && (

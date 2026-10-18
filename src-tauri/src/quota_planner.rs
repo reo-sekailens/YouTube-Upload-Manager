@@ -182,7 +182,7 @@ fn pacific_offset(at: DateTime<Utc>) -> Result<FixedOffset, String> {
     .ok_or_else(|| "Pacific reset could not be calculated.".into())
 }
 
-fn pacific_window(at: DateTime<Utc>) -> Result<(String, String), String> {
+pub(super) fn pacific_window(at: DateTime<Utc>) -> Result<(String, String), String> {
     let local = at.with_timezone(&pacific_offset(at)?);
     let next = local
         .date_naive()

@@ -1,5 +1,35 @@
 # Progress
 
+## 2026-10-19 — Quota recovery, fewer provider reads and Google quota reports
+
+- TASK166 corrects Cloud API retry to midnight Pacific and repairs oversized
+  legacy deadlines without rolling their observations forward. Independent
+  channel holds and queued source/checkpoint identities remain intact. Watched
+  queue rows now explain native waiting reasons; 12 rendered fixture checks pass.
+- TASK167 replaces repeated full crawls with one scoped coordinator: warm checks
+  use zero reads, an unchanged recent check uses one, compared with 201 for a
+  full 5,000-video library. Saved quota/backoff gates prevent scan-by-scan retries.
+  Plans, playlist metadata and identity checks reuse bounded evidence. Publication
+  due times and item-run attachment reuse reduce follow-up reads. Confirmed local
+  upload receipts immediately participate in duplicate review, and explicit
+  cleanup verifies one video before the existing guarded source deletion.
+- TASK168 adds Google-reported project quotas through separate read-only Cloud
+  PKCE authorization, project verification, Service Usage limits and Monitoring
+  consumed quota. Used/limit/remaining retain sample/fetch times; missing data
+  stays unknown. Two-step reauthorization retains upload/management grants.
+  No background metric polling or YouTube quota probe is added.
+- Integrated local results: 576 frontend / 512 native tests pass (nine opt-in
+  native cases ignored), TypeScript/production frontend build, native formatting,
+  Tailwind, five worker-budget operation tests and unchanged bundle/worker
+  configuration budgets pass. Initial JS is 223.12 KiB raw / 69.96 KiB gzip.
+  Actual quota UI passes 22 rendered fixture checks with inspected desktop/mobile
+  and authorization screenshots. Counts in those images are synthetic.
+- Signed-in Cloud IAM/API availability, private provider data, installed WebView
+  behavior and actual queued upload acceptance remain separate live verification.
+  No personal queued item/media was mutated or uploaded for tests. Locked/offline
+  production native compilation passes. The reviewed patch is published to main
+  through the existing GitHub workflow; hosted packaging remains separate.
+
 ## 2026-10-18 — Remembered browser session for private-video review
 
 - TASK165 adds **Use browser session** in comparison, with browser/profile

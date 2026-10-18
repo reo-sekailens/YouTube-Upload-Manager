@@ -752,6 +752,49 @@ pub(super) fn configured_quota_scope(connection: &Connection) -> Result<String, 
     active_scope(connection)
 }
 
+/// Repair the former rolling 24-hour Cloud holds using their saved observation
+/// time. Call only inside a native housekeeping/recording transaction, never a
+/// projection. Keep updated_at unchanged so repeated passes cannot roll a reset
+/// forward; malformed or already-shorter holds remain fail-closed.
+pub(super) fn normalize_api_pause_deadlines(connection: &Connection) -> Result<usize, String> {
+    let rows = connection
+        .prepare("SELECT quota_scope,channel_id,pause_until,updated_at FROM api_quota_pauses")
+        .map_err(user_error)?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?;
+    let mut changed = 0;
+    for (scope, channel, saved, observed) in rows {
+        let (Ok(until), Ok(observed)) = (
+            DateTime::parse_from_rfc3339(&saved),
+            DateTime::parse_from_rfc3339(&observed),
+        ) else {
+            continue;
+        };
+        if until <= observed {
+            continue;
+        }
+        let Ok((_, reset)) = quota_planner::pacific_window(observed.with_timezone(&Utc)) else {
+            continue;
+        };
+        let reset_time = DateTime::parse_from_rfc3339(&reset).map_err(user_error)?;
+        if until <= reset_time {
+            continue;
+        }
+        changed += connection.execute("UPDATE api_quota_pauses SET pause_until=?1 WHERE quota_scope=?2 AND pause_until=?3",params![reset,scope,saved]).map_err(user_error)?;
+        connection.execute("INSERT INTO audit_events(id,item_id,channel_id,kind,detail,created_at) VALUES(?1,NULL,?2,'youtube_api_quota_deadline_corrected','Cloud quota retry was aligned to midnight Pacific using the saved quota observation. Channel upload holds, source references and protected checkpoints were retained.',?3)",params![Uuid::new_v4().to_string(),channel,now()]).map_err(user_error)?;
+    }
+    Ok(changed)
+}
+
 /// Record a Cloud quota response for a captured channel/project without changing
 /// upload state. In particular, post-upload attachment/publication failures must
 /// never turn a confirmed video receipt back into queued work.
@@ -765,7 +808,26 @@ pub(super) fn record_scoped_api_pause(
     item_id: Option<&str>,
     channel_limit: bool,
 ) -> Result<String, String> {
-    let deadline = (Utc::now() + ChronoDuration::hours(24)).to_rfc3339();
+    record_scoped_api_pause_at(
+        state,
+        expected_channel,
+        scope,
+        item_id,
+        channel_limit,
+        Utc::now(),
+    )
+}
+
+fn record_scoped_api_pause_at(
+    state: &AppState,
+    expected_channel: &str,
+    scope: &str,
+    item_id: Option<&str>,
+    channel_limit: bool,
+    observed: DateTime<Utc>,
+) -> Result<String, String> {
+    let deadline = quota_planner::pacific_window(observed)?.1;
+    let channel_deadline = (observed + ChronoDuration::hours(24)).to_rfc3339();
     let mut connection = database(state)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -791,9 +853,10 @@ pub(super) fn record_scoped_api_pause(
             return Err("The quota response does not match the saved upload's immutable channel. Saved upload receipts remain unchanged.".into());
         }
     }
-    transaction.execute("INSERT INTO api_quota_pauses(quota_scope, channel_id, pause_until, updated_at) VALUES(?1, ?2, ?3, ?4) ON CONFLICT(quota_scope) DO UPDATE SET pause_until = MAX(pause_until, excluded.pause_until), updated_at = excluded.updated_at", params![scope, expected_channel, deadline, now()]).map_err(user_error)?;
+    normalize_api_pause_deadlines(&transaction)?;
+    transaction.execute("INSERT INTO api_quota_pauses(quota_scope, channel_id, pause_until, updated_at) VALUES(?1, ?2, ?3, ?4) ON CONFLICT(quota_scope) DO UPDATE SET pause_until = MAX(pause_until, excluded.pause_until), updated_at = excluded.updated_at", params![scope, expected_channel, deadline, observed.to_rfc3339()]).map_err(user_error)?;
     if channel_limit {
-        transaction.execute("INSERT INTO upload_quota_pauses(channel_id, pause_until, updated_at) VALUES(?1, ?2, ?3) ON CONFLICT(channel_id) DO UPDATE SET pause_until = MAX(pause_until, excluded.pause_until), updated_at = excluded.updated_at", params![expected_channel, deadline, now()]).map_err(user_error)?;
+        transaction.execute("INSERT INTO upload_quota_pauses(channel_id, pause_until, updated_at) VALUES(?1, ?2, ?3) ON CONFLICT(channel_id) DO UPDATE SET pause_until = MAX(pause_until, excluded.pause_until), updated_at = excluded.updated_at", params![expected_channel, channel_deadline, observed.to_rfc3339()]).map_err(user_error)?;
     }
     let channel_name = settings.active_channel.as_deref();
     let scoped_audit = |kind: &str, detail: &str| -> Result<(), String> {
@@ -847,7 +910,7 @@ pub(super) fn active_api_pause(connection: &Connection) -> Result<Option<String>
 }
 
 pub(super) fn api_pause_detail(deadline: &str) -> String {
-    format!("Google Cloud API quota was reached. This upload stays queued until {deadline} or a verified replacement project becomes active. YouTube channel limits still apply.")
+    format!("Google Cloud API quota was reached. Automatic retry is scheduled for {deadline}, the expected midnight Pacific reset. YouTube channel limits still apply; the next provider request confirms availability.")
 }
 
 pub(super) fn record_api_pause(state: &AppState, item_id: &str) -> Result<String, String> {
@@ -859,7 +922,17 @@ pub(super) fn record_api_pause_with_channel(
     item_id: &str,
     channel_limit: bool,
 ) -> Result<String, String> {
-    let deadline = (Utc::now() + ChronoDuration::hours(24)).to_rfc3339();
+    record_api_pause_with_channel_at(state, item_id, channel_limit, Utc::now())
+}
+
+fn record_api_pause_with_channel_at(
+    state: &AppState,
+    item_id: &str,
+    channel_limit: bool,
+    observed: DateTime<Utc>,
+) -> Result<String, String> {
+    let deadline = quota_planner::pacific_window(observed)?.1;
+    let channel_deadline = (observed + ChronoDuration::hours(24)).to_rfc3339();
     let mut connection = database(state)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -880,11 +953,12 @@ pub(super) fn record_api_pause_with_channel(
         return Err("The API quota result does not match the active upload channel.".into());
     }
     let scope = active_scope(&transaction)?;
+    normalize_api_pause_deadlines(&transaction)?;
     if channel_limit {
-        transaction.execute("INSERT INTO upload_quota_pauses(channel_id, pause_until, updated_at) VALUES(?1, ?2, ?3) ON CONFLICT(channel_id) DO UPDATE SET pause_until = MAX(pause_until, excluded.pause_until), updated_at = excluded.updated_at", params![item_channel, deadline, now()]).map_err(user_error)?;
+        transaction.execute("INSERT INTO upload_quota_pauses(channel_id, pause_until, updated_at) VALUES(?1, ?2, ?3) ON CONFLICT(channel_id) DO UPDATE SET pause_until = MAX(pause_until, excluded.pause_until), updated_at = excluded.updated_at", params![item_channel, channel_deadline, observed.to_rfc3339()]).map_err(user_error)?;
         audit(&transaction, item_id, "youtube_daily_upload_limit_paused", "YouTube reported a channel upload limit alongside Cloud API quota; both saved pauses are retained")?;
     }
-    transaction.execute("INSERT INTO api_quota_pauses(quota_scope, channel_id, pause_until, updated_at) VALUES(?1, ?2, ?3, ?4) ON CONFLICT(quota_scope) DO UPDATE SET pause_until = MAX(pause_until, excluded.pause_until), updated_at = excluded.updated_at", params![scope, item_channel, deadline, now()]).map_err(user_error)?;
+    transaction.execute("INSERT INTO api_quota_pauses(quota_scope, channel_id, pause_until, updated_at) VALUES(?1, ?2, ?3, ?4) ON CONFLICT(quota_scope) DO UPDATE SET pause_until = MAX(pause_until, excluded.pause_until), updated_at = excluded.updated_at", params![scope, item_channel, deadline, observed.to_rfc3339()]).map_err(user_error)?;
     transaction
         .execute(
             "UPDATE upload_items SET status = 'queued', detail = ?1, updated_at = ?2 WHERE id = ?3",
@@ -1312,6 +1386,172 @@ mod tests {
     }
 
     #[test]
+    fn native_cloud_pause_ends_at_pacific_midnight_instead_of_rolling_24_hours() {
+        use chrono::TimeZone;
+        let (root, state, connection) = fixture();
+        let deadline = record_api_pause(&state, "queued-a").unwrap();
+        let observed: String = connection
+            .query_row(
+                "SELECT updated_at FROM api_quota_pauses WHERE quota_scope='project:old-project'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let local = DateTime::parse_from_rfc3339(&observed)
+            .unwrap()
+            .with_timezone(&chrono_tz::America::Los_Angeles);
+        let expected = chrono_tz::America::Los_Angeles
+            .from_local_datetime(
+                &local
+                    .date_naive()
+                    .succ_opt()
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            DateTime::parse_from_rfc3339(&deadline)
+                .unwrap()
+                .with_timezone(&Utc),
+            expected
+        );
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cloud_recorders_share_daily_reset_across_seasons_and_midnight() {
+        for (timestamp, expected) in [
+            ("2026-01-13T07:59:59Z", "2026-01-13T08:00:00+00:00"),
+            ("2026-01-13T08:00:00Z", "2026-01-14T08:00:00+00:00"),
+            ("2026-03-08T07:59:59Z", "2026-03-08T08:00:00+00:00"),
+            ("2026-03-08T10:00:00Z", "2026-03-09T07:00:00+00:00"),
+            ("2026-11-01T06:59:59Z", "2026-11-01T07:00:00+00:00"),
+            ("2026-11-01T09:00:00Z", "2026-11-02T08:00:00+00:00"),
+            ("2026-10-18T22:09:14Z", "2026-10-19T07:00:00+00:00"),
+        ] {
+            let observed = DateTime::parse_from_rfc3339(timestamp)
+                .unwrap()
+                .with_timezone(&Utc);
+            for scoped in [false, true] {
+                let (root, state, connection) = fixture();
+                let before = upload_evidence(&connection);
+                // A legacy oversized hold must not win the recorder's MAX upsert.
+                connection.execute("INSERT INTO api_quota_pauses(quota_scope,channel_id,pause_until,updated_at) VALUES('project:old-project','channel-a',?1,?2)",params![(observed+ChronoDuration::hours(24)).to_rfc3339(),observed.to_rfc3339()]).unwrap();
+                let deadline = if scoped {
+                    record_scoped_api_pause_at(
+                        &state,
+                        "channel-a",
+                        "project:old-project",
+                        Some("queued-a"),
+                        true,
+                        observed,
+                    )
+                    .unwrap()
+                } else {
+                    record_api_pause_with_channel_at(&state, "queued-a", true, observed).unwrap()
+                };
+                assert_eq!(deadline, expected, "{timestamp}, scoped={scoped}");
+                let saved: (String,String) = connection.query_row("SELECT pause_until,updated_at FROM api_quota_pauses WHERE quota_scope='project:old-project'",[],|row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+                assert_eq!(saved, (expected.into(), observed.to_rfc3339()));
+                assert_eq!(connection.query_row("SELECT pause_until FROM upload_quota_pauses WHERE channel_id='channel-a'",[],|row|row.get::<_,String>(0)).unwrap(),(observed+ChronoDuration::hours(24)).to_rfc3339());
+                assert_eq!(upload_evidence(&connection), before);
+                drop(connection);
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn native_cloud_legacy_deadline_repair_is_idempotent_and_preserves_channel_and_queue() {
+        let (root, state, connection) = fixture();
+        let before = upload_evidence(&connection);
+        connection.execute_batch("INSERT INTO api_quota_pauses VALUES('project:old-project','channel-a','2026-10-19T22:09:14+00:00','2026-10-18T22:09:14+00:00');
+            INSERT INTO api_quota_pauses VALUES('project:invalid','channel-b','unreadable','2026-10-18T22:09:14+00:00');
+            INSERT INTO api_quota_pauses VALUES('project:short','channel-b','2026-10-18T23:09:14+00:00','2026-10-18T22:09:14+00:00');
+            INSERT INTO upload_quota_pauses VALUES('channel-a','2026-10-19T22:09:14+00:00','2026-10-18T22:09:14+00:00');").unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        assert_eq!(normalize_api_pause_deadlines(&transaction).unwrap(), 1);
+        assert_eq!(normalize_api_pause_deadlines(&transaction).unwrap(), 0);
+        transaction.commit().unwrap();
+        assert_eq!(connection.query_row("SELECT pause_until,updated_at FROM api_quota_pauses WHERE quota_scope='project:old-project'",[],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).unwrap(),("2026-10-19T07:00:00+00:00".into(),"2026-10-18T22:09:14+00:00".into()));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT pause_until FROM api_quota_pauses WHERE quota_scope='project:short'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "2026-10-18T23:09:14+00:00"
+        );
+        let reset = DateTime::parse_from_rfc3339("2026-10-19T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        expire_upload_admission_pauses(&connection, reset).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM api_quota_pauses WHERE quota_scope='project:old-project'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT pause_until FROM upload_quota_pauses WHERE channel_id='channel-a'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "2026-10-19T22:09:14+00:00"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT pause_until FROM api_quota_pauses WHERE quota_scope='project:invalid'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "unreadable"
+        );
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM audit_events WHERE kind='youtube_api_quota_deadline_corrected' AND channel_id='channel-a'",[],|row|row.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(upload_evidence(&connection), before);
+        drop(connection);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cloud_deadline_repair_rolls_back_if_the_audit_receipt_fails() {
+        let (root, state, connection) = fixture();
+        connection.execute_batch("INSERT INTO api_quota_pauses VALUES('project:old-project','channel-a','2026-10-19T22:09:14+00:00','2026-10-18T22:09:14+00:00');
+            CREATE TRIGGER reject_repair BEFORE INSERT ON audit_events WHEN NEW.kind='youtube_api_quota_deadline_corrected' BEGIN SELECT RAISE(ABORT,'fixture audit failure'); END;").unwrap();
+        let before = upload_evidence(&connection);
+        assert!(expire_upload_admission_pauses(&connection, Utc::now()).is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT pause_until FROM api_quota_pauses", [], |row| row
+                    .get::<_, String>(
+                    0
+                ))
+                .unwrap(),
+            "2026-10-19T22:09:14+00:00"
+        );
+        assert_eq!(upload_evidence(&connection), before);
+        drop(connection);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_api_pause_records_structured_scope_and_retains_checkpoint_progress() {
         let (root, state, connection) = fixture();
         let before = upload_evidence(&connection);
@@ -1344,7 +1584,19 @@ mod tests {
         let status = limit_status(&connection, None).unwrap();
         assert_eq!(status.kind, "api_quota");
         assert_eq!(status.resumes_at, Some(deadline.clone()));
-        assert_eq!(status.channel_resumes_at, Some(deadline));
+        let observed: String = connection
+            .query_row(
+                "SELECT updated_at FROM api_quota_pauses WHERE quota_scope='project:old-project'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let channel_deadline = (DateTime::parse_from_rfc3339(&observed)
+            .unwrap()
+            .with_timezone(&Utc)
+            + ChronoDuration::hours(24))
+        .to_rfc3339();
+        assert_eq!(status.channel_resumes_at, Some(channel_deadline));
         let item = upload_evidence(&connection);
         assert_eq!(item.0, "queued");
         assert_eq!(item.2, 400);
@@ -1460,10 +1712,7 @@ mod tests {
         let scope = configured_quota_scope(&connection).unwrap();
         let deadline = record_scoped_api_pause(&state, "channel-b", &scope, None, true).unwrap();
         assert_eq!(postprocess_receipt(&connection), before);
-        assert_eq!(
-            active_api_pause(&connection).unwrap(),
-            Some(std::cmp::max(original_deadline.clone(), deadline.clone()))
-        );
+        assert_eq!(active_api_pause(&connection).unwrap(), Some(deadline));
         assert_eq!(
             connection
                 .query_row(
@@ -1484,9 +1733,21 @@ mod tests {
                 .unwrap(),
             original_deadline
         );
+        let observed: String = connection
+            .query_row(
+                "SELECT updated_at FROM api_quota_pauses WHERE quota_scope='project:old-project'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let channel_deadline = (DateTime::parse_from_rfc3339(&observed)
+            .unwrap()
+            .with_timezone(&Utc)
+            + ChronoDuration::hours(24))
+        .to_rfc3339();
         assert_eq!(
             active_upload_quota_pause(&connection).unwrap(),
-            Some(deadline)
+            Some(channel_deadline)
         );
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM audit_events WHERE channel_id='channel-b' AND item_id IS NULL AND kind IN ('youtube_api_quota_paused','youtube_daily_upload_limit_paused')", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
         drop(connection);

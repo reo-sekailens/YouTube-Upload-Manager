@@ -173,6 +173,14 @@ This is the source of truth for planned work. Keep one row per task and link the
 | [TASK061](TASK061-prefilled-github-issue.md)                     | One-click pre-filled GitHub issue                            | completed   | unassigned | TASK056                            | About and recovery open a new issue with the redacted report already filled in for review. |
 | [TASK062](TASK062-modal-layering-and-playlist-creation.md)       | Modal layering and playlist creation                         | completed   | unassigned | TASK014, TASK019                    | Modal backdrops no longer dim dialogs; upload configuration can create private playlists. |
 
+## Latest tasks
+
+| Task | Title | Status | Owner | Dependencies | Result |
+| --- | --- | --- | --- | --- | --- |
+| [TASK166](TASK166-watched-queue-dispatch-liveness.md) | Watched queue dispatch and waiting reasons | completed | Codex | TASK097, TASK108, TASK147 | Correct Pacific Cloud retry; preserve separate channel holds; visible native queue reasons. 12 rendered checks pass. |
+| [TASK167](TASK167-provider-query-optimization.md) | Minimize provider reads | completed | Codex | TASK108, TASK147, TASK166 | Shared scoped inventory, recent merge, quota/backoff gates and bounded follow-up reuse. Warm checks zero reads; confirmed local titles remain protected. |
+| [TASK168](TASK168-live-google-project-quota.md) | Google-reported project quota | completed | Codex | TASK147, TASK167 | Separate read-only Cloud grant, usage/limits and sample timestamps. Integrated 576 frontend/512 native tests and 22 quota rendered checks pass; live IAM remains unverified. |
+
 ## Status values
 
 `proposed`, `ready`, `in-progress`, `blocked`, `completed`, `superseded`

@@ -15,6 +15,45 @@ Google LLC; other marks belong to their respective owners.
 
 ## Intended ownership boundaries
 
+Automatic upload consumers share one credential- and channel-fenced inventory
+coordinator (TASK167). A successful snapshot, including an empty library, remains
+fresh for 15 minutes. An older automatic check reads the uploads playlist head
+and details only for new/changed titles, then merges evidence without treating
+unseen videos as deleted. A full crawl remains required after 24 hours and for
+explicit library refresh. Concurrent consumers recheck the persisted checkpoint
+after acquiring the coordinator lock. Upload-plan preview/import and watched
+intake use this canonical evidence rather than independent crawlers.
+
+The native metadata-only read cache is created lazily, stores no credentials or
+media, and is keyed by immutable channel plus selected client, project and
+credential bundle. Quota holds block YouTube list attempts before network I/O;
+transient inventory failures back off from one to fifteen minutes without
+renewing success freshness. Queue resume scheduling includes that deadline.
+Playlist display metadata has a separate 15-minute cache, while token identity
+proofs expire after five minutes and cannot survive token/binding changes.
+Fresh mutation/version and uncertain-write reconciliation guards remain
+authoritative. Publication automatic work obeys durable next-check deadlines;
+attachment read reuse ends with the item/permission-kind run. Explicit source
+cleanup verifies only its own video before the existing guarded file deletion.
+
+Cloud API holds (TASK166) end at the next midnight Pacific, independent of the
+conservative rolling channel upload hold. Housekeeping shortens legacy oversized
+Cloud deadlines from their original observation time, records an audit event,
+and preserves queue identities/checkpoints and independent channel holds.
+Watched queue rows display native waiting reasons without remounting on refresh.
+
+`live_quota` (TASK168) owns an explicit read-only Google Cloud connection for
+the selected channel/client/project/bundle. Its PKCE verifier, refresh/access
+tokens and verified project metadata stay in a separate OS-protected entry;
+ordinary upload and management grants are not replaced. Status polling reads
+native authorization state only. An operator-triggered refresh reads Google
+project metadata, Service Usage effective daily limits and Cloud Monitoring
+consumed quota, never probing the exhausted YouTube Data API. Results retain
+metric/bucket identities, fetch/sample timestamps and unavailable values.
+Reported remaining is delayed telemetry and cannot clear a saved provider hold
+or establish a channel upload allowance. Local planning estimates remain a
+separate view; no new application service, database or background poller exists.
+
 TASK148 adds device-local native modules for verified source relocation,
 completion and targeted repair, immutable batch plans, metadata presets,
 thumbnail/caption jobs, publication schedules, aggregate transfer controls,
