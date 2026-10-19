@@ -25,7 +25,7 @@ export type RevisionedStateBridgeOptions = [
   DashboardSnapshot,
   { current: string | undefined },
   { current: number },
-  StateSetter<ConnectionSettings | undefined>,
+  (settings: ConnectionSettings) => void,
   StateSetter<DashboardSnapshot>,
   StateSetter<PreIngestDuplicateScan | undefined>,
   StateSetter<number>,

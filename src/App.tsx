@@ -51,6 +51,7 @@ import type {
 } from "./lib/dedupe-activity";
 import { resolveTheme, type AppTheme } from "./lib/theme";
 import { canAcceptChannelSnapshot } from "./lib/channel-snapshot";
+import { ProviderConnectionContext, providerConnectionScope } from "./lib/provider-connection";
 import type { OperatorAction } from "./lib/operator-feedback";
 
 const emptySnapshot: DashboardSnapshot = {
@@ -60,6 +61,7 @@ const emptySnapshot: DashboardSnapshot = {
   pendingTitleDuplicates: [],
 };
 const pluralS = (count: number) => (count === 1 ? "" : "s");
+const readyNotice = "Local queue ready. Original files upload directly to YouTube.";
 const secondaryButtonClass = "ui-button-secondary";
 const primaryButtonClass = "ui-button-primary";
 const eyebrowClass = "ui-eyebrow";
@@ -228,9 +230,7 @@ export default function App({
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(
     initialStartup?.snapshot ?? emptySnapshot,
   );
-  const [notice, setNotice] = useState(
-    "Local queue ready. Original files upload directly to YouTube.",
-  );
+  const [notice, setNotice] = useState(readyNotice);
   const [busy, setBusy] = useState(false);
   const [dedupeBusy, setDedupeBusy] = useState(false);
   const [dedupeActivity, setDedupeActivity] = useState<DedupeActivityEntry[]>(
@@ -257,6 +257,7 @@ export default function App({
   const stateRevisionRef = useRef(initialStartup?.snapshot.revision ?? 0);
   const stateChannelIdRef = useRef(initialStartup?.snapshot.activeChannelId);
   const stateChannelGenerationRef = useRef(0);
+  const connectionScopeRef = useRef(providerConnectionScope(initialStartup?.connection));
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const finalizedPreflightJobs = useRef(new Set<string>());
@@ -281,10 +282,14 @@ export default function App({
     }
   }, [theme]);
 
-  const updateConnection = useCallback((settings: ConnectionSettings) => {
+  const updateConnection = useCallback((settings: ConnectionSettings, refreshSnapshot = true) => {
     const channelChanged = stateChannelIdRef.current !== settings.activeChannelId;
+    const connectionScope = providerConnectionScope(settings);
+    const connectionChanged = connectionScopeRef.current !== connectionScope;
+    connectionScopeRef.current = connectionScope;
+    if (channelChanged || connectionChanged) stateChannelGenerationRef.current += 1;
+    if (connectionChanged) setNotice(readyNotice);
     if (channelChanged) {
-      stateChannelGenerationRef.current += 1;
       stateChannelIdRef.current = settings.activeChannelId;
       stateRevisionRef.current = 0;
       preflightRunId.current += 1;
@@ -315,7 +320,7 @@ export default function App({
         activeChannelId: settings.activeChannelId,
       };
     });
-    if (isTauri) {
+    if (isTauri && refreshSnapshot) {
       const requested = {
         channelId: settings.activeChannelId,
         generation: stateChannelGenerationRef.current,
@@ -359,9 +364,10 @@ export default function App({
   }, [refresh]);
 
   const reportOperatorError = useCallback(async (error: unknown, action: OperatorAction) => {
+    const generation = stateChannelGenerationRef.current;
     const { operatorFailureMessage } = await import("./lib/operator-feedback");
     const message = operatorFailureMessage(error, action);
-    setNotice(message);
+    if (generation === stateChannelGenerationRef.current) setNotice(message);
     return message;
   }, []);
 
@@ -380,6 +386,7 @@ export default function App({
     stateRevisionRef.current = next.snapshot.revision;
     setSnapshot(next.snapshot);
     setConnectionSettings(next.connection);
+    connectionScopeRef.current = providerConnectionScope(next.connection);
     setCrashRecovery(next.crashRecovery);
   }, []);
 
@@ -872,21 +879,13 @@ export default function App({
       return;
     }
     setBusy(true);
-    setNotice(`Refreshing ${channel}'s YouTube library…`);
     try {
-      const synced = await syncChannelInventory();
-      if (generation !== stateChannelGenerationRef.current) return;
-      await refresh();
-      if (generation !== stateChannelGenerationRef.current) return;
-      const nextConnection = await loadConnectionSettings();
-      if (generation !== stateChannelGenerationRef.current) return;
-      updateConnection(nextConnection);
-      setLibraryRefreshVersion((version) => version + 1);
-      setNotice(
-        `Library refreshed: ${synced} YouTube video${pluralS(synced)} saved locally for ${channel}. Eligible uploads resume automatically.`,
-      );
+      const { refreshChannelLibrary } = await import("./lib/provider-library-actions");
+      await refreshChannelLibrary({ channel, current: () => generation === stateChannelGenerationRef.current,
+        sync: syncChannelInventory, refresh, connection: loadConnectionSettings, accept: updateConnection,
+        invalidate: () => setLibraryRefreshVersion((version) => version + 1), notice: setNotice });
     } catch (error) {
-      await reportOperatorError(error, "library");
+      if (generation === stateChannelGenerationRef.current) await reportOperatorError(error, "library");
     } finally {
       setBusy(false);
     }
@@ -905,41 +904,15 @@ export default function App({
     setDedupeBusy(true);
     setDedupeActivity([]);
     setDedupePhase("syncing");
-    logDedupeActivity("running", `Started duplicate detection for ${channel}.`);
-    logDedupeActivity(
-      "running",
-      "Synchronizing this channel's uploaded-video inventory from YouTube…",
-    );
-    setNotice(`Checking ${channel}'s uploaded-video titles for duplicates…`);
     try {
-      const synced = await syncChannelInventory();
-      if (generation !== stateChannelGenerationRef.current) return;
-      logDedupeActivity(
-        "success",
-        `Synced ${synced} uploaded video${pluralS(synced)} into this device's channel inventory.`,
-      );
-      setDedupePhase("rebuilding");
-      logDedupeActivity(
-        "running",
-        "Rebuilding normalized exact-title and numbered-copy candidates locally…",
-      );
-      const refreshed = await refresh();
-      if (generation !== stateChannelGenerationRef.current) return;
-      const candidateCount = refreshed.duplicates.length;
-      logDedupeActivity(
-        "success",
-        `Ready for review: ${candidateCount} duplicate candidate${pluralS(candidateCount)}. No videos were removed.`,
-      );
-      setDedupePhase("complete");
-      setNotice(
-        `Dedupe complete for ${channel}: ${synced} uploaded video${pluralS(synced)} checked and ${candidateCount} candidate${pluralS(candidateCount)} ready for review.`,
-      );
+      const { refreshDedupeInventory } = await import("./lib/provider-library-actions");
+      await refreshDedupeInventory({ channel, current: () => generation === stateChannelGenerationRef.current,
+        sync: syncChannelInventory, refresh, phase: setDedupePhase, log: logDedupeActivity, notice: setNotice,
+        report: (error) => reportOperatorError(error, "dedupe") });
     } catch (error) {
       if (generation !== stateChannelGenerationRef.current) return;
-      const message = await reportOperatorError(error, "dedupe");
       setDedupePhase("error");
-      logDedupeActivity("error", `Dedupe stopped: ${message}`);
-      setNotice(`Dedupe could not run: ${message}`);
+      await reportOperatorError(error, "dedupe");
     } finally {
       setDedupeBusy(false);
       setBusy(false);
@@ -1025,17 +998,20 @@ export default function App({
     );
   }
 
+  const connectionScope = providerConnectionScope(connectionSettings);
   return (
+    <ProviderConnectionContext.Provider value={connectionScope}>
     <main className={appShellClass}>
       {isTauri && connectionSettings?.activeChannelId && (
         <Suspense fallback={null}>
           <RevisionedStateBridge
+            key={connectionScope}
             options={[
               connectionSettings.activeChannelId,
               snapshot,
               stateChannelIdRef,
               stateRevisionRef,
-              setConnectionSettings,
+              (settings) => updateConnection(settings, false),
               setSnapshot,
               setPreflightScan,
               setPreflightFileCount,
@@ -1277,5 +1253,6 @@ export default function App({
 
       <Suspense fallback={null}><WorkspaceFooter /></Suspense>
     </main>
+    </ProviderConnectionContext.Provider>
   );
 }

@@ -180,6 +180,7 @@ This is the source of truth for planned work. Keep one row per task and link the
 | [TASK166](TASK166-watched-queue-dispatch-liveness.md) | Watched queue dispatch and waiting reasons | completed | Codex | TASK097, TASK108, TASK147 | Correct Pacific Cloud retry; preserve separate channel holds; visible native queue reasons. 12 rendered checks pass. |
 | [TASK167](TASK167-provider-query-optimization.md) | Minimize provider reads | completed | Codex | TASK108, TASK147, TASK166 | Shared scoped inventory, recent merge, quota/backoff gates and bounded follow-up reuse. Warm checks zero reads; confirmed local titles remain protected. |
 | [TASK168](TASK168-live-google-project-quota.md) | Google-reported project quota | completed | Codex | TASK147, TASK167 | Separate read-only Cloud grant, usage/limits and sample timestamps. Integrated 576 frontend/512 native tests and 22 quota rendered checks pass; live IAM remains unverified. |
+| [TASK169](TASK169-credential-replacement-upload-recovery.md) | Credential replacement and resumable upload recovery | completed | Codex | TASK145, TASK166, TASK167 | App-wide credential fences, authorized resume requests, durable waits and post-filter limits. 591 frontend / 545 native tests, 22 rendered checks, builds/checks and budgets pass. Installed/live uploads remain unverified. |
 
 ## Status values
 

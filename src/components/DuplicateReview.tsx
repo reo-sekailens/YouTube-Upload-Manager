@@ -31,6 +31,7 @@ import { openAndCopyGoogleAuthorization } from "../lib/google-authorization";
 import { windowItems } from "../lib/list-windowing";
 import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
 import { subscribeLocalStateChanges } from "../lib/state-events";
+import { useProviderConnectionScope } from "../lib/provider-connection";
 import type { DuplicateCandidate } from "../lib/types";
 import { PaginationControls } from "./PaginationControls";
 
@@ -741,6 +742,7 @@ export function DuplicateReview({
   onDeletionComplete,
   onBulkDeletionComplete,
 }: DuplicateReviewProps) {
+  const connectionScope = useProviderConnectionScope();
   const [previewCandidateId, setPreviewCandidateId] = useState<string>();
   useEffect(() => setPreviewCandidateId(undefined), [activeChannelId]);
   const [selectedVideos, setSelectedVideos] =
@@ -818,13 +820,17 @@ export function DuplicateReview({
 
   useEffect(() => {
     if (!isTauri) return;
+    let active = true;
+    setBulkAuthorized(false); setBulkSudoActive(false); setBulkError("");
     void loadConnectionSettings()
       .then((settings) => {
+        if (!active || settings.activeChannelId !== activeChannelId) return;
         setBulkAuthorized(settings.deletionAuthorized === true);
         setBulkSudoActive(settings.deletionSudoActive === true);
       })
       .catch(() => undefined);
-  }, []);
+    return () => { active = false; };
+  }, [activeChannelId, connectionScope]);
   useEffect(() => {
     if (!isTauri || !activeChannelId) return;
     let active = true;
@@ -856,7 +862,7 @@ export function DuplicateReview({
       active = false;
       unsubscribe?.();
     };
-  }, [activeChannelId, setBulkAuthorizing]);
+  }, [activeChannelId, connectionScope, setBulkAuthorizing]);
 
   useEffect(() => {
     if (!bulkAuthorizing || !isTauri) return;
@@ -887,7 +893,7 @@ export function DuplicateReview({
       active = false;
       if (timeout !== undefined) window.clearTimeout(timeout);
     };
-  }, [bulkAuthorizing, setBulkAuthorizing]);
+  }, [bulkAuthorizing, connectionScope, setBulkAuthorizing]);
 
   const toggleSelection = useCallback((video: SelectedDuplicateVideo, checked: boolean) =>
     setSelectedVideos((current) => {

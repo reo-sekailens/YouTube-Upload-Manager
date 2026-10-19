@@ -123,6 +123,9 @@ export default function VideoTitleRename({
   useEffect(() => {
     void refresh();
   }, [refresh, refreshVersion]);
+  useEffect(() => {
+    setManagementActive(false); setManagementAuthorized(false); setAuthorizing(false);
+  }, [operationFence]);
 
   const compiled = useMemo(() => compileTitleRename(pattern, flags), [pattern, flags]);
   const preview = useMemo(

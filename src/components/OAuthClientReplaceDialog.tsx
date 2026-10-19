@@ -99,7 +99,8 @@ export function OAuthClientReplaceDialog({ expectedChannelId, channelName, limit
   const mounted = useRef(true);
   const pending = useRef(false);
   const reading = useRef(false);
-  const fence = useWorkspaceRequestFence(expectedChannelId);
+  // This review owns the promotion itself and must survive its successful revision change.
+  const fence = useWorkspaceRequestFence(expectedChannelId, false);
   const [step, setStep] = useState<ReplacementStep>("choose");
   const [review, setReview] = useState<OAuthClientReplacementReview>();
   const [busy, setBusy] = useState(false);

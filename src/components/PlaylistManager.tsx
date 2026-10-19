@@ -98,6 +98,11 @@ export default function PlaylistManager({ activeChannel, activeChannelId, onNoti
     selectionAnchor.current = undefined;
   }, [activeChannelId]);
   useEffect(() => { void refresh(); }, [refresh, refreshVersion]);
+  useEffect(() => {
+    setAuthorized(false); setManagementMode(false); setAddError(""); setBusy(false);
+    setAddProgress(null); setSortProgress(null);
+    sorting.current = null; adding.current = null;
+  }, [permissionFence, operationFence]);
 
   useEffect(() => {
     if (!isTauri) return;

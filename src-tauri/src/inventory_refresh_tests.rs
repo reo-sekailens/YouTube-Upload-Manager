@@ -526,6 +526,7 @@ mod tests {
         fixture.expire_head();
         let before = fixture.checkpoint();
         let mut calls = 0;
+        let failure_started = Utc::now();
         let first =
             run_inventory_refresh(&fixture.state, false, Some("channel-a"), |endpoint, _| {
                 calls += 1;
@@ -533,7 +534,19 @@ mod tests {
                 Err("Synthetic network failure".into())
             })
             .unwrap_err();
+        let failure_finished = Utc::now();
         assert_eq!(first, "Synthetic network failure");
+        let mut held = fixture.checkpoint();
+        let original_retry = DateTime::parse_from_rfc3339(held.retry_after.as_deref().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(original_retry >= failure_started + ChronoDuration::seconds(60));
+        assert!(original_retry <= failure_finished + ChronoDuration::seconds(60));
+        // These repeated database reads can exceed the production 60-second
+        // window on a slow disk. Test admission with a retained future hold;
+        // the adjacent deadline test checks expiry using its explicit clock.
+        held.retry_after = Some((Utc::now() + ChronoDuration::days(1)).to_rfc3339());
+        youtube_read_cache::save(&fixture.db(), "inventory", &fixture.key(), &held).unwrap();
         for _ in 0..100 {
             assert!(
                 run_inventory_refresh(&fixture.state, false, Some("channel-a"), |_, _| {
@@ -549,7 +562,7 @@ mod tests {
         assert_eq!(saved.checked_at, before.checked_at);
         assert_eq!(saved.full_synced_at, before.full_synced_at);
         assert_eq!(saved.failures, 1);
-        assert!(saved.retry_after.is_some());
+        assert_eq!(saved.retry_after, held.retry_after);
         assert_eq!(inventory_count(&fixture.db(), "channel-a").unwrap(), 1);
     }
 

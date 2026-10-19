@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DashboardSnapshot, StateChangeBatch } from "./types";
+import type { ConnectionSettings, DashboardSnapshot, StateChangeBatch } from "./types";
 
 const mocks = vi.hoisted(() => ({
   connection: vi.fn(), snapshot: vi.fn(), changes: vi.fn(), subscribe: vi.fn(),
@@ -81,5 +81,46 @@ describe("revision bridge channel switches", () => {
     expect(app.setSnapshot).not.toHaveBeenCalled();
     expect(app.setConnection).not.toHaveBeenCalled();
     expect(app.updateConnection).not.toHaveBeenCalled();
+  });
+
+  it("discards a late same-channel credential reply after the connection-keyed bridge is replaced", async () => {
+    const reply = pending<ConnectionSettings>();
+    const current: ConnectionSettings = { connected: true, activeChannelId: "channel-a", connectionRevision: "new-binding" };
+    mocks.connection.mockReturnValueOnce(reply.promise).mockResolvedValue(current);
+    const previous = install();
+    await settle();
+    const change: StateChangeBatch = {
+      fromRevision: 1, toRevision: 2, resetRequired: false,
+      changes: [{ revision: 2, channelId: "channel-a", surface: "connection", entityId: "connection", eventKind: "invalidated" }],
+    };
+    listener(change);
+    await settle();
+    expect(mocks.connection).toHaveBeenCalledOnce();
+    stop?.();
+    const replacement = install();
+    await settle();
+    listener(change);
+    await settle();
+    expect(replacement.updateConnection).toHaveBeenCalledExactlyOnceWith(current);
+    reply.resolve({ ...current, connectionRevision: "old-binding" });
+    await settle();
+    expect(previous.updateConnection).not.toHaveBeenCalled();
+    expect(replacement.updateConnection).toHaveBeenCalledExactlyOnceWith(current);
+  });
+
+  it("discards an old same-channel bootstrap pair after credential scope teardown", async () => {
+    const reply = pending<DashboardSnapshot>();
+    mocks.changes.mockResolvedValue({ ...emptyBatch, resetRequired: true });
+    mocks.snapshot.mockReturnValue(reply.promise);
+    mocks.connection.mockResolvedValue({ connected: true, activeChannelId: "channel-a", connectionRevision: "old-binding" });
+    const previous = install();
+    await settle();
+    expect(mocks.snapshot).toHaveBeenCalledOnce();
+    stop?.();
+    reply.resolve({ ...snapshot, revision: 20 });
+    await settle();
+    expect(previous.setSnapshot).not.toHaveBeenCalled();
+    expect(previous.setConnection).not.toHaveBeenCalled();
+    expect(previous.updateConnection).not.toHaveBeenCalled();
   });
 });

@@ -8,6 +8,7 @@ import {
 import { loadManualUploadDefaults, saveManualUploadDefaults } from "../lib/manual-upload-defaults";
 import type { ManualUploadDefaults, UploadVisibility, YouTubePlaylist } from "../lib/types";
 import { assertWorkspaceChannel, workspaceErrorMessage } from "../lib/workspace-requests";
+import { useProviderConnectionScope } from "../lib/provider-connection";
 import "./ManualUploadDefaultsPanel.lazy.css";
 
 type ManualUploadDefaultsPanelProps = {
@@ -40,6 +41,9 @@ export async function loadDefaultPlaylistsForChannel(
 
 export function ManualUploadDefaultsPanel({ activeChannelId, activeChannel }: ManualUploadDefaultsPanelProps) {
   const id = useId();
+  const connectionScope = useProviderConnectionScope();
+  const connectionScopeRef = useRef(connectionScope);
+  connectionScopeRef.current = connectionScope;
   const [defaults, setDefaults] = useState<ManualUploadDefaults>();
   const [loadingDefaults, setLoadingDefaults] = useState(true);
   const [defaultsError, setDefaultsError] = useState("");
@@ -71,7 +75,7 @@ export function ManualUploadDefaultsPanel({ activeChannelId, activeChannel }: Ma
 
   useEffect(() => {
     const generation = ++defaultsRead.current;
-    const current = () => mounted.current && scope.current === activeChannelId && defaultsRead.current === generation;
+    const current = () => mounted.current && scope.current === activeChannelId && connectionScopeRef.current === connectionScope && defaultsRead.current === generation;
     setDefaults(undefined);
     setLoadingDefaults(true);
     setDefaultsError("");
@@ -85,11 +89,11 @@ export function ManualUploadDefaultsPanel({ activeChannelId, activeChannel }: Ma
       if (current()) setLoadingDefaults(false);
     });
     return () => { defaultsRead.current += 1; };
-  }, [activeChannelId, reload]);
+  }, [activeChannelId, connectionScope, reload]);
 
   useEffect(() => {
     const generation = ++playlistRead.current;
-    const current = () => mounted.current && scope.current === activeChannelId && playlistRead.current === generation;
+    const current = () => mounted.current && scope.current === activeChannelId && connectionScopeRef.current === connectionScope && playlistRead.current === generation;
     setPlaylists([]);
     loadedPlaylistScope.current = undefined;
     setPlaylistError("");
@@ -113,13 +117,13 @@ export function ManualUploadDefaultsPanel({ activeChannelId, activeChannel }: Ma
       }
     });
     return () => { playlistRead.current += 1; };
-  }, [activeChannelId, playlistRefresh]);
+  }, [activeChannelId, connectionScope, playlistRefresh]);
 
   const save = useCallback(async (patch: DefaultsPatch, confirmation: string) => {
     if (!isTauri || mutationPending.current || loadingDefaults || !defaults) return;
     const channelAtStart = activeChannelId;
     const generation = ++defaultsRead.current;
-    const current = () => mounted.current && scope.current === channelAtStart && defaultsRead.current === generation;
+    const current = () => mounted.current && scope.current === channelAtStart && connectionScopeRef.current === connectionScope && defaultsRead.current === generation;
     mutationPending.current = true;
     setSaving(true);
     setSaveError("");
@@ -140,7 +144,7 @@ export function ManualUploadDefaultsPanel({ activeChannelId, activeChannel }: Ma
         if (!current()) setReload((value) => value + 1);
       }
     }
-  }, [activeChannelId, defaults, loadingDefaults]);
+  }, [activeChannelId, connectionScope, defaults, loadingDefaults]);
 
   const visiblePlaylists = loadedPlaylistScope.current === activeChannelId ? playlists : [];
   const selectedPlaylistId = defaults?.playlistChannelId === activeChannelId ? defaults?.playlistId ?? "" : "";

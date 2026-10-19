@@ -124,6 +124,21 @@ guards serialize admission and promotion; queued source references and protected
 resumable checkpoints are retained. Replacement invalidates token caches and
 separate management permission so the latter must be granted again.
 
+TASK169 exposes only a nonsecret hash of the selected channel/client/project/bundle
+as the webview connection revision. Provider request fences invalidate together
+when that revision changes, including same-channel replacement, while ordinary
+polling retains drafts. Historical queue quota text is refreshed from native
+scope records without clearing independent project/channel holds.
+
+Resumable status/chunk PUTs carry native authorization only to validated YouTube
+upload hosts and never follow redirects. Exact completed IDs are verified through
+the normal channel/visibility receipt boundary. Lazy `youtube_upload_recovery`
+metadata persists item/channel/revision retry deadlines (60–900 seconds, honoring
+longer Retry-After) and terminal review holds. Held sessions release transfer
+capacity; changed credentials or an explicitly reviewed retry allow another
+session check, never a blind new upload. Sources and protected checkpoints stay
+intact. The existing deadline worker resumes durable waits after restart.
+
 `youtube_limits` reads exact structured provider reasons. Cloud API quota takes
 precedence, while mixed errors persist both API and channel pauses atomically.
 Schema 5 adds credential/project metadata and API quota records without copying

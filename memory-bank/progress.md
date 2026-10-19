@@ -1,5 +1,31 @@
 # Progress
 
+## 2026-10-19 — Credential replacement and upload dispatch recovery
+
+- TASK169 fixes same-channel OAuth replacement across provider reads, shared
+  settings bridges and custom asynchronous panels. Late responses cannot restore
+  old project errors; ordinary refreshes retain drafts and add no extra reads.
+  Native queued quota descriptions follow authoritative current-scope pauses.
+- Resumable status/chunk requests use native bearer authorization and validated
+  upload hosts with redirects disabled. Status decoding retains completed IDs,
+  validates ranges and separates exact quotas from terminal/transient failures.
+  Durable item/channel/credential waits release upload capacity while preserving
+  originals and protected checkpoints. Existing workers restore retry deadlines.
+- Both selection paths stream past held rows before applying the 256-candidate
+  cap; earlier terminal/future holds and unavailable sources cannot hide later
+  eligible work. Priority order and account isolation remain explicit.
+- Local frontend verification passes 591 tests and 22 rendered desktop/mobile
+  fixture checks, strict TypeScript, production build, Tailwind and unchanged
+  bundle budgets (69.95 KiB initial JS gzip). The final full native suite passes
+  545 tests with nine opt-in cases ignored, including five new selection cases.
+  Final locked/offline non-test compilation and all four exact native performance
+  gates pass; worker configuration and five budget-runner tests pass too.
+  Source/fixture hashes, logs and screenshots are in the TASK169
+  thread evidence directory recorded in its task file.
+- The running nightly.17 executable remains unchanged. No personal provider
+  operation or upload was used for validation. Installed packaging, live session
+  recovery and actual queued upload acceptance remain separate verification.
+
 ## 2026-10-19 — Quota recovery, fewer provider reads and Google quota reports
 
 - TASK166 corrects Cloud API retry to midnight Pacific and repairs oversized

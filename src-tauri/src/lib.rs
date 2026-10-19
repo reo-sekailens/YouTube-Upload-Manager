@@ -56,8 +56,11 @@ mod upload_metadata;
 mod upload_performance_benchmarks;
 mod upload_plan;
 mod upload_plan_execution;
+mod upload_recovery;
 mod upload_retry;
 mod upload_scheduler;
+#[cfg(test)]
+mod upload_session_tests;
 mod video_assets;
 mod youtube_limits;
 mod youtube_read_cache;
@@ -556,6 +559,8 @@ struct StartupBootstrap {
 #[serde(rename_all = "camelCase")]
 struct ConnectionSettings {
     oauth_configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connection_revision: Option<String>,
     active_channel: Option<String>,
     active_channel_id: Option<String>,
     connected: bool,
@@ -1486,15 +1491,25 @@ fn record_upload_quota_pause(state: &AppState, item_id: &str) -> Result<String, 
 fn connection_settings(connection: &Connection) -> Result<ConnectionSettings, String> {
     connection
         .query_row(
-            "SELECT oauth_client_id, active_channel, active_channel_id, connection_detail, deletion_authorized, deletion_sudo_until FROM connection_settings WHERE singleton = 1",
+            "SELECT oauth_client_id, active_channel, active_channel_id, connection_detail, deletion_authorized, deletion_sudo_until, oauth_project_id, oauth_credential_id FROM connection_settings WHERE singleton = 1",
             [],
             |row| {
                 let configured_client_id: Option<String> = row.get(0)?;
                 let active_channel_id: Option<String> = row.get(2)?;
+                let project_id: Option<String> = row.get(6)?;
+                let credential_id: Option<String> = row.get(7)?;
+                let connection_revision = configured_client_id.as_ref().map(|client| {
+                    let identity = serde_json::to_vec(&(
+                        active_channel_id.as_deref(), client,
+                        project_id.as_deref(), credential_id.as_deref(),
+                    )).expect("string-only connection identity serializes");
+                    format!("{:x}", Sha256::digest(identity))
+                });
                 let deletion_sudo_expires_at: Option<String> = row.get(5)?;
                 let deletion_sudo_active = deletion_sudo_is_active(deletion_sudo_expires_at.as_deref());
                 Ok(ConnectionSettings {
                     oauth_configured: configured_client_id.is_some(),
+                    connection_revision,
                     active_channel: row.get(1)?,
                     active_channel_id: active_channel_id.clone(),
                     connected: active_channel_id.is_some(),
@@ -1509,6 +1524,7 @@ fn connection_settings(connection: &Connection) -> Result<ConnectionSettings, St
         .or_else(|error| match error {
             rusqlite::Error::QueryReturnedNoRows => Ok(ConnectionSettings {
                 oauth_configured: false,
+                connection_revision: None,
                 active_channel: None,
                 active_channel_id: None,
                 connected: false,
@@ -1636,10 +1652,7 @@ fn upload_session_entry(item_id: &str) -> Result<CredentialEntry, String> {
 }
 
 fn save_upload_session(item_id: &str, session_uri: &str) -> Result<(), String> {
-    let url = url::Url::parse(session_uri).map_err(user_error)?;
-    if url.scheme() != "https" {
-        return Err("Refusing to persist a non-HTTPS YouTube upload session.".into());
-    }
+    provider_transport::validate_youtube_upload_uri(session_uri)?;
     upload_session_entry(item_id)?
         .set_password(session_uri)
         .map_err(user_error)
@@ -1647,12 +1660,14 @@ fn save_upload_session(item_id: &str, session_uri: &str) -> Result<(), String> {
 
 fn confirmed_offset_from_range(range: Option<&str>) -> Result<u64, String> {
     let Some(range) = range else { return Ok(0) };
-    range
+    let end = range
         .strip_prefix("bytes=0-")
-        .ok_or_else(|| "YouTube returned an invalid resumable range.".to_string())?
-        .parse::<u64>()
-        .map(|value| value.saturating_add(1))
-        .map_err(|_| "YouTube returned an invalid resumable range.".into())
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .ok_or_else(|| "YouTube returned an invalid resumable range.".to_string())?;
+    end.parse::<u64>()
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| "YouTube returned an invalid resumable range.".into())
 }
 
 fn oauth_verifier_entry(state: &str) -> Result<CredentialEntry, String> {
@@ -2197,7 +2212,10 @@ fn decode_upload_session_lookup(
     result: Result<String, keyring::Error>,
 ) -> Result<Option<String>, String> {
     match result {
-        Ok(uri) if !uri.trim().is_empty() => Ok(Some(uri)),
+        Ok(uri) if !uri.trim().is_empty() => {
+            provider_transport::validate_youtube_upload_uri(&uri)?;
+            Ok(Some(uri))
+        },
         Ok(_) => Err("The protected upload checkpoint is unreadable. Restore secure storage before retrying; a new upload was not started.".into()),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(_) => Err("The protected upload checkpoint is unavailable. Unlock secure storage before retrying; a new upload was not started.".into()),
@@ -2959,12 +2977,6 @@ fn establish_upload_session(
     Ok(session_uri.to_string())
 }
 
-fn youtube_upload_limit_response(response: reqwest::blocking::Response) -> Option<&'static str> {
-    let status = response.status().as_u16();
-    let body = response.text().unwrap_or_default();
-    youtube_upload_limit_marker(status, &body)
-}
-
 fn youtube_upload_limit_marker(status: u16, body: &str) -> Option<&'static str> {
     match youtube_limits::classify(status, body) {
         Some(youtube_limits::UploadLimitKind::ApiQuota)
@@ -3182,31 +3194,125 @@ fn update_playlist_item_position(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum UploadSessionStatus {
+    Incomplete(u64),
+    Completed(String),
+}
+
+#[derive(Debug)]
+struct UploadSessionFailure {
+    detail: String,
+    terminal: bool,
+    retry_after: Option<DateTime<Utc>>,
+    limit: Option<&'static str>,
+}
+
+fn upload_retry_after(value: Option<&str>, time: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let value = value?;
+    value
+        .parse::<i64>()
+        .ok()
+        .filter(|seconds| *seconds >= 0)
+        .and_then(ChronoDuration::try_seconds)
+        .and_then(|duration| time.checked_add_signed(duration))
+        .or_else(|| {
+            DateTime::parse_from_rfc2822(value)
+                .ok()
+                .map(|time| time.with_timezone(&Utc))
+        })
+        .filter(|deadline| *deadline > time)
+}
+
+fn decode_upload_session_response(
+    status: u16,
+    range: Option<&str>,
+    body: &str,
+    total_bytes: u64,
+    retry_after: Option<DateTime<Utc>>,
+) -> Result<UploadSessionStatus, UploadSessionFailure> {
+    let failure = |detail: String, terminal| UploadSessionFailure {
+        detail,
+        terminal,
+        retry_after,
+        limit: None,
+    };
+    if status == 308 {
+        let offset = confirmed_offset_from_range(range)
+            .map_err(|_| failure("YouTube returned an invalid saved-upload byte range; the checkpoint is retained for review.".into(), true))?;
+        if offset > total_bytes {
+            return Err(failure("YouTube returned a saved-upload range beyond the original file; the checkpoint is retained for review.".into(), true));
+        }
+        if retry_after.is_some() || offset == total_bytes {
+            return Err(failure("YouTube has not returned a final upload receipt yet; the saved session will be checked again after a delay.".into(), false));
+        }
+        return Ok(UploadSessionStatus::Incomplete(offset));
+    }
+    if (200..300).contains(&status) {
+        let video_id = serde_json::from_str::<serde_json::Value>(body).ok()
+            .and_then(|value| value.get("id").and_then(serde_json::Value::as_str).map(str::to_owned))
+            .filter(|id| !id.is_empty() && id.len() <= 256 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+            .ok_or_else(|| failure("YouTube completed this saved session without a readable video ID; the checkpoint is retained for review.".into(), true))?;
+        return Ok(UploadSessionStatus::Completed(video_id));
+    }
+    if let Some(marker) = youtube_upload_limit_marker(status, body) {
+        return Err(UploadSessionFailure {
+            detail: marker.into(),
+            terminal: false,
+            retry_after,
+            limit: Some(marker),
+        });
+    }
+    let detail = match status {
+        401 | 403 => format!("YouTube did not authorize this saved upload session (HTTP {status}). Reconnect the same channel or review this item; its original and protected checkpoint are retained."),
+        404 | 410 => format!("YouTube no longer accepts this saved upload session (HTTP {status}). Review this existing item before any new upload; its original and protected checkpoint are retained."),
+        _ => format!("YouTube could not confirm this saved upload session (HTTP {status}); its original and protected checkpoint are retained."),
+    };
+    Err(failure(
+        detail,
+        !matches!(status, 408 | 429 | 500 | 502 | 503 | 504),
+    ))
+}
+
 fn query_upload_session(
     state: &AppState,
     session_uri: &str,
     total_bytes: u64,
-) -> Result<Option<u64>, String> {
+    access_token: &str,
+) -> Result<UploadSessionStatus, UploadSessionFailure> {
+    provider_transport::validate_youtube_upload_request_uri(session_uri).map_err(|detail| {
+        UploadSessionFailure {
+            detail,
+            terminal: true,
+            retry_after: None,
+            limit: None,
+        }
+    })?;
     let response = provider_transport(state)
-        .upload_client()?
+        .upload_client().map_err(|detail| UploadSessionFailure { detail, terminal: false, retry_after: None, limit: None })?
         .put(session_uri)
+        .bearer_auth(access_token)
+        .timeout(Duration::from_secs(45))
         .header("Content-Length", "0")
         .header("Content-Range", format!("bytes */{total_bytes}"))
         .send()
-        .map_err(|_| "YouTube upload-session reconciliation could not be reached.".to_string())?;
-    if response.status().as_u16() == 308 {
-        return confirmed_offset_from_range(
-            response
-                .headers()
-                .get("range")
-                .and_then(|value| value.to_str().ok()),
-        )
-        .map(Some);
-    }
-    if response.status().is_success() {
-        return Ok(None);
-    }
-    Err("YouTube upload session expired or could not be safely reconciled.".into())
+        .map_err(|_| UploadSessionFailure { detail: "YouTube upload-session reconciliation could not be reached; the protected checkpoint is retained.".into(), terminal: false, retry_after: None, limit: None })?;
+    let status = response.status().as_u16();
+    let range = response
+        .headers()
+        .get("range")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let retry_after = upload_retry_after(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+        Utc::now(),
+    );
+    let mut body = String::new();
+    let _ = response.take(64 * 1024).read_to_string(&mut body);
+    decode_upload_session_response(status, range.as_deref(), &body, total_bytes, retry_after)
 }
 
 fn upload_admission_delay(
@@ -3313,6 +3419,64 @@ fn upload_body_cancellation(
             }).unwrap_or(true)
     });
     Arc::new(move || check.is_cancelled())
+}
+
+fn retain_upload_session_failure(
+    state: &AppState,
+    item_id: &str,
+    expected_channel: &str,
+    failure: UploadSessionFailure,
+) -> Result<bool, String> {
+    if let Some(marker) = failure.limit {
+        return Err(marker.into());
+    }
+    let mut connection = database(state)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(user_error)?;
+    let settings = connection_settings(&transaction)?;
+    if settings.active_channel_id.as_deref() != Some(expected_channel) {
+        return Err("The upload connection changed; the protected session is retained.".into());
+    }
+    let revision = settings
+        .connection_revision
+        .ok_or("The saved upload has no active credential scope.")?;
+    let deadline = upload_recovery::record_failure_with_retry_after(
+        &transaction,
+        item_id,
+        expected_channel,
+        &revision,
+        failure.terminal,
+        Utc::now(),
+        failure.retry_after,
+    )?;
+    let detail = match deadline {
+        Some(until) => format!(
+            "{} Automatic session check after {}. Other reviewed uploads can continue.",
+            failure.detail,
+            until.to_rfc3339()
+        ),
+        None => failure.detail,
+    };
+    let changed = transaction.execute("UPDATE upload_items SET status='needs_reconciliation',detail=?1,updated_at=?2 WHERE id=?3 AND channel_id=?4 AND status IN ('dispatching','uploading') AND video_id IS NULL",params![detail,now(),item_id,expected_channel]).map_err(user_error)?;
+    if changed != 1 {
+        return Err(
+            "This upload changed while its recovery wait was saved; its checkpoint is retained."
+                .into(),
+        );
+    }
+    audit(
+        &transaction,
+        item_id,
+        if failure.terminal {
+            "youtube_upload_session_review_required"
+        } else {
+            "youtube_upload_session_retry_scheduled"
+        },
+        &detail,
+    )?;
+    transaction.commit().map_err(user_error)?;
+    Ok(false)
 }
 
 fn upload_item(state: &AppState, item_id: &str) -> Result<bool, String> {
@@ -3449,33 +3613,64 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<bool, String> {
     }
     let access_token = refreshed_access_token(state)?;
     let session_uri = match saved_session {
-        Some(uri) => match query_upload_session(state, &uri, total_bytes)? {
-            Some(offset) => {
-                begin_upload_transfer(
-                    state,
-                    item_id,
-                    offset,
-                    "Resuming from YouTube-confirmed byte range.",
-                )?;
-                uri
+        Some(uri) => {
+            match query_upload_session(state, &uri, total_bytes, &access_token) {
+                Ok(UploadSessionStatus::Incomplete(offset)) => {
+                    begin_upload_transfer(
+                        state,
+                        item_id,
+                        offset,
+                        "Resuming from YouTube-confirmed byte range.",
+                    )?;
+                    uri
+                }
+                Ok(UploadSessionStatus::Completed(video_id)) => {
+                    // A repeated terminal response contains the original receipt.
+                    // Verify that exact result on the approved channel, never insert
+                    // another video just because this worker did not see completion.
+                    begin_upload_transfer(
+                        state,
+                        item_id,
+                        total_bytes,
+                        "Verifying YouTube's completed upload receipt.",
+                    )?;
+                    if let Err(error) = verify_uploaded_video(
+                        state,
+                        &access_token,
+                        &video_id,
+                        expected_channel_id,
+                        visibility,
+                    ) {
+                        persist_unverified_provider_result(
+                            state,
+                            item_id,
+                            expected_channel_id,
+                            total_bytes,
+                            &video_id,
+                            &error,
+                        )?;
+                        return Ok(false);
+                    }
+                    persist_provider_success(
+                        state,
+                        item_id,
+                        expected_channel_id,
+                        total_bytes,
+                        &video_id,
+                    )?;
+                    let _ = upload_recovery::clear(&connection, item_id);
+                    return Ok(true);
+                }
+                Err(failure) => {
+                    return retain_upload_session_failure(
+                        state,
+                        item_id,
+                        expected_channel_id,
+                        failure,
+                    )
+                }
             }
-            None => {
-                // This session has reached a terminal provider state. Retain
-                // the local item for explicit review, but remove the session
-                // from the recovery lane so it cannot repeatedly preempt a
-                // genuinely resumable upload.
-                clear_upload_session(item_id)?;
-                mark_upload_state(
-                    state,
-                    item_id,
-                    "needs_reconciliation",
-                    total_bytes,
-                    "YouTube reports a completed upload; review the channel before any retry.",
-                    None,
-                )?;
-                return Ok(false);
-            }
-        },
+        }
         None => {
             if !upload_boundary_ready(state, item_id, expected_channel_id, false, Utc::now())? {
                 return Ok(false);
@@ -3535,9 +3730,11 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<bool, String> {
         let maximum =
             upload_controls::recommended_chunk_bytes(&controls, current, chunk_bytes as u64);
         let bytes = (total_bytes - offset).min(maximum);
-        let response = provider_transport(state).put_upload_chunk_with_client_and_controls(
+        let chunk_access_token = refreshed_access_token(state)?;
+        let response = provider_transport(state).put_upload_chunk_with_client_and_controls_authorized(
             &upload_client,
             &session_uri,
+            &chunk_access_token,
             workspace_path,
             offset,
             bytes,
@@ -3550,13 +3747,31 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<bool, String> {
             } else {error}
         })?;
         if response.status().as_u16() == 308 {
-            offset = confirmed_offset_from_range(
+            let retry_after = upload_retry_after(
+                response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok()),
+                Utc::now(),
+            );
+            let progress = decode_upload_session_response(
+                308,
                 response
                     .headers()
                     .get("range")
                     .and_then(|value| value.to_str().ok()),
-            )?;
+                "",
+                total_bytes,
+                retry_after,
+            );
+            let next = match progress {
+                Ok(UploadSessionStatus::Incomplete(next)) if next > offset => next,
+                Ok(_) => return retain_upload_session_failure(state, item_id, expected_channel_id, UploadSessionFailure { detail: "YouTube did not confirm further upload progress; the protected session will be checked again after a delay.".into(), terminal: false, retry_after, limit: None }),
+                Err(failure) => return retain_upload_session_failure(state, item_id, expected_channel_id, failure),
+            };
+            offset = next;
             record_upload_progress(state, item_id, offset, start_offset, transfer_started)?;
+            upload_recovery::clear(&connection, item_id)?;
             continue;
         }
         if response.status().is_success() {
@@ -3570,7 +3785,7 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<bool, String> {
             let expected_channel_id = channel_id.as_deref().expect("upload channel was validated");
             if let Err(error) = verify_uploaded_video(
                 state,
-                &access_token,
+                &chunk_access_token,
                 video_id,
                 expected_channel_id,
                 visibility,
@@ -3591,15 +3806,22 @@ fn upload_item(state: &AppState, item_id: &str) -> Result<bool, String> {
                 return Ok(false);
             }
             persist_provider_success(state, item_id, expected_channel_id, total_bytes, video_id)?;
+            let _ = upload_recovery::clear(&connection, item_id);
             return Ok(true);
         }
-        if let Some(marker) = youtube_upload_limit_response(response) {
-            return Err(marker.into());
-        }
-        return Err(
-            "YouTube rejected an upload chunk; the session was preserved for reconciliation."
-                .into(),
+        let status = response.status().as_u16();
+        let retry_after = upload_retry_after(
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Utc::now(),
         );
+        let mut body = String::new();
+        let _ = response.take(64 * 1024).read_to_string(&mut body);
+        let failure = decode_upload_session_response(status, None, &body, total_bytes, retry_after)
+            .expect_err("non-success chunk response is a reconciliation failure");
+        return retain_upload_session_failure(state, item_id, expected_channel_id, failure);
     }
     Err("Upload finished without a final YouTube result; reconciliation is required.".into())
 }
@@ -3773,77 +3995,105 @@ fn run_queued_upload(state: AppState, item_id: String) {
             let _ = mark_upload_state(&state, &item_id, "queued", confirmed_bytes, &detail, None);
         }
         Err(_) => {}
-        Ok(None) => match upload_item(&state, &item_id) {
-            Ok(succeeded) => provider_succeeded = succeeded,
-            Err(error) => {
-                if error == DAILY_UPLOAD_LIMIT_MARKER {
-                    let _ = record_upload_quota_pause(&state, &item_id);
-                } else if error == API_QUOTA_LIMIT_MARKER {
-                    let _ = oauth_replacement::record_api_pause(&state, &item_id);
-                } else if error == API_AND_CHANNEL_LIMIT_MARKER {
-                    let _ =
-                        oauth_replacement::record_api_pause_with_channel(&state, &item_id, true);
-                } else if error != UPLOAD_CANCELLED_MARKER {
-                    let confirmed_bytes = database(&state)
-                        .and_then(|connection| {
-                            connection
-                                .query_row(
-                                    "SELECT confirmed_bytes FROM upload_items WHERE id = ?1",
-                                    [&item_id],
-                                    |row| row.get::<_, i64>(0),
-                                )
-                                .map(|value| value as u64)
-                                .map_err(user_error)
-                        })
-                        .unwrap_or(0);
-                    let setup_rejected = error == "YouTube rejected the upload setup request."
-                        && database(&state)
+        Ok(None) => {
+            match upload_item(&state, &item_id) {
+                Ok(succeeded) => provider_succeeded = succeeded,
+                Err(error) => {
+                    if error == DAILY_UPLOAD_LIMIT_MARKER {
+                        let _ = record_upload_quota_pause(&state, &item_id);
+                    } else if error == API_QUOTA_LIMIT_MARKER {
+                        let _ = oauth_replacement::record_api_pause(&state, &item_id);
+                    } else if error == API_AND_CHANNEL_LIMIT_MARKER {
+                        let _ = oauth_replacement::record_api_pause_with_channel(
+                            &state, &item_id, true,
+                        );
+                    } else if error != UPLOAD_CANCELLED_MARKER {
+                        let confirmed_bytes = database(&state)
                             .and_then(|connection| {
-                                upload_retry::definitive_setup_rejection(&connection, &item_id)
+                                connection
+                                    .query_row(
+                                        "SELECT confirmed_bytes FROM upload_items WHERE id = ?1",
+                                        [&item_id],
+                                        |row| row.get::<_, i64>(0),
+                                    )
+                                    .map(|value| value as u64)
+                                    .map_err(user_error)
                             })
-                            .unwrap_or(false);
-                    if error != "YouTube rejected the upload setup request." {
-                        if let Ok(connection) = database(&state) {
-                            let _ = upload_retry::clear_failure(&connection, &item_id);
+                            .unwrap_or(0);
+                        let setup_rejected = error == "YouTube rejected the upload setup request."
+                            && database(&state)
+                                .and_then(|connection| {
+                                    upload_retry::definitive_setup_rejection(&connection, &item_id)
+                                })
+                                .unwrap_or(false);
+                        if error != "YouTube rejected the upload setup request." {
+                            if let Ok(connection) = database(&state) {
+                                let _ = upload_retry::clear_failure(&connection, &item_id);
+                                if matches!(stored_upload_session(&item_id), Ok(Some(_))) {
+                                    if let Ok(settings) = connection_settings(&connection) {
+                                        if let (Some(channel), Some(revision)) = (
+                                            settings.active_channel_id,
+                                            settings.connection_revision,
+                                        ) {
+                                            let item_channel = connection.query_row("SELECT channel_id FROM upload_items WHERE id=?1",[&item_id],|row|row.get::<_,Option<String>>(0)).ok().flatten();
+                                            // The worker has already stopped; delay this exact
+                                            // checkpoint instead of immediately reclaiming a
+                                            // priority slot on every interrupted chunk.
+                                            if item_channel.as_deref() == Some(channel.as_str()) {
+                                                let _ = upload_recovery::record_failure(
+                                                    &connection,
+                                                    &item_id,
+                                                    &channel,
+                                                    &revision,
+                                                    false,
+                                                    Utc::now(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    }
-                    let _ = mark_upload_state(
-                        &state,
-                        &item_id,
-                        if setup_rejected {
-                            "failed"
-                        } else {
-                            "needs_reconciliation"
-                        },
-                        confirmed_bytes,
-                        &error,
-                        None,
-                    );
-                    if let Ok(connection) = database(&state) {
-                        let _ = audit(
-                            &connection,
+                        let _ = mark_upload_state(
+                            &state,
                             &item_id,
                             if setup_rejected {
-                                "upload_setup_rejected"
+                                "failed"
                             } else {
-                                "upload_interrupted"
+                                "needs_reconciliation"
                             },
-                            if setup_rejected {
-                                "YouTube rejected metadata setup before any video bytes were sent; the saved upload can be reviewed for retry."
-                            } else {
-                                "Upload requires provider reconciliation"
-                            },
+                            confirmed_bytes,
+                            &error,
+                            None,
                         );
+                        if let Ok(connection) = database(&state) {
+                            let _ = audit(
+                                &connection,
+                                &item_id,
+                                if setup_rejected {
+                                    "upload_setup_rejected"
+                                } else {
+                                    "upload_interrupted"
+                                },
+                                if setup_rejected {
+                                    "YouTube rejected metadata setup before any video bytes were sent; the saved upload can be reviewed for retry."
+                                } else {
+                                    "Upload requires provider reconciliation"
+                                },
+                            );
+                        }
                     }
                 }
             }
-        },
+        }
     }
     upload_scheduler(&state).release(&item_id);
     // Release the durable/in-memory permit before the next fair handoff.
     let _ = start_queued_uploads_impl(&state);
     if provider_succeeded {
         let _ = ensure_upload_postprocess_worker(state);
+    } else {
+        let _ = ensure_quota_resume_worker(state);
     }
 }
 
@@ -8485,6 +8735,52 @@ fn require_startup_dispatch_ready(gate: &StartupGate) -> Result<(), String> {
     Ok(())
 }
 
+type QueuedUploadRow = (String, String, String, Option<String>, Option<String>);
+
+/// Bound the ready candidate set after recovery and source validation. Held or
+/// unavailable rows must not occupy all 256 slots ahead of dispatchable work.
+fn eligible_queued_upload_rows(
+    connection: &Connection,
+    channel: &str,
+    revision: &str,
+    time: DateTime<Utc>,
+) -> Result<(bool, Vec<QueuedUploadRow>), String> {
+    let mut statement = connection
+        .prepare("SELECT u.id,u.workspace_path,u.created_at,u.upload_batch_id,u.folder_monitor_id FROM upload_items u LEFT JOIN upload_priority_choices batch ON batch.channel_id=u.channel_id AND batch.kind='batch' AND batch.target_id=u.upload_batch_id LEFT JOIN upload_priority_choices folder ON folder.channel_id=u.channel_id AND folder.kind='folder' AND folder.target_id=u.folder_monitor_id AND EXISTS(SELECT 1 FROM folder_monitors monitor WHERE monitor.id=u.folder_monitor_id AND monitor.channel_id=u.channel_id AND monitor.removed=0) WHERE u.status='queued' AND u.channel_id=?1 ORDER BY CASE WHEN u.confirmed_bytes>0 OR u.detail LIKE 'Saved YouTube resumable session is waiting.%' OR u.detail='Interrupted upload is prioritized for YouTube resumable-session verification.' THEN 1 ELSE 0 END DESC,MAX(COALESCE(batch.priority,0),COALESCE(folder.priority,0),MIN(6,MAX(0,(unixepoch(?2)-COALESCE(unixepoch(u.created_at),unixepoch(?2)))/300))) DESC,u.created_at,u.id")
+        .map_err(user_error)?;
+    let rows = statement
+        .query_map(params![channel, time.to_rfc3339()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(user_error)?;
+    let mut has_queued_items = false;
+    let mut ready = Vec::new();
+    for row in rows {
+        let row = row.map_err(user_error)?;
+        has_queued_items = true;
+        if !upload_recovery::eligible(connection, &row.0, channel, revision, time)?
+            || !Path::new(&row.1).is_file()
+        {
+            continue;
+        }
+        ready.push(row);
+        if ready.len() == 256 {
+            break;
+        }
+    }
+    Ok((has_queued_items, ready))
+}
+
+#[cfg(test)]
+#[path = "queued_upload_selection_tests.rs"]
+mod queued_upload_selection_tests;
+
 fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
     require_startup_dispatch_ready(startup_gate(state))?;
     let scheduler = upload_scheduler(state);
@@ -8506,6 +8802,7 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
             "The active YouTube connection has no immutable channel identity.".to_string()
         })?;
     expire_upload_admission_pauses(&connection, Utc::now())?;
+    oauth_replacement::refresh_queued_limit_details(&connection)?;
     if let Some((_, detail)) = upload_admission_delay(state, Utc::now(), true)? {
         persist_queued_upload_hold(&connection, active_channel_id, &detail)?;
         ensure_quota_resume_worker(state.clone())?;
@@ -8535,14 +8832,16 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
     )?;
     let priority_time = Utc::now();
     let priorities = upload_controls::load_priorities(&connection, active_channel_id)?;
-    let queued_items = connection
-        .prepare("SELECT u.id,u.workspace_path,u.created_at,u.upload_batch_id,u.folder_monitor_id FROM upload_items u LEFT JOIN upload_priority_choices batch ON batch.channel_id=u.channel_id AND batch.kind='batch' AND batch.target_id=u.upload_batch_id LEFT JOIN upload_priority_choices folder ON folder.channel_id=u.channel_id AND folder.kind='folder' AND folder.target_id=u.folder_monitor_id AND EXISTS(SELECT 1 FROM folder_monitors monitor WHERE monitor.id=u.folder_monitor_id AND monitor.channel_id=u.channel_id AND monitor.removed=0) WHERE u.status='queued' AND u.channel_id=?1 ORDER BY CASE WHEN u.confirmed_bytes>0 OR u.detail LIKE 'Saved YouTube resumable session is waiting.%' OR u.detail='Interrupted upload is prioritized for YouTube resumable-session verification.' THEN 1 ELSE 0 END DESC,MAX(COALESCE(batch.priority,0),COALESCE(folder.priority,0),MIN(6,MAX(0,(unixepoch(?2)-COALESCE(unixepoch(u.created_at),unixepoch(?2)))/300))) DESC,u.created_at,u.id LIMIT 256")
-        .map_err(user_error)?
-        .query_map(params![active_channel_id,priority_time.to_rfc3339()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,Option<String>>(4)?)))
-        .map_err(user_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(user_error)?;
-    if queued_items.is_empty() {
+    let (has_queued_items, queued_items) = eligible_queued_upload_rows(
+        &connection,
+        active_channel_id,
+        settings
+            .connection_revision
+            .as_deref()
+            .unwrap_or("unconfigured"),
+        priority_time,
+    )?;
+    if !has_queued_items {
         return Err("No reviewed uploads are waiting in the local queue.".into());
     }
     let mut candidates = Vec::new();
@@ -8550,9 +8849,6 @@ fn start_queued_uploads_impl(state: &AppState) -> Result<usize, String> {
     let mut volume_limits = HashMap::<String, usize>::new();
     for (item_id, workspace_path, created_at, batch_id, folder_id) in queued_items {
         let path = Path::new(&workspace_path);
-        if !path.is_file() {
-            continue;
-        }
         let volume_id = source_volume_id(path);
         let limit = match volume_limits.get(&volume_id) {
             Some(limit) => *limit,
@@ -8721,21 +9017,41 @@ fn recover_resumable_uploads_for_active_channel(
     connection: &mut Connection,
     active_channel_id: &str,
 ) -> Result<usize, String> {
-    let item_ids = connection
-        .prepare(
-            "SELECT id FROM upload_items WHERE status = 'needs_reconciliation' AND channel_id = ?1 ORDER BY updated_at ASC LIMIT 256",
-        )
-        .map_err(user_error)?
-        .query_map([active_channel_id], |row| row.get::<_, String>(0))
-        .map_err(user_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(user_error)?;
-    let mut resumable_ids = Vec::new();
-    for id in item_ids {
-        if stored_upload_session(&id)?.is_some() {
-            resumable_ids.push(id);
+    recover_resumable_uploads_with_checkpoint_lookup(connection, active_channel_id, |id| {
+        Ok(stored_upload_session(id)?.is_some())
+    })
+}
+
+fn recover_resumable_uploads_with_checkpoint_lookup(
+    connection: &mut Connection,
+    active_channel_id: &str,
+    mut has_checkpoint: impl FnMut(&str) -> Result<bool, String>,
+) -> Result<usize, String> {
+    let revision = connection_settings(connection)?
+        .connection_revision
+        .unwrap_or_else(|| "unconfigured".into());
+    let time = Utc::now();
+    let resumable_ids = {
+        let mut statement = connection.prepare(
+            "SELECT id FROM upload_items WHERE status = 'needs_reconciliation' AND video_id IS NULL AND channel_id = ?1 ORDER BY updated_at,id",
+        ).map_err(user_error)?;
+        let rows = statement
+            .query_map([active_channel_id], |row| row.get::<_, String>(0))
+            .map_err(user_error)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let id = row.map_err(user_error)?;
+            if upload_recovery::eligible(connection, &id, active_channel_id, &revision, time)?
+                && has_checkpoint(&id)?
+            {
+                ids.push(id);
+                if ids.len() == 256 {
+                    break;
+                }
+            }
         }
-    }
+        ids
+    };
     if resumable_ids.is_empty() {
         return Ok(0);
     }
@@ -8767,6 +9083,7 @@ fn recover_resumable_uploads_for_active_channel(
 fn kick_automatic_upload_dispatch(state: AppState) {
     spawn_worker(move || {
         let _ = start_queued_uploads_impl(&state);
+        let _ = ensure_quota_resume_worker(state);
     });
 }
 
@@ -8864,6 +9181,7 @@ fn expire_upload_admission_pauses(
 ) -> Result<(), String> {
     let transaction = connection.unchecked_transaction().map_err(user_error)?;
     oauth_replacement::normalize_api_pause_deadlines(&transaction)?;
+    oauth_replacement::refresh_queued_limit_details(&transaction)?;
     for (table, kind) in [
         ("upload_quota_pauses", "youtube_daily_upload_pause_elapsed"),
         ("api_quota_pauses", "youtube_api_quota_pause_elapsed"),
@@ -8970,13 +9288,25 @@ fn upload_resume_plan(
     else {
         return Ok((false, false, false, None));
     };
-    let queued: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM upload_items WHERE channel_id=?1 AND status='queued')",
-            [channel],
-            |row| row.get(0),
-        )
-        .map_err(user_error)?;
+    let revision = settings
+        .connection_revision
+        .as_deref()
+        .unwrap_or("unconfigured");
+    let pending = connection.prepare("SELECT id,status FROM upload_items WHERE channel_id=?1 AND status IN ('queued','needs_reconciliation') AND video_id IS NULL")
+        .map_err(user_error)?.query_map([channel], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))
+        .map_err(user_error)?.collect::<Result<Vec<_>,_>>().map_err(user_error)?;
+    let mut queued = false;
+    for (item, status) in pending {
+        if status != "queued" && !upload_recovery::recorded(&connection, &item, channel, revision)?
+        {
+            continue;
+        }
+        if upload_recovery::eligible(&connection, &item, channel, revision, time)? {
+            queued = true;
+            break;
+        }
+    }
+    let recovery_next = upload_recovery::next_retry(&connection, channel, revision, time)?;
     let permission = settings.deletion_authorized && settings.deletion_sudo_active;
     let cloud = oauth_replacement::active_api_pause(&connection)?
         .map(|until| {
@@ -9058,11 +9388,17 @@ fn upload_resume_plan(
     };
     // Due jobs are handed to the single-pass postprocess worker once. Its
     // finish re-arms this coordinator after durable next_check_at changes.
-    let next = [upload_next, publication_next, assets_next, cloud_next]
-        .into_iter()
-        .flatten()
-        .filter(|deadline| *deadline > time)
-        .min();
+    let next = [
+        upload_next,
+        publication_next,
+        assets_next,
+        cloud_next,
+        recovery_next,
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|deadline| *deadline > time)
+    .min();
     Ok((queued, admission_open, postprocess_now, next))
 }
 
@@ -9861,9 +10197,23 @@ fn run_deferred_startup_recovery(
     if recovery_work.resume_preflight {
         resume_preflight_scan_jobs(state.clone(), app.clone());
     }
+    // Lazy recovery metadata is read only after the safe shell. A persisted
+    // retry must regain its deadline worker even if no ordinary row is queued.
+    let connection = database(state)?;
+    let settings = connection_settings(&connection)?;
+    let recovery_retry = match (
+        settings.active_channel_id.as_deref(),
+        settings.connection_revision.as_deref(),
+    ) {
+        (Some(channel), Some(revision)) => {
+            upload_recovery::next_retry(&connection, channel, revision, DateTime::<Utc>::MIN_UTC)?
+                .is_some()
+        }
+        _ => false,
+    };
     Ok(StartupWorkerEligibility {
         folder: recovery_work.start_folder_worker,
-        quota: recovery_work.start_quota_worker,
+        quota: recovery_work.start_quota_worker || recovery_retry,
         postprocess: recovery_work.start_postprocess_worker,
     })
 }
@@ -13635,7 +13985,7 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
-                "CREATE TABLE connection_settings (singleton INTEGER PRIMARY KEY, oauth_client_id TEXT, active_channel TEXT, active_channel_id TEXT, connection_detail TEXT, deletion_authorized INTEGER NOT NULL DEFAULT 0, deletion_sudo_until TEXT)",
+                "CREATE TABLE connection_settings (singleton INTEGER PRIMARY KEY, oauth_client_id TEXT, active_channel TEXT, active_channel_id TEXT, connection_detail TEXT, deletion_authorized INTEGER NOT NULL DEFAULT 0, deletion_sudo_until TEXT, oauth_project_id TEXT, oauth_credential_id TEXT)",
             )
             .unwrap();
 

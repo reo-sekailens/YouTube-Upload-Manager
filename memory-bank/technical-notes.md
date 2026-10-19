@@ -1,5 +1,31 @@
 # Technical Notes
 
+## Credential replacement and upload recovery (TASK169, 2026-10-19)
+
+- Native connection revisions hash only channel/client/project/protected-bundle
+  metadata. They expose no tokens/client JSON. Provider reads share revision-aware
+  fences; consent/profile coordinators keep their own reviewed-operation fences.
+- Resumable status checks use authenticated empty PUTs with a 45-second deadline;
+  chunk requests refresh native access and carry Authorization. Upload hosts are
+  validated before authorization; pooled provider clients reject redirects.
+- Status decoding retains successful video IDs for canonical verification, checks
+  range bounds/overflow, and separates quota from terminal/transient errors.
+- Recovery waits use one lazily created local SQLite table with no startup schema
+  migration. Keys include item, immutable channel and credential revision. Reads
+  create no table; malformed/DB errors fail closed. Failure/state/audit updates
+  commit together. A terminal hold retains the existing item/session for review.
+- Fresh reviewed items remain dispatchable while another session is held. The
+  shared deadline worker schedules future recovery and restores waits after the
+  safe shell on restart; no additional resident worker or polling loop is added.
+- Recovery and queued selection stream ordered rows and cap accepted candidates
+  after hold/source validation. Candidate buffers/promotions stay bounded at 256;
+  a prefix of older held or missing rows cannot hide later dispatchable work.
+- Exact historical quota descriptions refresh only as presentation from current
+  native pause records. No text match authorizes transfer or erases a hold.
+- Existing explicit library/Dedupe action bodies load lazily so the shared
+  credential fences fit the unchanged initial JavaScript budget (70 KiB gzip).
+
+
 ## Google project quota reports (TASK168, 2026-10-19)
 
 - Read-only Cloud access requests `cloud-platform.read-only` and

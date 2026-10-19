@@ -347,6 +347,8 @@ export type FolderMonitorLocalDeleteProgress = {
 
 /** Safe-to-render metadata. OAuth tokens never enter the webview. */
 export type ConnectionSettings = {
+  /** Opaque native credential-scope identity; changes on channel/client/project/bundle replacement. */
+  connectionRevision?: string;
   /** The native layer has an operator-imported Desktop OAuth client; its ID is not exposed to the webview. */
   oauthConfigured?: boolean;
   activeChannel?: string;

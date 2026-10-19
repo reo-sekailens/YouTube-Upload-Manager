@@ -100,7 +100,8 @@ export function ChannelProfilesDialog({ expectedChannelId, activeChannel, onClos
   const id = useId(); const dialog = useRef<HTMLDialogElement>(null); const heading = useRef<HTMLHeadingElement>(null);
   const callbacks = useRef({ onClose, onChanged, onAuthorize }); callbacks.current = { onClose, onChanged, onAuthorize };
   const openedScope = useRef(expectedChannelId); const closed = useRef(false); const mounted = useRef(false); const pending = useRef(""); const reviewRef = useRef<ChannelProfileReview | undefined>(undefined); const authorization = useRef<YouTubeConnectionStart | undefined>(undefined);
-  const fence = useWorkspaceRequestFence(`profiles:${expectedChannelId ?? "disconnected"}`);
+  // A reviewed switch changes the provider revision before this dialog receives its receipt.
+  const fence = useWorkspaceRequestFence(`profiles:${expectedChannelId ?? "disconnected"}`, false);
   const [workspace, setWorkspace] = useState<ChannelProfileWorkspace>(); const [review, setReview] = useState<ChannelProfileReview>(); const [selected, setSelected] = useState<ChannelProfile>();
   const [mode, setMode] = useState<"profiles" | "add" | "switch" | "remove">("profiles"); const [step, setStep] = useState(0); const [page, setPage] = useState(1); const [approved, setApproved] = useState(false); const [busy, setBusy] = useState(""); const [error, setError] = useState(""); const [notice, setNotice] = useState("");
   const finish = useCallback(() => { if (closed.current) return; closed.current = true; fence.invalidate(); dialog.current?.close(); callbacks.current.onClose(); }, [fence]);

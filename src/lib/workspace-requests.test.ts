@@ -1,7 +1,42 @@
 import { describe, expect, it } from "vitest";
-import { assertWorkspaceChannel, createWorkspaceRequestFence, workspaceErrorMessage } from "./workspace-requests";
+import { assertWorkspaceChannel, createWorkspaceFenceBinding, createWorkspaceRequestFence, workspaceErrorMessage } from "./workspace-requests";
 
 describe("workspace request isolation", () => {
+  it("rejects an old quota failure after a same-channel connection replacement", async () => {
+    const bind = createWorkspaceFenceBinding();
+    const original = bind("channel-a", "old-binding");
+    const acceptOld = original.begin();
+    let reject!: (error: unknown) => void;
+    const oldRequest = new Promise<void>((_resolve, fail) => { reject = fail; });
+    let displayed = "";
+    const pending = oldRequest.catch((error) => { if (acceptOld()) displayed = workspaceErrorMessage(error, "Read failed"); });
+    const replacement = bind("channel-a", "new-binding");
+    expect(replacement).not.toBe(original);
+    const acceptNew = replacement.begin();
+    if (acceptNew()) displayed = "Current project is available";
+    reject("Google Cloud API quota reached");
+    await pending;
+    expect(acceptOld()).toBe(false);
+    expect(acceptNew()).toBe(true);
+    expect(displayed).toBe("Current project is available");
+  });
+
+  it("retains the same read owner and in-flight work during routine settings refreshes", () => {
+    const bind = createWorkspaceFenceBinding();
+    const first = bind("channel-a", "same-binding");
+    const current = first.begin();
+    expect(bind("channel-a", "same-binding")).toBe(first);
+    expect(current()).toBe(true);
+  });
+
+  it("invalidates independent same-channel readers together after the binding changes", () => {
+    const panes = ["upload-defaults", "playlists", "folder-monitor", "quota", "rename", "deletion"].map(() => createWorkspaceFenceBinding());
+    const previous = panes.map((bind) => bind("channel-a", "one"));
+    const reads = previous.map((fence) => fence.begin());
+    panes.forEach((bind, index) => expect(bind("channel-a", "two")).not.toBe(previous[index]));
+    expect(reads.every((current) => !current())).toBe(true);
+  });
+
   it("rejects a late old-channel response even after switching back to the same channel", async () => {
     const fence = createWorkspaceRequestFence("channel-a");
     let resolve!: (value: string) => void;

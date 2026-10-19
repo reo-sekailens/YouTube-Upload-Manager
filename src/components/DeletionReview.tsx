@@ -25,6 +25,7 @@ import { useRetainedWorkspaceState } from "../lib/retained-workspace-state";
 import type { DeletionRequest, RemoteVideo } from "../lib/types";
 import { PaginationControls } from "./PaginationControls";
 import { subscribeLocalStateChanges } from "../lib/state-events";
+import { assertWorkspaceChannel, useWorkspaceRequestFence, workspaceErrorMessage } from "../lib/workspace-requests";
 
 type DeletionReviewProps = {
   activeChannel?: string;
@@ -77,21 +78,27 @@ export function DeletionReview({ activeChannel, activeChannelId, busy = false, i
   );
   const deferredInventorySearch = useDeferredValue(inventorySearch);
   const deferredRequestSearch = useDeferredValue(requestSearch);
+  const readFence = useWorkspaceRequestFence(activeChannelId);
+  const permissionFence = useWorkspaceRequestFence(activeChannelId);
 
   const refresh = useCallback(async () => {
+    const current = readFence.begin();
     if (!isTauri || !activeChannel) {
-      setVideos([]); setRequests([]); setDeletionAuthorized(false); setDeletionSudoActive(false); setDeletionSudoExpiresAt(undefined); return;
+      setVideos([]); setRequests([]); setDeletionAuthorized(false); setDeletionSudoActive(false); setDeletionSudoExpiresAt(undefined); setLoading(false); return;
     }
     setLoading(true);
     try {
       const [nextVideos, nextRequests, settings] = await Promise.all([listRemoteVideos(), listDeletionRequests(), loadConnectionSettings()]);
+      if (!current()) return;
+      assertWorkspaceChannel(settings, activeChannelId);
       setVideos(nextVideos); setRequests(nextRequests); setDeletionAuthorized(settings.deletionAuthorized === true); setDeletionSudoActive(settings.deletionSudoActive === true); setDeletionSudoExpiresAt(settings.deletionSudoExpiresAt);
       if (settings.deletionAuthorized) setAuthorizing(false);
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : "Saved deletion review data could not be loaded.");
-    } finally { setLoading(false); }
-  }, [activeChannel, onNotice, setAuthorizing]);
+      if (current()) onNotice(workspaceErrorMessage(error, "Saved deletion review data could not be loaded."));
+    } finally { if (current()) setLoading(false); }
+  }, [activeChannel, activeChannelId, onNotice, readFence, setAuthorizing]);
 
+  useEffect(() => { setDeletionAuthorized(false); setDeletionSudoActive(false); setDeletionSudoExpiresAt(undefined); }, [permissionFence]);
   useEffect(() => { void refresh(); }, [refresh, refreshVersion]);
   useEffect(() => {
     if (!isTauri || !activeChannelId) return;
@@ -120,13 +127,15 @@ export function DeletionReview({ activeChannel, activeChannelId, busy = false, i
 
   useEffect(() => {
     if (!authorizing || !isTauri) return;
+    const current = permissionFence.begin();
     let active = true;
     let timeout: number | undefined;
     const delays = [250, 500, 1_000, 2_000, 4_000, 8_000, 16_000];
     const checkAuthorization = async (attempt: number) => {
       try {
         const settings = await loadConnectionSettings();
-        if (!active) return;
+        if (!active || !current()) return;
+        assertWorkspaceChannel(settings, activeChannelId);
         if (settings.deletionAuthorized) {
           setDeletionAuthorized(true);
           setDeletionSudoActive(settings.deletionSudoActive === true);
@@ -147,7 +156,7 @@ export function DeletionReview({ activeChannel, activeChannelId, busy = false, i
       active = false;
       if (timeout !== undefined) window.clearTimeout(timeout);
     };
-  }, [authorizing, onNotice, setAuthorizing]);
+  }, [activeChannelId, authorizing, onNotice, permissionFence, setAuthorizing]);
 
   const closeRequestConfirmation = () => { setSelected(undefined); setReviewQueue([]); setConfirmation(""); };
   const closeExecutionConfirmation = () => { setExecutionRequest(undefined); setExecutionConfirmation(""); };

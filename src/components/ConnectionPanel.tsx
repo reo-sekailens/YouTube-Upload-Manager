@@ -24,6 +24,12 @@ export function profileDialogScope(settings: ConnectionSettings): ProfileDialogS
   return { channelId: settings.activeChannelId ?? undefined, channelName: settings.activeChannel ?? undefined };
 }
 
+/** Channel upload holds survive credential changes while project limits are re-read. */
+export function retainedChannelLimit(limit: UploadLimitStatus): UploadLimitStatus {
+  if (limit.kind === "channel_upload") return limit;
+  return limit.channelResumesAt ? { kind: "channel_upload", resumesAt: limit.channelResumesAt } : { kind: "none" };
+}
+
 /** A reviewed native switch may intentionally change channel; the dialog session is its UI fence. */
 export function deliverReviewedProfileSettings(saved: ConnectionSettings, current: () => boolean, accept: (settings: ConnectionSettings) => void) {
   if (!current()) return false;
@@ -73,7 +79,7 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
       if (!current() || mutation.current) return;
       acceptSettings(loaded);
       setLimit(loadedLimit);
-      if (limitError) setError(limitError);
+      setError(limitError);
       setLoading(false);
       if (finishAttempt && attempt.current && loaded.detail !== waitingForGoogle) {
         setNotice(loaded.detail ?? "Google authorization finished.");
@@ -318,6 +324,9 @@ export function ConnectionPanel({ onConnectionChange }: ConnectionPanelProps) {
       </footer>
     </section>
     {replacementChannelId && <Suspense fallback={<p role="status">Opening OAuth JSON replacement…</p>}><OAuthClientReplaceDialog expectedChannelId={replacementChannelId} channelName={settings.activeChannel} limit={limit} onReplaced={(saved) => {
+      readFence.invalidate();
+      setError("");
+      setLimit(retainedChannelLimit);
       acceptSettings(saved);
       setNotice("OAuth JSON replaced after Google verified the same channel. Your queued videos and upload checkpoints are retained.");
       setReplacementChannelId(undefined);

@@ -726,6 +726,9 @@ fn retry_with_sessions(
             if changed != 1 {
                 return Err("This upload changed before its retry was saved.".into());
             }
+            // Explicitly reviewed retries may recheck the same protected
+            // session; they still cannot start a second uncertain upload.
+            upload_recovery::clear(&transaction, &original.id)?;
             audit(&transaction,&original.id,"upload_retry_approved","Operator reviewed the same upload failure and approved a retry after full original BLAKE3 and file identity checks. Upload identity, channel, choices and protected checkpoint were retained; provider sessions reconcile before transfer.")?;
             Ok(())
         })();

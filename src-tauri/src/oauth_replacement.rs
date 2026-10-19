@@ -716,6 +716,7 @@ fn promote(connection: &mut Connection, candidate: &Candidate, detail: &str) -> 
     // transaction. A failed profile fence rolls everything back before any
     // previous protected bundle is erased by the callback.
     channel_profiles::synchronize_active_profile(&transaction)?;
+    refresh_queued_limit_details(&transaction)?;
     audit_global(&transaction, "oauth_client_replaced_same_channel", "Operator replaced protected Desktop OAuth credentials after same-channel verification; saved uploads and checkpoints retained")?;
     transaction.commit().map_err(user_error)
 }
@@ -1030,6 +1031,93 @@ pub(super) fn dispatch_pause(connection: &Connection) -> Result<Option<(String, 
     Ok(limits.resumes_at.zip(limits.detail))
 }
 
+/// Refresh presentation left by a formerly selected project's Cloud pause.
+/// Admission reads native scope/channel holds independently of this text. Never
+/// change lifecycle, receipt, source, checkpoint or pause records here.
+/// Retained observations identify exact legacy rolling-deadline messages after
+/// housekeeping corrects the saved deadline to midnight Pacific.
+pub(super) fn refresh_queued_limit_details(connection: &Connection) -> Result<usize, String> {
+    let settings = connection_settings(connection)?;
+    if !settings.connected || !settings.oauth_configured {
+        return Ok(0);
+    }
+    let Some(channel) = settings.active_channel_id else {
+        return Ok(0);
+    };
+    let scope = configured_quota_scope(connection)?;
+    let observations = connection
+        .prepare("SELECT quota_scope, pause_until, updated_at FROM api_quota_pauses")
+        .map_err(user_error)?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(user_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(user_error)?;
+    let mut historical_details = HashSet::new();
+    let mut selected_deadline = None;
+    for (saved_scope, deadline, observed) in observations {
+        if saved_scope == scope {
+            selected_deadline = Some(deadline.clone());
+        }
+        historical_details.insert(api_pause_detail(&deadline));
+        if let Ok(observed) = DateTime::parse_from_rfc3339(&observed) {
+            historical_details.insert(api_pause_detail(
+                &(observed.with_timezone(&Utc) + ChronoDuration::hours(24)).to_rfc3339(),
+            ));
+            if let Ok((_, reset)) = quota_planner::pacific_window(observed.with_timezone(&Utc)) {
+                historical_details.insert(api_pause_detail(&reset));
+            }
+        }
+    }
+    if historical_details.is_empty() {
+        return Ok(0);
+    }
+    let channel_deadline: Option<String> = connection
+        .query_row(
+            "SELECT pause_until FROM upload_quota_pauses WHERE channel_id = ?1",
+            [&channel],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(user_error)?;
+    let at = Utc::now();
+    let still_active = |value: Option<String>| -> Result<Option<String>, String> {
+        match value {
+            Some(deadline) => {
+                let parsed = DateTime::parse_from_rfc3339(&deadline).map_err(|_| {
+                    "The saved quota pause deadline is invalid; the queue remains paused."
+                        .to_string()
+                })?;
+                Ok((parsed.with_timezone(&Utc) > at).then_some(deadline))
+            }
+            None => Ok(None),
+        }
+    };
+    // Validate both independent holds even when Cloud quota takes precedence.
+    let selected_deadline = still_active(selected_deadline)?;
+    let channel_deadline = still_active(channel_deadline)?;
+    let current = match (selected_deadline, channel_deadline) {
+        (Some(deadline), _) => api_pause_detail(&deadline),
+        (None, Some(deadline)) => quota_pause_detail(&deadline),
+        (None, None) => {
+            "Waiting for the next upload check. Saved uploads and progress are retained.".into()
+        }
+    };
+    let mut changed = 0;
+    for historical in historical_details {
+        changed += connection.execute(
+            "UPDATE upload_items SET detail = ?1, updated_at = ?2 WHERE channel_id = ?3 AND status = 'queued' AND video_id IS NULL AND detail = ?4 AND detail != ?1",
+            params![current, now(), channel, historical],
+        ).map_err(user_error)?;
+    }
+    Ok(changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,6 +1178,263 @@ mod tests {
             .unwrap();
         connection.execute("INSERT INTO channel_profiles(profile_id, channel_id, channel_name, oauth_client_id, oauth_project_id, credential_bundle_id, management_authorized, created_at, updated_at) VALUES(?1,'channel-a','Reviewed channel','old-client.apps.googleusercontent.com','old-project',?2,1,?3,?3)", params![profile_id, bundle_id, now()]).unwrap();
         (profile_id, bundle_id)
+    }
+
+    fn quota_refresh_evidence(connection: &Connection) -> Vec<String> {
+        connection.prepare("SELECT json_object('id',id,'channel',channel_id,'source',source_path,'workspace',workspace_path,'signature',source_modified_key,'digest',digest,'status',status,'bytes',confirmed_bytes,'total',total_bytes,'session',resumable_session_uri,'video',video_id,'metadata',upload_metadata_json) FROM upload_items ORDER BY id").unwrap()
+            .query_map([], |row| row.get(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    fn saved_quota_pauses(connection: &Connection) -> Vec<String> {
+        connection.prepare("SELECT json_array('api',quota_scope,channel_id,pause_until,updated_at) AS receipt FROM api_quota_pauses UNION ALL SELECT json_array('channel',channel_id,channel_id,pause_until,updated_at) AS receipt FROM upload_quota_pauses ORDER BY receipt").unwrap()
+            .query_map([], |row| row.get(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    fn queue_detail(connection: &Connection) -> String {
+        connection
+            .query_row(
+                "SELECT detail FROM upload_items WHERE id='queued-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn native_replacement_refreshes_old_project_queue_detail_without_changing_recovery_or_holds() {
+        for with_channel_hold in [false, true] {
+            let (root, _state, mut connection) = fixture();
+            let deadline = deadlines(&connection);
+            if !with_channel_hold {
+                connection
+                    .execute("DELETE FROM upload_quota_pauses", [])
+                    .unwrap();
+            }
+            let stale_detail = api_pause_detail(&deadline);
+            connection.execute("UPDATE upload_items SET detail=?1,digest='retained-digest' WHERE id='queued-a'", [&stale_detail]).unwrap();
+            let evidence = quota_refresh_evidence(&connection);
+            let pauses = saved_quota_pauses(&connection);
+            let candidate = candidate(&connection);
+
+            promote(&mut connection, &candidate, "Verified replacement").unwrap();
+
+            assert_eq!(quota_refresh_evidence(&connection), evidence);
+            assert_eq!(saved_quota_pauses(&connection), pauses);
+            assert_eq!(active_api_pause(&connection).unwrap(), None);
+            let limits = limit_status(&connection, Some("channel-a")).unwrap();
+            if with_channel_hold {
+                assert_eq!(limits.kind, "channel_upload");
+                assert_eq!(queue_detail(&connection), limits.detail.unwrap());
+                assert_eq!(
+                    limits.channel_resumes_at.as_deref(),
+                    Some(deadline.as_str())
+                );
+            } else {
+                assert_eq!(limits.kind, "none");
+                assert_ne!(queue_detail(&connection), stale_detail);
+                assert!(queue_detail(&connection).contains("next upload check"));
+            }
+            assert_eq!(refresh_queued_limit_details(&connection).unwrap(), 0);
+            drop(connection);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_replacement_queue_detail_keeps_same_and_unknown_project_api_holds() {
+        for (old_project, new_project) in [
+            (Some("old-project"), Some("old-project")),
+            (Some("old-project"), None),
+            (None, Some("new-project")),
+            (None, None),
+        ] {
+            let (root, _state, mut connection) = fixture();
+            connection
+                .execute(
+                    "UPDATE connection_settings SET oauth_project_id=?1",
+                    [old_project],
+                )
+                .unwrap();
+            let original_scope = configured_quota_scope(&connection).unwrap();
+            let deadline = (Utc::now() + ChronoDuration::hours(24)).to_rfc3339();
+            connection.execute("INSERT INTO api_quota_pauses(quota_scope,channel_id,pause_until,updated_at) VALUES(?1,'channel-a',?2,?3)", params![original_scope,deadline,now()]).unwrap();
+            let stale_detail = api_pause_detail(&deadline);
+            connection.execute("UPDATE upload_items SET detail=?1,digest='retained-digest' WHERE id='queued-a'", [&stale_detail]).unwrap();
+            let evidence = quota_refresh_evidence(&connection);
+            let mut candidate = candidate(&connection);
+            candidate.project_id = new_project.map(str::to_string);
+            assert!(!candidate_different_project(&candidate));
+
+            promote(&mut connection, &candidate, "Same or unknown project").unwrap();
+
+            assert_eq!(
+                active_api_pause(&connection).unwrap().as_deref(),
+                Some(deadline.as_str())
+            );
+            assert_eq!(
+                limit_status(&connection, Some("channel-a")).unwrap().kind,
+                "api_quota"
+            );
+            assert_eq!(queue_detail(&connection), stale_detail);
+            assert_eq!(quota_refresh_evidence(&connection), evidence);
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT pause_until FROM api_quota_pauses WHERE quota_scope=?1",
+                        [&original_scope],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                deadline
+            );
+            assert_eq!(refresh_queued_limit_details(&connection).unwrap(), 0);
+            drop(connection);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_replacement_queue_detail_uses_existing_new_project_hold_and_keeps_all_pauses() {
+        let (root, _state, mut connection) = fixture();
+        let old_deadline = deadlines(&connection);
+        let new_deadline = (Utc::now() + ChronoDuration::hours(12)).to_rfc3339();
+        connection.execute("INSERT INTO api_quota_pauses(quota_scope,channel_id,pause_until,updated_at) VALUES('project:new-project','channel-a',?1,?2)", params![new_deadline,now()]).unwrap();
+        connection
+            .execute(
+                "UPDATE upload_items SET detail=?1 WHERE id='queued-a'",
+                [api_pause_detail(&old_deadline)],
+            )
+            .unwrap();
+        let evidence = quota_refresh_evidence(&connection);
+        let pauses = saved_quota_pauses(&connection);
+        let candidate = candidate(&connection);
+
+        promote(&mut connection, &candidate, "Verified replacement").unwrap();
+
+        assert_eq!(queue_detail(&connection), api_pause_detail(&new_deadline));
+        assert_eq!(quota_refresh_evidence(&connection), evidence);
+        assert_eq!(saved_quota_pauses(&connection), pauses);
+        assert_eq!(active_api_pause(&connection).unwrap(), Some(new_deadline));
+        assert_eq!(
+            active_upload_quota_pause(&connection).unwrap(),
+            Some(old_deadline)
+        );
+        assert_eq!(refresh_queued_limit_details(&connection).unwrap(), 0);
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_queue_quota_detail_refresh_rejects_malformed_active_hold_without_writes() {
+        for table in ["api", "channel"] {
+            let (root, _state, connection) = fixture();
+            let deadline = deadlines(&connection);
+            connection
+                .execute(
+                    "UPDATE upload_items SET detail=?1 WHERE id='queued-a'",
+                    [api_pause_detail(&deadline)],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE connection_settings SET oauth_project_id='new-project'",
+                    [],
+                )
+                .unwrap();
+            if table == "api" {
+                connection.execute("INSERT INTO api_quota_pauses(quota_scope,channel_id,pause_until,updated_at) VALUES('project:new-project','channel-a','invalid',?1)", [now()]).unwrap();
+            } else {
+                connection
+                    .execute("UPDATE upload_quota_pauses SET pause_until='invalid'", [])
+                    .unwrap();
+            }
+            let evidence = quota_refresh_evidence(&connection);
+            let pauses = saved_quota_pauses(&connection);
+            let detail = queue_detail(&connection);
+
+            assert!(refresh_queued_limit_details(&connection).is_err());
+
+            assert_eq!(quota_refresh_evidence(&connection), evidence);
+            assert_eq!(saved_quota_pauses(&connection), pauses);
+            assert_eq!(queue_detail(&connection), detail);
+            drop(connection);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_queue_quota_detail_refresh_repairs_prior_replacement_once_with_exact_scoped_text() {
+        let (root, _state, connection) = fixture();
+        let observed = Utc::now();
+        let reset = quota_planner::pacific_window(observed).unwrap().1;
+        let legacy_deadline = (observed + ChronoDuration::hours(24)).to_rfc3339();
+        let stale_detail = api_pause_detail(&legacy_deadline);
+        // An already-installed replacement has selected a new project, while
+        // housekeeping has corrected the retained old project's rolling hold.
+        connection.execute("INSERT INTO api_quota_pauses(quota_scope,channel_id,pause_until,updated_at) VALUES('project:old-project','channel-a',?1,?2)", params![reset,observed.to_rfc3339()]).unwrap();
+        connection.execute("UPDATE connection_settings SET oauth_client_id='new-client.apps.googleusercontent.com',oauth_project_id='new-project'", []).unwrap();
+        connection
+            .execute(
+                "UPDATE upload_items SET detail=?1,digest='retained-digest' WHERE id='queued-a'",
+                [&stale_detail],
+            )
+            .unwrap();
+        let lookalike = format!("{stale_detail} Additional untrusted text.");
+        for (id, channel, status, video, detail) in [
+            (
+                "foreign",
+                "channel-b",
+                "queued",
+                None,
+                stale_detail.as_str(),
+            ),
+            ("failed", "channel-a", "failed", None, stale_detail.as_str()),
+            (
+                "uncertain",
+                "channel-a",
+                "needs_reconciliation",
+                None,
+                stale_detail.as_str(),
+            ),
+            (
+                "receipt",
+                "channel-a",
+                "queued",
+                Some("confirmed-video"),
+                stale_detail.as_str(),
+            ),
+            (
+                "unrelated",
+                "channel-a",
+                "queued",
+                None,
+                "Waiting for original source verification.",
+            ),
+            ("lookalike", "channel-a", "queued", None, lookalike.as_str()),
+        ] {
+            connection.execute("INSERT INTO upload_items(id,title,file_name,channel_id,workspace_path,size_bytes,status,total_bytes,video_id,detail,created_at,updated_at) VALUES(?1,'Retained item','original.mp4',?2,'retained-source',1000,?3,1000,?4,?5,?6,?6)", params![id,channel,status,video,detail,now()]).unwrap();
+        }
+        let excluded_details = |connection: &Connection| -> Vec<String> {
+            connection.prepare("SELECT json_array(id,detail,updated_at) FROM upload_items WHERE id!='queued-a' ORDER BY id").unwrap()
+                .query_map([], |row| row.get(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        let evidence = quota_refresh_evidence(&connection);
+        let pauses = saved_quota_pauses(&connection);
+        let excluded = excluded_details(&connection);
+
+        assert_eq!(refresh_queued_limit_details(&connection).unwrap(), 1);
+        assert_eq!(refresh_queued_limit_details(&connection).unwrap(), 0);
+
+        assert_eq!(quota_refresh_evidence(&connection), evidence);
+        assert_eq!(saved_quota_pauses(&connection), pauses);
+        assert_eq!(excluded_details(&connection), excluded);
+        assert_ne!(queue_detail(&connection), stale_detail);
+        assert_eq!(
+            limit_status(&connection, Some("channel-a")).unwrap().kind,
+            "none"
+        );
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1288,6 +1633,13 @@ mod tests {
         let (root, _state, mut connection) = fixture();
         let evidence = upload_evidence(&connection);
         let deadline = deadlines(&connection);
+        connection
+            .execute(
+                "UPDATE upload_items SET detail=?1 WHERE id='queued-a'",
+                [api_pause_detail(&deadline)],
+            )
+            .unwrap();
+        let receipt = postprocess_receipt(&connection);
         let candidate = candidate(&connection);
         connection.execute_batch("CREATE TRIGGER fail_replacement_audit BEFORE INSERT ON audit_events WHEN NEW.kind = 'oauth_client_replaced_same_channel' BEGIN SELECT RAISE(ABORT, 'fixture commit failure'); END;").unwrap();
         assert!(promote(&mut connection, &candidate, "Must roll back").is_err());
@@ -1297,6 +1649,7 @@ mod tests {
         );
         assert_eq!(active_credential_bundle(&connection).unwrap(), None);
         assert_eq!(upload_evidence(&connection), evidence);
+        assert_eq!(postprocess_receipt(&connection), receipt);
         assert_eq!(active_api_pause(&connection).unwrap(), Some(deadline));
         drop(connection);
         fs::remove_dir_all(root).unwrap();

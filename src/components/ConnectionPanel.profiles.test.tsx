@@ -1,9 +1,14 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { ConnectionPanel, deliverReviewedProfileSettings, profileDialogScope } from "./ConnectionPanel";
+import { ConnectionPanel, deliverReviewedProfileSettings, profileDialogScope, retainedChannelLimit } from "./ConnectionPanel";
 import type { ConnectionSettings } from "../lib/types";
 
 describe("account entry for saved channel profiles", () => {
+  it("removes a previous project's projection while retaining independent channel pauses after JSON replacement", () => {
+    expect(retainedChannelLimit({ kind: "api_quota", resumesAt: "old-project-retry" })).toEqual({ kind: "none" });
+    expect(retainedChannelLimit({ kind: "api_quota", resumesAt: "old-project-retry", channelResumesAt: "channel-retry" })).toEqual({ kind: "channel_upload", resumesAt: "channel-retry" });
+    expect(retainedChannelLimit({ kind: "channel_upload", resumesAt: "channel-retry" })).toEqual({ kind: "channel_upload", resumesAt: "channel-retry" });
+  });
   it("exposes the profile entry on a disconnected device while preserving existing account setup", () => {
     const markup = renderToStaticMarkup(<ConnectionPanel />);
     for (const text of ["Saved channel profiles", "Connect YouTube", "Import Desktop OAuth JSON", "Refresh connection", "YouTube is not connected"]) expect(markup).toContain(text);

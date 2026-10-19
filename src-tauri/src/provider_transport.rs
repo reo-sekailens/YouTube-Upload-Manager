@@ -17,6 +17,60 @@ const UPLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const UPLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const IDLE_POOL_TIMEOUT: Duration = Duration::from_secs(90);
 const ACCESS_TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(60);
+const INVALID_UPLOAD_URI_DETAIL: &str =
+    "The saved YouTube upload endpoint is invalid; its protected checkpoint was retained.";
+
+/// Saved resumable URLs are external input. Bearer credentials may only be
+/// attached to the official HTTPS Google upload endpoints on their standard port.
+pub(crate) fn validate_youtube_upload_uri(session_uri: &str) -> Result<(), String> {
+    let invalid = || INVALID_UPLOAD_URI_DETAIL.to_string();
+    if session_uri.trim() != session_uri || session_uri.chars().any(char::is_control) {
+        return Err(invalid());
+    }
+    let parsed = url::Url::parse(session_uri).map_err(|_| invalid())?;
+    if parsed.scheme() != "https"
+        || !matches!(
+            parsed.host_str(),
+            Some("www.googleapis.com" | "youtube.googleapis.com")
+        )
+        || parsed.port_or_known_default() != Some(443)
+        || !parsed.path().starts_with("/upload/")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Production uses the strict validator above. Native HTTP fixtures may target
+/// a numeric loopback listener without weakening the persisted-URL boundary.
+pub(crate) fn validate_youtube_upload_request_uri(session_uri: &str) -> Result<(), String> {
+    let result = validate_youtube_upload_uri(session_uri);
+    #[cfg(test)]
+    if result.is_err()
+        && session_uri.trim() == session_uri
+        && !session_uri.chars().any(char::is_control)
+    {
+        if let Ok(parsed) = url::Url::parse(session_uri) {
+            let loopback = parsed.host().is_some_and(|host| match host {
+                url::Host::Ipv4(address) => address == std::net::Ipv4Addr::LOCALHOST,
+                url::Host::Ipv6(address) => address == std::net::Ipv6Addr::LOCALHOST,
+                url::Host::Domain(_) => false,
+            });
+            if parsed.scheme() == "http"
+                && loopback
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+                && parsed.fragment().is_none()
+            {
+                return Ok(());
+            }
+        }
+    }
+    result
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum AccessTokenKind {
@@ -132,7 +186,11 @@ impl LazyClient {
         }
         let mut builder = Client::builder()
             .pool_idle_timeout(IDLE_POOL_TIMEOUT)
-            .pool_max_idle_per_host(8);
+            .pool_max_idle_per_host(8)
+            // Google API responses are consumed at their original endpoint.
+            // Never forward native bearer credentials to a redirect target;
+            // resumable 308 responses must remain visible to the upload loop.
+            .redirect(reqwest::redirect::Policy::none());
         builder = match self.policy {
             ClientPolicy::Control => builder
                 .connect_timeout(CONTROL_CONNECT_TIMEOUT)
@@ -256,6 +314,62 @@ impl ProviderTransport {
         expected_signature: Option<&(u64, String)>,
         cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<Response, String> {
+        self.put_upload_chunk_with_client_and_controls_inner(
+            client,
+            session_uri,
+            None,
+            path,
+            offset,
+            bytes,
+            total_bytes,
+            expected_signature,
+            cancelled,
+        )
+    }
+
+    /// Google requires authorization on every resumable request, including
+    /// resumed byte ranges. The token stays in the native request only.
+    pub(crate) fn put_upload_chunk_with_client_and_controls_authorized(
+        &self,
+        client: &Client,
+        session_uri: &str,
+        access_token: &str,
+        path: &Path,
+        offset: u64,
+        bytes: u64,
+        total_bytes: u64,
+        expected_signature: Option<&(u64, String)>,
+        cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<Response, String> {
+        validate_youtube_upload_request_uri(session_uri)?;
+        if access_token.is_empty() {
+            return Err("YouTube upload authorization is unavailable. Reconnect the channel before retrying.".into());
+        }
+        self.put_upload_chunk_with_client_and_controls_inner(
+            client,
+            session_uri,
+            Some(access_token),
+            path,
+            offset,
+            bytes,
+            total_bytes,
+            expected_signature,
+            cancelled,
+        )
+    }
+
+    fn put_upload_chunk_with_client_and_controls_inner(
+        &self,
+        client: &Client,
+        session_uri: &str,
+        access_token: Option<&str>,
+        path: &Path,
+        offset: u64,
+        bytes: u64,
+        total_bytes: u64,
+        expected_signature: Option<&(u64, String)>,
+        cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<Response, String> {
         if bytes == 0 || offset.saturating_add(bytes) > total_bytes {
             return Err("The resumable upload chunk range is invalid.".into());
         }
@@ -297,11 +411,15 @@ impl ProviderTransport {
             std::io::Cursor::new(body),
             cancelled.clone(),
         );
-        client
+        let mut request = client
             .put(session_uri)
             .header(CONTENT_LENGTH, bytes)
             .header(CONTENT_TYPE, "application/octet-stream")
-            .header(CONTENT_RANGE, format!("bytes {offset}-{end}/{total_bytes}"))
+            .header(CONTENT_RANGE, format!("bytes {offset}-{end}/{total_bytes}"));
+        if let Some(access_token) = access_token {
+            request = request.bearer_auth(access_token);
+        }
+        request
             .body(reqwest::blocking::Body::sized(reader, bytes))
             .send()
             .map_err(|_| {
@@ -492,6 +610,226 @@ mod tests {
         assert_eq!(transport.client_builds.load(Ordering::Relaxed), 1);
         server.join().unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn read_mock_request(stream: &mut std::net::TcpStream) -> (String, Vec<u8>) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        let header_end = loop {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(index) = request.windows(4).position(|value| value == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = String::from_utf8(request[..header_end].to_vec())
+            .unwrap()
+            .to_ascii_lowercase();
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .map(|value| value.parse::<usize>().unwrap())
+            .unwrap_or(0);
+        while request.len() - header_end < content_length {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&buffer[..read]);
+        }
+        (headers, request[header_end..].to_vec())
+    }
+
+    #[test]
+    fn authorized_chunk_sends_bearer_and_exact_original_range_without_following_redirects() {
+        let root = std::env::temp_dir().join(format!(
+            "youtube-uploader-authorized-chunk-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let media = root.join("original.bin");
+        let original_bytes = (0..3 * 256 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        fs::write(&media, &original_bytes).unwrap();
+        let signature =
+            super::super::monitored_file_signature(&fs::metadata(&media).unwrap()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_mock_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 308 Permanent Redirect\r\nRange: bytes=0-524287\r\nLocation: http://{address}/must-not-be-followed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            request
+        });
+        let transport = ProviderTransport::new();
+        let client = transport.upload_client().unwrap();
+        let response = transport
+            .put_upload_chunk_with_client_and_controls_authorized(
+                &client,
+                &format!("http://{address}/session"),
+                "fixture-only-access-token",
+                &media,
+                256 * 1024,
+                256 * 1024,
+                original_bytes.len() as u64,
+                Some(&signature),
+                Arc::new(|| false),
+            )
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 308);
+        assert_eq!(response.headers().get("range").unwrap(), "bytes=0-524287");
+        let (headers, body) = server.join().unwrap();
+        assert!(headers.starts_with("put /session http/1.1\r\n"));
+        assert!(headers.contains("authorization: bearer fixture-only-access-token\r\n"));
+        assert!(headers.contains("content-range: bytes 262144-524287/786432\r\n"));
+        assert!(headers.contains("content-length: 262144\r\n"));
+        assert_eq!(body, original_bytes[256 * 1024..512 * 1024]);
+        assert_eq!(fs::read(&media).unwrap(), original_bytes);
+        let entries = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![std::ffi::OsString::from("original.bin")]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn control_client_does_not_redirect_bearer_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_mock_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{address}/must-not-be-followed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            request
+        });
+        let response = ProviderTransport::new()
+            .control_client()
+            .unwrap()
+            .put(format!("http://{address}/status"))
+            .bearer_auth("fixture-only-access-token")
+            .header(CONTENT_LENGTH, 0)
+            .header(CONTENT_RANGE, "bytes */786432")
+            .send()
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 307);
+        let (headers, body) = server.join().unwrap();
+        assert!(headers.contains("authorization: bearer fixture-only-access-token\r\n"));
+        assert!(headers.contains("content-range: bytes */786432\r\n"));
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn production_upload_uri_validator_accepts_only_official_https_upload_endpoints() {
+        for uri in [
+            "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&upload_id=fixture",
+            "https://youtube.googleapis.com/upload/youtube/v3/videos?upload_id=fixture",
+            "https://www.googleapis.com:443/upload/youtube/v3/videos?upload_id=fixture",
+            "https://WWW.GOOGLEAPIS.COM/upload/youtube/v3/videos?upload_id=fixture",
+        ] {
+            assert_eq!(validate_youtube_upload_uri(uri), Ok(()));
+        }
+        for uri in [
+            "",
+            "not-a-uri",
+            "http://www.googleapis.com/upload/youtube/v3/videos",
+            "ftp://www.googleapis.com/upload/youtube/v3/videos",
+            "http://127.0.0.1:45000/upload/youtube/v3/videos",
+            "http://[::1]:45000/upload/youtube/v3/videos",
+            "https://127.0.0.1/upload/youtube/v3/videos",
+            "https://www.googleapis.com.attacker.invalid/upload/youtube/v3/videos",
+            "https://attacker.invalid/upload/youtube/v3/videos",
+            "https://googleapis.com/upload/youtube/v3/videos",
+            "https://www.googleapis.com./upload/youtube/v3/videos",
+            "https://www.googleapis.com:444/upload/youtube/v3/videos",
+            "https://www.googleapis.com/youtube/v3/videos",
+            "https://www.googleapis.com/upload",
+            "https://www.googleapis.com/upload/../youtube/v3/videos",
+            "https://fixture-user@www.googleapis.com/upload/youtube/v3/videos",
+            "https://:fixture-password@www.googleapis.com/upload/youtube/v3/videos",
+            "https://www.googleapis.com/upload/youtube/v3/videos#fixture-fragment",
+            "https://www.googleapis.com/upload/youtube/v3/videos#",
+            " https://www.googleapis.com/upload/youtube/v3/videos",
+            "https://www.googleapis.com/upload/youtube/v3/videos\n",
+        ] {
+            assert_eq!(
+                validate_youtube_upload_uri(uri),
+                Err(INVALID_UPLOAD_URI_DETAIL.to_string()),
+                "Invalid fixture URI was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn request_uri_loopback_exception_exists_only_for_numeric_http_fixtures() {
+        for uri in [
+            "http://127.0.0.1:45000/session",
+            "http://[::1]:45000/session",
+        ] {
+            assert!(validate_youtube_upload_uri(uri).is_err());
+            assert!(validate_youtube_upload_request_uri(uri).is_ok());
+        }
+        for uri in [
+            "http://localhost:45000/session",
+            "http://127.0.0.2:45000/session",
+            "https://127.0.0.1:45000/session",
+            "http://fixture-user@127.0.0.1:45000/session",
+            "http://127.0.0.1:45000/session#fragment",
+        ] {
+            assert!(validate_youtube_upload_request_uri(uri).is_err());
+        }
+    }
+
+    #[test]
+    fn authorized_chunk_rejects_external_host_before_opening_original_or_sending_token() {
+        let transport = ProviderTransport::new();
+        let error = transport
+            .put_upload_chunk_with_client_and_controls_authorized(
+                &transport.upload_client().unwrap(),
+                "https://attacker.invalid/upload/youtube/v3/videos?upload_id=fixture-private-session",
+                "fixture-private-access-token",
+                Path::new("unused-original-that-must-not-be-opened"),
+                0,
+                1,
+                1,
+                None,
+                Arc::new(|| false),
+            )
+            .unwrap_err();
+        assert_eq!(error, INVALID_UPLOAD_URI_DETAIL);
+        assert!(!error.contains("attacker.invalid"));
+        assert!(!error.contains("fixture-private-session"));
+        assert!(!error.contains("fixture-private-access-token"));
+    }
+
+    #[test]
+    fn authorized_chunk_rejects_missing_token_before_opening_original() {
+        let transport = ProviderTransport::new();
+        let error = transport
+            .put_upload_chunk_with_client_and_controls_authorized(
+                &transport.upload_client().unwrap(),
+                "http://127.0.0.1:9/unused-session",
+                "",
+                Path::new("unused-original"),
+                0,
+                1,
+                1,
+                None,
+                Arc::new(|| false),
+            )
+            .unwrap_err();
+        assert!(error.contains("upload authorization is unavailable"));
     }
 
     #[test]

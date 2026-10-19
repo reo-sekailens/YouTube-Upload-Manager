@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ConnectionSettings } from "./types";
+import { useProviderConnectionScope } from "./provider-connection";
 
 /** A late read or completion must never update a different workspace scope. */
 export function createWorkspaceRequestFence(initialScope?: string) {
@@ -21,11 +22,26 @@ export function createWorkspaceRequestFence(initialScope?: string) {
   };
 }
 
-export function useWorkspaceRequestFence(scope?: string) {
-  const fence = useRef<ReturnType<typeof createWorkspaceRequestFence> | null>(null);
-  if (!fence.current) fence.current = createWorkspaceRequestFence(scope);
-  fence.current.setScope(scope);
-  const current = fence.current;
+/** Retain reads on ordinary refreshes, and replace their owner after credential promotion. */
+export function createWorkspaceFenceBinding() {
+  let connectionScope: string | undefined;
+  let fence: ReturnType<typeof createWorkspaceRequestFence> | undefined;
+  return (scope: string | undefined, nextConnectionScope: string) => {
+    if (!fence || connectionScope !== nextConnectionScope) {
+      fence?.invalidate();
+      connectionScope = nextConnectionScope;
+      fence = createWorkspaceRequestFence(scope);
+    }
+    fence.setScope(scope);
+    return fence;
+  };
+}
+
+export function useWorkspaceRequestFence(scope?: string, connectionBound = true) {
+  const connectionScope = useProviderConnectionScope();
+  const binding = useRef<ReturnType<typeof createWorkspaceFenceBinding> | null>(null);
+  if (!binding.current) binding.current = createWorkspaceFenceBinding();
+  const current = binding.current(scope, connectionBound ? connectionScope : "");
   useEffect(() => () => current.invalidate(), [current]);
   return current;
 }

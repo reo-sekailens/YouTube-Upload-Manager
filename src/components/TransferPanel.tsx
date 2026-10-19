@@ -14,7 +14,8 @@ export function TransferPanel({ onConnectionChange, onNotice }: TransferPanelPro
   const [receipt, setReceipt] = useState<PortableArchiveReceipt>();
   const [error, setError] = useState("");
   const running = useRef(false);
-  const fence = useWorkspaceRequestFence("device-transfer");
+  // Device transfer can import the configuration that changes the connection revision itself.
+  const fence = useWorkspaceRequestFence("device-transfer", false);
   const run = async (operation: (current: () => boolean) => Promise<void>) => {
     if (running.current) return;
     running.current = true;
